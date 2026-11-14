@@ -1,0 +1,2 @@
+# Preserve patch bytes and their significant context-line whitespace.
+host-patches/*.patch -text -whitespace

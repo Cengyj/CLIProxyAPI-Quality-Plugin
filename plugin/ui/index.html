@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer"><title>Model Quality · 模型质量控制台</title>
+  <link rel="stylesheet" href="./style.css"><script type="module" src="./app.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">跳到工作区</a>
+<header class="app-header">
+  <a class="brand" href="#manual" aria-label="Model Quality 首页"><svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 20V8l6 7 4-5 4 5 6-7v12M4 24h20"/></svg><span>Model Quality</span></a>
+  <nav class="primary-nav" aria-label="主导航"><button data-page="manual" class="active">手动评测</button><button data-page="operations">质量运维</button></nav>
+  <div class="header-actions"><button id="theme-toggle" class="subtle" aria-label="切换主题" title="切换深色主题">浅色</button><button id="connection-top" class="connection-button"><span class="connection-dot" aria-hidden="true"></span><span id="connection-state">未连接</span><span class="connection-label">管理连接</span></button></div>
+</header>
+<main id="main" class="workspace" tabindex="-1">
+  <div class="workspace-meta"><span>模型质量控制台 <span class="meta-divider">/</span> <span id="page-crumb">手动评测</span></span><div><span id="data-state" class="stale">管理接口未连接</span><button class="text-button" id="refresh">刷新数据</button></div></div>
+  <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+  <section id="connect-banner" class="connect-banner"><div><h2>连接 CPA，开始审阅模型质量</h2><p>使用管理密钥读取凭证与任务。连接和保存配置不会调用模型。</p></div><button id="connection-open" class="primary">连接管理接口</button></section>
+  <section id="page-manual" aria-labelledby="manual-title">
+    <div class="page-heading"><div><h1 id="manual-title">手动评测</h1><p>固定条件，比较回答。评测与人工评审不会自动暂停或解除凭证。</p></div><button id="new-evaluation" class="subtle hidden" data-manual-view="setup">新建评测</button></div>
+    <nav class="view-nav" aria-label="评测工作区"><button data-manual-view="setup" class="active">配置评测</button><button data-manual-view="results">当前任务 <span id="task-indicator"></span></button><button data-manual-view="history">任务历史 <span id="history-count"></span></button></nav>
+    <section id="manual-setup" class="setup-card" aria-label="配置评测">
+      <details id="preset-tools" class="preset-tools"><summary>使用或保存预设 <span>复用条件，不执行模型</span></summary><div class="preset-row"><label>已保存预设<select id="preset"><option value="">选择预设，不执行</option></select></label><div class="button-row"><button type="button" class="subtle" id="preset-apply">载入预设</button><button type="button" class="text-button" id="preset-save">保存当前配置</button><button type="button" class="text-button" id="preset-delete">删除预设</button></div></div></details>
+      <form id="run-form">
+        <div class="configuration-grid">
+          <section class="form-section"><div class="section-heading"><h2>目标与模型</h2><p>一份凭证，多个模型。每个样本独立执行。</p></div>
+            <label>目标凭证<select id="target" required><option value="">连接后选择凭证</option></select></label>
+            <div id="target-summary" class="target-summary">仅显示脱敏标识；选定凭证后加载可用模型。</div>
+            <label>检测模型 <small>每行一个，最多 8 个</small><textarea id="models" rows="3" required maxlength="1600" placeholder="选择下方模型，或输入模型 ID"></textarea></label>
+            <div id="model-chips" class="chips" aria-label="可选模型"></div>
+          </section>
+          <section class="form-section"><div class="section-heading"><h2>题目与标准</h2><p>内置题保留版本，自定义题同时冻结参考标准。</p></div>
+            <label>题目<select id="question"><option value="">连接后加载题库</option></select></label>
+            <label>题面 <small id="question-version">版本未知</small><textarea id="prompt" rows="5" maxlength="16000" readonly placeholder="选择题目后显示内容"></textarea></label>
+            <p id="prompt-note" class="field-note">内置题面不可编辑；选择自定义题目可输入新题。</p>
+            <label id="review-standard-field" class="hidden">参考标准 / 参考答案 <small>不发给被测模型</small><textarea id="review-standard" rows="3" maxlength="4096" placeholder="记录用于人工评审或独立判题的依据"></textarea></label>
+            <div id="control-fields" class="hidden"><label>通过对照凭证（可选）<select id="control-target"><option value="">不选择：仅观察</option></select></label><p class="field-note">随机题的自动判定需要另一凭证同批、同条件明确通过。对照另计调用预算。</p></div>
+          </section>
+        </div>
+        <section class="execution-section"><div class="section-heading"><h2>执行参数</h2><p>按需调整采样与判题。</p></div><div class="execution-fields"><div class="field-row"><label>每模型样本数<input id="samples" type="number" min="1" max="8" value="1" required></label><label>输出上限（token）<input id="max-tokens" type="number" min="64" max="32768" value="2048" required></label></div>
+          <details class="advanced"><summary>推理与判题设置 <span id="judge-summary">确定性判题 · 默认推理</span></summary><div class="field-row"><label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="0"></label><label>推理强度<select id="reasoning"><option value="">默认 / 未指定</option><option>none</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option></select></label><label>判题方式<select id="judge-mode"><option value="deterministic">题型专用确定性判题</option><option value="manual">仅人工评审</option><option value="llm">独立模型判题</option></select></label></div><div id="judge-fields" class="hidden"><div class="field-row"><label>判题凭证<select id="judge-target"><option value="">选择独立凭证</option></select></label><label>判题模型<input id="judge-model" maxlength="200"></label></div><p class="field-note">须与被测凭证不同；独立判题另计预算，失败记为无法判断。</p></div></details>
+        </div></section>
+        <div class="submit-bar"><div><strong id="run-plan">选择模型后确认执行计划</strong><p id="run-admission" class="field-note">请先连接管理接口。</p></div><button class="primary" type="submit" id="run-submit" disabled>开始评测</button></div>
+      </form>
+    </section>
+    <section id="manual-results" class="hidden" aria-label="当前任务">
+      <div class="result-heading"><div><h2>回答与证据</h2><p id="run-subtitle">执行、判定与处置分别记录。</p></div><div class="button-row"><button id="run-rerun" class="subtle small hidden">同配置重跑</button><button id="run-export" class="subtle small hidden">脱敏导出</button><button id="run-cancel" class="danger small hidden">取消任务</button></div></div>
+      <div id="run-empty" class="empty-state"><h3>选择一项任务，开始审阅</h3><p>新建评测收集回答，或从任务历史打开已有证据。</p><div class="button-row"><button class="primary" data-manual-view="setup">配置新评测</button><button class="subtle" data-manual-view="history">查看历史</button></div></div>
+      <div id="run-content" class="hidden"><div id="run-meta" class="run-meta" role="status" aria-live="polite"></div><div class="progress-track" role="progressbar" aria-label="已结束样本进度" aria-valuemin="0" aria-valuemax="100"><div id="run-progress"></div></div>
+        <details id="run-frozen" class="frozen-details"><summary>本轮冻结条件 <span>题目、模型、参数与判据</span></summary><div id="run-frozen-data"></div></details>
+        <div class="comparison-toolbar"><div class="model-selectors"><label>查看模型<select id="compare-model-a"></select></label><label>对比模型<select id="compare-model-b"></select></label></div><label>样本<select id="sample-filter"><option value="all">全部样本</option></select></label><span class="field-note">执行完成 ≠ 回答正确</span></div><div id="sample-list" class="sample-list"></div>
+      </div>
+    </section>
+    <section id="manual-history" class="hidden" aria-label="任务历史"><div class="section-heading heading-row"><div><h2>任务历史</h2><p>打开记录可查看冻结条件、回答和评审。</p></div><span id="history-total">0 个任务</span></div><div id="history-list" class="history-list"><p class="empty-line">连接管理接口后查看历史。</p></div><div class="pagination"><button class="subtle small" id="history-prev" disabled>上一页</button><span id="history-page">第 1 页</span><button class="subtle small" id="history-next" disabled>下一页</button></div></section>
+  </section>
+  <section id="page-operations" class="hidden" aria-labelledby="operations-title">
+    <div class="page-heading"><div><h1 id="operations-title">质量运维</h1><p>模型结果提供证据。质量暂停限制整个凭证所有模型的新业务执行。</p></div><button class="subtle" id="settings-open">全局开关与预算</button></div>
+    <div id="operations-main"><nav class="view-nav" aria-label="质量运维工作区"><button data-ops-view="attention" class="active">需要关注 <span id="attention-count"></span></button><button data-ops-view="rules">检测规则 <span id="rule-count"></span></button><button data-ops-view="activity">审计记录</button></nav>
+      <section id="ops-attention"><div class="section-heading"><h2>暂停归属与待处理动作</h2><p>暂停后禁止所有评测，包括作为对照或判题凭证。只有人工解除可释放匹配归属。</p></div><div id="actions-list" class="actions-list"><p class="empty-line">连接后核对宿主保存的暂停归属。</p></div>
+        <div class="section-heading"><h2>凭证限制</h2><p>人工禁用、质量暂停与原生冷却分别生效。列表缺项不表示暂停已解除。</p></div><div class="table-scroll"><table class="target-table"><thead><tr><th>凭证</th><th>人工禁用</th><th>质量暂停</th><th>有效状态 / 原因</th><th>能力边界</th></tr></thead><tbody id="targets-list"></tbody></table></div>
+        <section class="statistics"><div class="section-heading"><h2>质量与覆盖</h2><p>仅完整、可比较、明确答错的证据推进失败判定；执行异常不计为答错。</p></div><div id="metrics" class="metrics-grid"></div><p id="metrics-detail" class="field-note"></p><details><summary>查看统计口径</summary><p>质量通过率 = 正确样本 / 可判定样本。覆盖率 = 完整可判定样本 / 计划样本。网络、鉴权、限流、截断、拒答、取消和判题失败不计为质量答错。缺失 usage 保持未知。</p></details></section>
+      </section>
+      <section id="ops-rules" class="hidden"><div class="section-heading heading-row"><div><h2>检测规则</h2><p>保存不会执行。调度与自动暂停需要全局和规则两层分别许可。</p></div><button class="primary" id="rule-new">新建规则</button></div><div class="table-scroll"><table class="rules-table"><thead><tr><th>规则 / 目标</th><th>检测与处置</th><th>调度</th><th>连续失败证据</th><th>操作</th></tr></thead><tbody id="rules-list"></tbody></table></div><p class="field-note">暂停检测规则只停止后续检测，不解除已有凭证暂停。解除后仍须显式恢复规则。</p></section>
+      <section id="ops-activity" class="hidden"><div class="section-heading"><h2>审计记录</h2><p>核对检测、暂停和人工解除的持久化记录。</p></div><div id="operations-audit" class="history-list"></div><h3 class="subsection-title">近期规则运行</h3><div id="operations-history" class="history-list"></div></section>
+    </div>
+    <section id="rule-dialog" class="inline-editor hidden" aria-label="检测规则编辑"><form id="rule-form">
+        <div class="dialog-heading editor-heading">
+          <h2 id="rule-dialog-title">新建检测规则</h2>
+          <button class="icon-button" type="button" data-close="rule-dialog" aria-label="关闭规则编辑">关闭</button>
+        </div>
+        <div class="editor-grid"><section class="editor-section"><h3>检测对象与题目</h3><input type="hidden" id="rule-id" /><input type="hidden" id="rule-revision" /><label
+          >规则名称<input id="rule-name" required maxlength="100" /></label
+        ><label>目标凭证<select id="rule-target" required></select></label>
+        <div class="field-row">
+          <label
+            >检测模型<textarea
+              id="rule-models"
+              required
+              rows="2"
+              placeholder="每行一个模型"
+            ></textarea></label
+          ><label>题目<select id="rule-question"></select></label>
+        </div>
+        <label id="rule-control-fields" class="hidden"
+          >通过对照凭证（随机题可选）<select id="rule-control-target">
+            <option value="">不选择：仅观察</option></select
+          ><small>无有效对照，不触发自动处置</small></label
+        >
+        <p class="field-note">全部失败仅指所选检测模型，不代表已验证该凭证所有可用模型。</p>
+        <div class="field-row">
+          <label
+            >每模型样本数<input id="rule-samples" type="number" min="1" max="8" value="1" required /></label
+          ><label
+            >输出上限<input
+              id="rule-max-tokens"
+              type="number"
+              min="64"
+              max="32768"
+              value="2048"
+              required /></label
+          ><label
+            >处置<select id="rule-action">
+              <option value="observe_only">只观察</option>
+              <option value="pause_credential">暂停整个凭证</option>
+            </select></label
+          >
+        </div>
+        </section><section class="editor-section"><h3>处置与调度</h3><div class="scope-banner compact">
+          <div>
+            凭证暂停覆盖所有模型的新业务请求。默认连续 3
+            个完整失败轮次暂停；未知结果打断连续计数。暂停后停止所有检测，不再复测，仅管理员人工解除。
+          </div>
+        </div>
+        <div class="switch-grid">
+          <label class="check"
+            ><input id="rule-enabled" type="checkbox" checked /><span>启用检测规则</span></label
+          ><label class="check"><input id="rule-scheduling" type="checkbox" /><span>启用定时检测</span></label
+          ><label class="check"
+            ><input id="rule-auto-pause" type="checkbox" /><span>允许自动暂停凭证</span></label
+          >
+        </div>
+        <div class="field-row">
+          <label
+            >固定间隔（秒）<input
+              id="rule-interval"
+              type="number"
+              min="60"
+              max="2678400"
+              value="3600" /></label
+          ><label>五段 Cron（可选）<input id="rule-cron" placeholder="0 * * * *" maxlength="100" /></label
+          ><label>时区<input id="rule-timezone" value="Asia/Shanghai" required /></label>
+        </div>
+        <div class="field-row">
+          <label
+            >连续失败门槛<input id="rule-fail" type="number" min="1" max="100" value="3" required /></label
+          ><label
+            >保留天数<input id="rule-retention" type="number" min="1" max="365" value="30" required
+          /></label>
+        </div>
+        </section><section class="editor-section editor-wide"><details class="advanced">
+          <summary>推理与判题设置</summary>
+          <div class="field-row">
+            <label
+              >Temperature<input
+                id="rule-temperature"
+                type="number"
+                min="0"
+                max="2"
+                step="0.1"
+                value="0" /></label
+            ><label
+              >Reasoning<select id="rule-reasoning">
+                <option value="">默认 / 未指定</option>
+                <option>none</option>
+                <option>low</option>
+                <option>medium</option>
+                <option>high</option>
+                <option>xhigh</option>
+              </select></label
+            >
+          </div>
+          <label
+            >自定义题面<textarea
+              id="rule-prompt"
+              rows="3"
+              maxlength="16000"
+              placeholder="仅自定义题目使用"
+            ></textarea></label
+          ><label
+            >自定义人工标准 / 参考答案<textarea
+              id="rule-review-standard"
+              rows="2"
+              maxlength="4096"
+              placeholder="不会发送给被测模型；仅人工或独立判题使用"
+            ></textarea></label
+          ><label
+            >判题<select id="rule-judge-mode">
+              <option value="deterministic">确定性判题</option>
+              <option value="manual">仅人工评审</option>
+              <option value="llm">独立模型判题</option>
+            </select></label
+          >
+          <div class="field-row">
+            <label>判题凭证<select id="rule-judge-target"></select></label
+            ><label>判题模型<input id="rule-judge-model" maxlength="200" /></label>
+          </div>
+        </details>
+        </section></div><p id="rule-hold-note" class="field-note hidden">
+          该规则正等待人工解除凭证暂停，不能通过编辑重新启用检测。
+        </p>
+        <p class="field-note">编辑持有暂停的规则时保留原动作归属。请先解除自身暂停，再删除规则或更换目标。</p>
+        <div class="button-row end editor-footer">
+          <button type="button" class="subtle" data-close="rule-dialog">取消</button
+          ><button class="primary" type="submit">保存规则，不执行</button>
+        </div>
+      </form></section>
+    <section id="settings-dialog" class="inline-editor hidden" aria-label="全局开关与资源预算"><form id="settings-form">
+        <div class="dialog-heading">
+          <h2>全局开关与资源预算</h2>
+          <button class="icon-button" type="button" data-close="settings-dialog" aria-label="关闭预算编辑">关闭</button>
+        </div>
+        <p>全局许可与每条规则的许可同时生效。保存配置不触发模型调用。</p>
+        <div class="switch-grid">
+          <label class="check"><input id="settings-scheduling" type="checkbox" /><span>定时检测</span></label
+          ><label class="check"
+            ><input id="settings-auto-pause" type="checkbox" /><span>自动暂停</span></label
+          >
+        </div>
+        <div id="settings-fields" class="field-grid"></div>
+        <div class="button-row end">
+          <button type="button" class="subtle" data-close="settings-dialog">取消</button
+          ><button class="primary" type="submit">保存配置</button>
+        </div>
+      </form></section>
+  </section>
+  <footer><span>Model Quality · 原生插件</span><span>质量通过率不是通用 IQ 分数 · 时间按本地时区显示</span></footer>
+</main>
+<dialog aria-labelledby="connection-title" id="connection-dialog">
+      <form id="connection-form">
+        <div class="dialog-heading">
+          <h2 id="connection-title">连接管理接口</h2>
+          <button type="button" class="icon-button" data-close="connection-dialog" aria-label="关闭">
+            关闭
+          </button>
+        </div>
+        <p>沿用 CPA 管理鉴权和远程访问策略。管理密钥仅保存在当前页面内存，刷新页面后清除。</p>
+        <label
+          >管理密钥<input
+            id="management-key"
+            type="password"
+            autocomplete="off"
+            required
+            placeholder="输入管理密钥"
+        /></label>
+        <div class="button-row end">
+          <button type="button" class="subtle" id="disconnect">断开</button
+          ><button class="primary" type="submit">连接</button>
+        </div>
+      </form>
+    </dialog>
+<dialog aria-labelledby="evidence-title" id="evidence-dialog" class="wide-dialog"><div class="dialog-heading"><h2 id="evidence-title">样本条件与证据</h2><button class="subtle" data-close="evidence-dialog">关闭</button></div><div id="evidence-content"></div></dialog>
+<dialog aria-labelledby="release-title" id="release-dialog" class="release-dialog"><div class="dialog-heading"><h2 id="release-title">人工解除质量暂停</h2><button class="subtle" data-close="release-dialog">关闭</button></div><p>只释放身份、归属与动作版本匹配的暂停。</p><div id="release-feedback" class="notice hidden" role="status" aria-live="polite"></div><div id="release-preview"></div><div class="release-consequence"><strong>解除后，相关规则继续停止</strong><p>旧失败计数清零。人工禁用、原生冷却和其他归属的限制继续生效；需另行显式恢复检测规则。</p></div><div class="button-row end"><button class="subtle" data-close="release-dialog">取消</button><button id="release-refresh" class="subtle hidden">刷新并核对状态</button><button id="release-confirm" class="danger">确认解除，保持检测停止</button></div></dialog>
+<dialog aria-labelledby="preview-title" id="preview-dialog" class="preview-dialog">
+      <div class="dialog-heading">
+        <h2 id="preview-title">隔离预览</h2>
+        <button class="icon-button" data-close="preview-dialog" aria-label="关闭">关闭</button>
+      </div>
+      <p>脚本禁用、外部网络阻止、表单与弹窗禁用。CSS / SVG 动画仍可展示。</p>
+      <iframe
+        id="safe-preview"
+        inert
+        tabindex="-1"
+        title="模型生成内容的隔离预览"
+        sandbox=""
+        referrerpolicy="no-referrer"
+      ></iframe>
+    </dialog>
+<script type="application/json" id="build-info">{"application":"model-quality","ui_version":"4.0.0"}</script>
+</body></html>

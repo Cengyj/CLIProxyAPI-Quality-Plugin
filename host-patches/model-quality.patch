@@ -1,0 +1,3831 @@
+diff --git a/internal/api/handlers/management/quality.go b/internal/api/handlers/management/quality.go
+new file mode 100644
+index 0000000..9ab6067
+--- /dev/null
++++ b/internal/api/handlers/management/quality.go
+@@ -0,0 +1,46 @@
++package management
++
++import (
++	"io"
++	"net/http"
++
++	"github.com/MoeForge/moego/ojson"
++	"github.com/gin-gonic/gin"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	log "github.com/sirupsen/logrus"
++)
++
++// ListQualityPauses remains available when the originating plugin is unloaded.
++func (h *Handler) ListQualityPauses(c *gin.Context) {
++	if h.authManager == nil {
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "quality authority unavailable"})
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"actions": h.authManager.QualityActions(), "targets": h.authManager.QualityTargets()})
++}
++
++// ReleaseQualityPause releases one exact owned restriction after management authentication.
++func (h *Handler) ReleaseQualityPause(c *gin.Context) {
++	if h.authManager == nil {
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "quality authority unavailable"})
++		return
++	}
++	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 16384))
++	if err != nil || !ojson.ValidBytes(body) {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or oversized quality binding"})
++		return
++	}
++	d := ojson.ParseBytes(body)
++	p := coreauth.QualityPause{AuthID: d.Get("auth_id").String(), OwnerPlugin: d.Get("owner_plugin").String(), RuleID: d.Get("rule_id").String(), RuleRevision: d.Get("rule_revision").Uint(), ActionID: d.Get("action_id").String(), ActionRevision: d.Get("action_revision").Uint(), IdentityVersion: d.Get("identity_version").String()}
++	if p.AuthID == "" || p.OwnerPlugin == "" || p.ActionID == "" || p.IdentityVersion == "" || p.RuleRevision == 0 || p.ActionRevision == 0 {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "complete ownership binding required"})
++		return
++	}
++	target, err := h.authManager.ReleaseQualityAdministratively(c.Request.Context(), p)
++	if err != nil {
++		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
++		return
++	}
++	log.WithFields(log.Fields{"action_id": p.ActionID, "owner_plugin": p.OwnerPlugin}).Info("management operator released owned quality pause")
++	c.JSON(http.StatusOK, gin.H{"target": target, "restriction_released": true, "note": "Only this quality restriction was released; remaining restrictions still apply."})
++}
+diff --git a/internal/api/server.go b/internal/api/server.go
+index 099b5dd..1a007ae 100644
+--- a/internal/api/server.go
++++ b/internal/api/server.go
+@@ -259,7 +259,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+ 		s.registerManagementRoutes()
+ 	}
+ 	s.refreshPluginManagementRoutes()
+-	engine.NoRoute(s.pluginManagementNoRoute)
++	engine.NoRoute(s.pluginDispatchNoRoute)
+ 
+ 	if optionState.keepAliveEnabled {
+ 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
+diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
+index e73ad89..ba62bb3 100644
+--- a/internal/api/server_management_v8.go
++++ b/internal/api/server_management_v8.go
+@@ -42,6 +42,8 @@ func (s *Server) registerManagementV8Routes() {
+ 	v8.GET("/observability/usage/api-keys", s.mgmt.GetAPIKeyUsage)
+ 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
+ 
++	v8.GET("/credentials/quality-pauses", s.mgmt.ListQualityPauses)
++	v8.POST("/credentials/quality-pauses/release", s.mgmt.ReleaseQualityPause)
+ 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
+ 	v8.POST("/credentials", s.mgmt.UploadAuthFileV8)
+ 	v8.DELETE("/credentials", s.mgmt.DeleteAuthFileV8)
+diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
+index 9450038..6ef300d 100644
+--- a/internal/api/server_middleware.go
++++ b/internal/api/server_middleware.go
+@@ -519,6 +519,7 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
+ 					c.Set("accessMetadata", result.Metadata)
+ 				}
+ 				reqCtx := coreusage.WithAPIKey(c.Request.Context(), result.Principal)
++				reqCtx = coreusage.WithTrafficSource(reqCtx, "production")
+ 				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
+ 				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
+ 				c.Request = c.Request.WithContext(reqCtx)
+@@ -587,6 +588,7 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
+ 		c.Set("userApiKey", principal)
+ 		c.Set("accessProvider", provider)
+ 		reqCtx := coreusage.WithAPIKey(c.Request.Context(), principal)
++		reqCtx = coreusage.WithTrafficSource(reqCtx, "production")
+ 		reqCtx = coreusage.WithAccessProvider(reqCtx, provider)
+ 		reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(provider))
+ 		c.Request = c.Request.WithContext(reqCtx)
+diff --git a/internal/api/server_plugins_v8.go b/internal/api/server_plugins_v8.go
+new file mode 100644
+index 0000000..f8721f8
+--- /dev/null
++++ b/internal/api/server_plugins_v8.go
+@@ -0,0 +1,32 @@
++package api
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/gin-gonic/gin"
++)
++
++// pluginDispatchNoRoute adds an authenticated v8 dispatcher without changing v0 routing.
++func (s *Server) pluginDispatchNoRoute(c *gin.Context) {
++	if c == nil || c.Request == nil || c.Request.URL == nil || !strings.HasPrefix(c.Request.URL.Path, "/v8/management/plugins/") {
++		s.pluginManagementNoRoute(c)
++		return
++	}
++	if s == nil || s.pluginHost == nil || s.mgmt == nil {
++		c.AbortWithStatus(http.StatusNotFound)
++		return
++	}
++	if !s.managementAvailable(c) {
++		return
++	}
++	s.mgmt.Middleware()(c)
++	if c.IsAborted() {
++		return
++	}
++	if s.pluginHost.ServeManagementHTTP(c.Writer, c.Request) {
++		c.Abort()
++		return
++	}
++	c.AbortWithStatus(http.StatusNotFound)
++}
+diff --git a/internal/api/server_plugins_v8_test.go b/internal/api/server_plugins_v8_test.go
+new file mode 100644
+index 0000000..2ae4b24
+--- /dev/null
++++ b/internal/api/server_plugins_v8_test.go
+@@ -0,0 +1,42 @@
++package api
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
++)
++
++func TestPluginV8DispatcherUsesManagementAccessPolicy(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	for _, tc := range []struct {
++		name, addr, key string
++		home            bool
++		status          int
++	}{{"missing", "127.0.0.1:1", "", false, 401}, {"remote denied", "192.0.2.2:1", "offline", false, 403}, {"authenticated unknown route", "127.0.0.1:1", "offline", false, 404}, {"home controlled", "127.0.0.1:1", "offline", true, 404}} {
++		t.Run(tc.name, func(t *testing.T) {
++			cfg := &config.Config{}
++			cfg.RemoteManagement.SecretKey = "configured-for-local-test"
++			cfg.Home.Enabled = tc.home
++			h := management.NewHandlerWithoutConfigFilePath(cfg, nil)
++			h.SetLocalPassword("offline")
++			s := &Server{cfg: cfg, engine: gin.New(), mgmt: h, pluginHost: pluginhost.New()}
++			s.managementRoutesEnabled.Store(true)
++			s.engine.NoRoute(s.pluginDispatchNoRoute)
++			req := httptest.NewRequest(http.MethodGet, "/v8/management/plugins/model-quality/targets", nil)
++			req.RemoteAddr = tc.addr
++			if tc.key != "" {
++				req.Header.Set("Authorization", "Bearer "+tc.key)
++			}
++			rec := httptest.NewRecorder()
++			s.engine.ServeHTTP(rec, req)
++			if rec.Code != tc.status {
++				t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
++			}
++		})
++	}
++}
+diff --git a/internal/api/server_test.go b/internal/api/server_test.go
+index 30cdbff..0bf54c6 100644
+--- a/internal/api/server_test.go
++++ b/internal/api/server_test.go
+@@ -3927,8 +3927,15 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
+ 		registry.GetGlobalRegistry().UnregisterClient(authEntry.ID)
+ 	})
+ 
+-	httpServer := httptest.NewServer(server.engine)
+-	defer httpServer.Close()
++	// A hijacked WebSocket outlives httptest.Server.Close. Join its handler
++	// before TempDir cleanup so request-log finalizers cannot recreate files.
++	var activeHandlers sync.WaitGroup
++	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		activeHandlers.Add(1)
++		defer activeHandlers.Done()
++		server.engine.ServeHTTP(w, r)
++	}))
++	defer func() { httpServer.Close(); activeHandlers.Wait() }()
+ 
+ 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses"
+ 	headers := http.Header{"Authorization": []string{"Bearer key-1"}}
+diff --git a/internal/pluginhost/adapters_usage_translation.go b/internal/pluginhost/adapters_usage_translation.go
+index e064fd8..121bf7e 100644
+--- a/internal/pluginhost/adapters_usage_translation.go
++++ b/internal/pluginhost/adapters_usage_translation.go
+@@ -600,6 +600,8 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
+ 		apiKey = strings.TrimSpace(coreusage.APIKeyFromContext(ctx))
+ 	}
+ 	a.host.dispatchPluginUsageRecord(ctx, a.pluginID, pluginapi.UsageRecord{
++		TrafficSource:        record.TrafficSource,
++		EventKind:            record.EventKind,
+ 		RequestID:            requestID,
+ 		TraceID:              traceID,
+ 		SelectionID:          selectionID,
+diff --git a/internal/pluginhost/host_callbacks.go b/internal/pluginhost/host_callbacks.go
+index 58dd95b..d1b9277 100644
+--- a/internal/pluginhost/host_callbacks.go
++++ b/internal/pluginhost/host_callbacks.go
+@@ -145,6 +145,12 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
+ 		return nil, fmt.Errorf("host plugin callback instance is closed")
+ 	}
+ 	switch method {
++	case pluginabi.MethodHostQualityCapabilities, pluginabi.MethodHostQualityTargets, pluginabi.MethodHostQualityActions, pluginabi.MethodHostQualityPause, pluginabi.MethodHostQualityRelease, pluginabi.MethodHostQualityReleaseVerified, pluginabi.MethodHostQualityActionStatus:
++		return h.callHostQuality(ctx, method, request)
++	case pluginabi.MethodHostModelOperationOpen:
++		return h.callHostHTTPOperationOpen(ctx, request)
++	case pluginabi.MethodHostModelCancel:
++		return h.callHostHTTPCancel(ctx, request)
+ 	case pluginabi.MethodHostModelExecute:
+ 		return h.callHostModelExecute(ctx, request)
+ 	case pluginabi.MethodHostModelExecuteStream:
+@@ -420,12 +426,21 @@ func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte
+ 		return nil, fmt.Errorf("host model executor is unavailable")
+ 	}
+ 	skipPluginID := h.callbackCallerPluginID(ctx, req.HostCallbackID)
+-	ctx = h.resolveCallbackContext(req.HostCallbackID, ctx)
++	operation, errOperation := h.acquireHostHTTPOperation(ctx, req.HostCallbackID, req.OperationID)
++	if errOperation != nil {
++		return nil, errOperation
++	}
++	defer operation.finish()
++	ctx, evidence, errPrepare := h.prepareQualityExecution(operation.ctx, req.HostModelExecutionRequest)
++	if errPrepare != nil {
++		return nil, errPrepare
++	}
+ 	resp, errMsg := executor.ExecuteModel(ctx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID))
+ 	if errMsg != nil {
+ 		return nil, modelExecutionError(errMsg)
+ 	}
+ 	return marshalRPCResult(pluginapi.HostModelExecutionResponse{
++		Evidence:   modelEvidence(evidence.Snapshot()),
+ 		StatusCode: resp.StatusCode,
+ 		Headers:    cloneHeader(resp.Headers),
+ 		Body:       append([]byte(nil), resp.Body...),
+diff --git a/internal/pluginhost/host_model_stream_callbacks.go b/internal/pluginhost/host_model_stream_callbacks.go
+index 33b86fd..5a28e49 100644
+--- a/internal/pluginhost/host_model_stream_callbacks.go
++++ b/internal/pluginhost/host_model_stream_callbacks.go
+@@ -46,8 +46,31 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
+ 	if callbackCtx == nil {
+ 		callbackCtx = context.Background()
+ 	}
+-	// Detach request cancellation while preserving callback values; callback cleanup owns the model stream lifetime.
+-	streamCtx, cancel := newStreamContext(context.WithoutCancel(callbackCtx))
++	// Legacy streams retain their historical callback lifetime. Explicit operations
++	// connect cancellation before the first upstream response and through stream close.
++	var operation *hostHTTPOperationHandle
++	if req.OperationID != "" {
++		op, errOperation := h.acquireHostHTTPOperation(ctx, req.HostCallbackID, req.OperationID)
++		if errOperation != nil {
++			return nil, errOperation
++		}
++		operation = &op
++		callbackCtx = op.ctx
++	} else {
++		callbackCtx = context.WithoutCancel(callbackCtx)
++	}
++	streamCtx, cancelStream := newStreamContext(callbackCtx)
++	cancel := func() {
++		cancelStream()
++		if operation != nil {
++			operation.finish()
++		}
++	}
++	streamCtx, evidence, errPrepare := h.prepareQualityExecution(streamCtx, req.HostModelExecutionRequest)
++	if errPrepare != nil {
++		cancel()
++		return nil, errPrepare
++	}
+ 	inflightID, okBegin := h.modelStreams.begin(callerPluginID, callbackPluginID, callerInstance, callbackInstance, cancel)
+ 	if !okBegin {
+ 		return nil, fmt.Errorf("host plugin callback instance is closed")
+@@ -61,6 +84,12 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
+ 	if streamID == "" {
+ 		return nil, fmt.Errorf("host model stream closed during startup")
+ 	}
++	h.modelStreams.setEvidence(callerPluginID, callerInstance, streamID, evidence)
++	if operation != nil {
++		if !h.httpOperations.setCleanup(operation.pluginID, operation.operationID, operation.entry, func() { h.modelStreams.close(callerPluginID, callerInstance, streamID) }) {
++			return nil, fmt.Errorf("model operation cancelled during stream startup")
++		}
++	}
+ 	if req.HostCallbackID != "" {
+ 		stopScopeCleanup, attached := h.addCallbackCleanupHandle(req.HostCallbackID, func() {
+ 			h.modelStreams.close(callerPluginID, callerInstance, streamID)
+@@ -71,6 +100,7 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
+ 		}
+ 	}
+ 	return marshalRPCResult(pluginapi.HostModelStreamResponse{
++		Evidence:   modelEvidence(evidence.Snapshot()),
+ 		StatusCode: stream.StatusCode,
+ 		Headers:    cloneHeader(stream.Headers),
+ 		StreamID:   streamID,
+@@ -85,6 +115,7 @@ func (h *Host) callHostModelStreamRead(ctx context.Context, request []byte) ([]b
+ 	if h == nil || h.modelStreams == nil {
+ 		return nil, fmt.Errorf("host model stream bridge is unavailable")
+ 	}
++	evidence := h.modelStreams.evidenceFor(hostCallbackPluginIDFromContext(ctx), hostCallbackInstanceFromContext(ctx), req.StreamID)
+ 	chunk, done, errRead := h.modelStreams.read(ctx, hostCallbackPluginIDFromContext(ctx), hostCallbackInstanceFromContext(ctx), req.StreamID)
+ 	if errRead != nil {
+ 		return nil, errRead
+@@ -93,6 +124,11 @@ func (h *Host) callHostModelStreamRead(ctx context.Context, request []byte) ([]b
+ 		Payload: append([]byte(nil), chunk.Payload...),
+ 		Done:    done,
+ 	}
++	if evidence != nil {
++		observed := modelEvidence(evidence.Snapshot())
++		resp.Evidence = &observed
++		resp.UpstreamComplete = evidence.UpstreamComplete()
++	}
+ 	if chunk.Err != nil {
+ 		resp.Error = chunk.Err.Error()
+ 		resp.Done = true
+diff --git a/internal/pluginhost/management.go b/internal/pluginhost/management.go
+index 536e8b3..faf744b 100644
+--- a/internal/pluginhost/management.go
++++ b/internal/pluginhost/management.go
+@@ -87,6 +87,8 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
+ 			}
+ 		}
+ 
++		h.registerManagementV8(nextRoutes, record, resp.RoutesV8, reserved)
++
+ 		for _, item := range resp.Resources {
+ 			if !registerResourceRoute(nextResources, record, item) {
+ 				log.Warnf("pluginhost: plugin %s declared invalid resource route %s", record.id, item.Path)
+@@ -114,6 +116,7 @@ func (h *Host) callManagementRegistrar(ctx context.Context, record capabilityRec
+ 	return plugin.RegisterManagement(ctx, pluginapi.ManagementRegistrationRequest{
+ 		Plugin:           record.meta,
+ 		BasePath:         managementBasePath,
++		V8BasePath:       "/v8/management/plugins/" + record.id,
+ 		ResourceBasePath: resourcePluginBasePath + "/" + record.id,
+ 	})
+ }
+@@ -348,7 +351,7 @@ func (h *Host) callManagementHandler(ctx context.Context, record managementRoute
+ 			err = fmt.Errorf("management handler panic: %v", recovered)
+ 		}
+ 	}()
+-	return record.route.Handler.HandleManagement(ctx, req)
++	return record.route.Handler.HandleManagement(withManualQualityReleaseScope(ctx, record.pluginID, req), req)
+ }
+ 
+ func escapeManagementResponseBody(resp pluginapi.ManagementResponse) []byte {
+diff --git a/internal/pluginhost/management_v8.go b/internal/pluginhost/management_v8.go
+new file mode 100644
+index 0000000..6d6cf1c
+--- /dev/null
++++ b/internal/pluginhost/management_v8.go
+@@ -0,0 +1,40 @@
++package pluginhost
++
++import (
++	"strings"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	log "github.com/sirupsen/logrus"
++)
++
++func (h *Host) registerManagementV8(routes map[string]managementRouteRecord, record capabilityRecord, items []pluginapi.ManagementRoute, reserved map[string]struct{}) {
++	prefix := "/v8/management/plugins/" + record.id
++	for _, item := range items {
++		method := strings.ToUpper(strings.TrimSpace(item.Method))
++		path := strings.TrimSpace(item.Path)
++		if strings.HasPrefix(path, prefix+"/") {
++			path = strings.TrimPrefix(path, prefix)
++		}
++		if !strings.HasPrefix(path, "/") {
++			path = "/" + path
++		}
++		if item.Handler == nil || path == "/" || strings.Contains(path, "..") || strings.Contains(path, "//") || strings.ContainsAny(path, "*:?%# \t\r\n") || strings.ContainsAny(method, " \t\r\n") || method == "" {
++			continue
++		}
++		fullPath := prefix + strings.TrimRight(path, "/")
++		key := managementRouteKey(method, fullPath)
++		if _, conflict := reserved[key]; conflict {
++			continue
++		}
++		if _, conflict := routes[key]; conflict {
++			log.Warnf("pluginhost: conflicting v8 plugin route %s", key)
++			continue
++		}
++		// Native quota endpoints retain their dedicated handlers.
++		if path == "/quota" {
++			continue
++		}
++		item.Path, item.Method = fullPath, method
++		routes[key] = managementRouteRecord{pluginID: record.id, path: record.path, version: record.version, schemaVersion: record.plugin.SchemaVersion, route: item}
++	}
++}
+diff --git a/internal/pluginhost/management_v8_quality_test.go b/internal/pluginhost/management_v8_quality_test.go
+new file mode 100644
+index 0000000..d01982e
+--- /dev/null
++++ b/internal/pluginhost/management_v8_quality_test.go
+@@ -0,0 +1,221 @@
++package pluginhost
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"testing"
++
++	"github.com/MoeForge/moego/ojson"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++type qualityManagementPlugin struct{ calls int }
++
++func (p *qualityManagementPlugin) RegisterManagement(_ context.Context, r pluginapi.ManagementRegistrationRequest) (pluginapi.ManagementRegistrationResponse, error) {
++	return pluginapi.ManagementRegistrationResponse{RoutesV8: []pluginapi.ManagementRoute{{Method: "POST", Path: r.V8BasePath + "/runs", Handler: p}, {Method: "GET", Path: "../other", Handler: p}, {Method: "GET", Path: "/runs/:id", Handler: p}}, Resources: []pluginapi.ResourceRoute{{Path: "/index.html", Handler: p}}}, nil
++}
++func (p *qualityManagementPlugin) HandleManagement(_ context.Context, r pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
++	p.calls++
++	return pluginapi.ManagementResponse{StatusCode: 202, Body: []byte(r.Path)}, nil
++}
++func TestQualityV8RouteNamespacesAndExactMatch(t *testing.T) {
++	p := &qualityManagementPlugin{}
++	h := newHostWithRecords(capabilityRecord{id: "model-quality", plugin: pluginapi.Plugin{SchemaVersion: 8, Capabilities: pluginapi.Capabilities{ManagementAPI: p}}})
++	h.RegisterManagementRoutes(context.Background(), nil)
++	for _, tc := range []struct {
++		method, path string
++		want         bool
++	}{{"POST", "/v8/management/plugins/model-quality/runs", true}, {"GET", "/v8/management/plugins/model-quality/runs", false}, {"POST", "/v0/management/plugins/model-quality/runs", false}, {"GET", "/v8/management/plugins/model-quality/runs/x", false}, {"GET", "/v8/management/plugins/other", false}} {
++		rec := httptest.NewRecorder()
++		if got := h.ServeManagementHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil)); got != tc.want {
++			t.Fatalf("%s %s = %v", tc.method, tc.path, got)
++		}
++	}
++	if p.calls != 1 {
++		t.Fatalf("unexpected calls %d", p.calls)
++	}
++	if h.ServeManagementHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/model-quality/index.html", nil)) {
++		t.Fatal("resource is not management route")
++	}
++}
++
++func TestQualityNativeCallbackOwnershipAndStableTargets(t *testing.T) {
++	m := coreauth.NewManager(nil, nil, nil)
++	if err := m.OpenQualityState(filepath.Join(t.TempDir(), "quality.db")); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := m.CloseQualityState(); err != nil {
++			t.Error(err)
++		}
++	})
++	a, err := m.Register(context.Background(), &coreauth.Auth{ID: "offline-a", Provider: "offline", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "synthetic"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	h := New()
++	h.SetAuthManager(m)
++	target, err := m.QualityTarget(a.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	p := pluginapi.QualityPause{AuthID: a.ID, OwnerPlugin: "model-quality", RuleID: "r", RuleRevision: 1, ActionID: "a", ActionRevision: 1, EvidenceRunID: "run", IdentityVersion: target.IdentityVersion, Reason: "test"}
++	d := ojson.NewDocString(`{}`)
++	for key, value := range map[string]any{"auth_id": p.AuthID, "owner_plugin": p.OwnerPlugin, "rule_id": p.RuleID, "rule_revision": p.RuleRevision, "action_id": p.ActionID, "action_revision": p.ActionRevision, "evidence_run_id": p.EvidenceRunID, "identity_version": p.IdentityVersion, "reason": p.Reason} {
++		_ = d.Set(key, value)
++	}
++	body := d.Bytes()
++	if _, err = h.callFromPlugin(context.Background(), pluginabi.MethodHostQualityPause, body); err == nil {
++		t.Fatal("untrusted pause accepted")
++	}
++	ctx := withHostCallbackIdentity(context.Background(), "model-quality", &hostCallbackInstance{})
++	if _, err = h.callFromPlugin(ctx, pluginabi.MethodHostQualityPause, body); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = h.callFromPlugin(withHostCallbackIdentity(context.Background(), "other", &hostCallbackInstance{}), pluginabi.MethodHostQualityRelease, body); err == nil {
++		t.Fatal("foreign release accepted")
++	}
++	raw, err := h.callFromPlugin(ctx, pluginabi.MethodHostQualityTargets, []byte(`{"auth_id":"offline-a"}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	res, err := decodeRPCEnvelope[struct {
++		Targets []pluginapi.QualityTarget `json:"targets"`
++	}](raw)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(res.Targets) != 1 || !res.Targets[0].QualityPaused || res.Targets[0].ManualDisabled {
++		t.Fatalf("invalid paused target %+v", res)
++	}
++	req := pluginapi.HostModelExecutionRequest{AuthID: a.ID, ForcedProvider: "offline", QualityRetest: &p}
++	if _, err = h.qualityModelContext(context.Background(), req); err == nil {
++		t.Fatal("untrusted retest accepted")
++	}
++	if _, err = h.qualityModelContext(ctx, req); err == nil {
++		t.Fatal("native plugin retest accepted")
++	}
++	if res.Targets[0].CanRetest {
++		t.Fatal("target advertised retired retest bypass")
++	}
++	if _, err = h.callFromPlugin(ctx, pluginabi.MethodHostQualityReleaseVerified, body); err == nil {
++		t.Fatal("automatic recovery accepted")
++	}
++	if _, err = h.callFromPlugin(ctx, pluginabi.MethodHostQualityRelease, body); err == nil {
++		t.Fatal("background release accepted")
++	}
++	req.AuthID = "other"
++	if _, err = h.qualityModelContext(ctx, req); err == nil {
++		t.Fatal("mismatched target accepted")
++	}
++	statusBody := []byte(`{"action_id":"a"}`)
++	statusRaw, err := h.callFromPlugin(ctx, pluginabi.MethodHostQualityActionStatus, statusBody)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if ojson.GetBytes(statusRaw, "result.status").String() != "active" {
++		t.Fatalf("status %s", statusRaw)
++	}
++	instance := hostCallbackInstanceFromContext(ctx)
++	releaseScope := withManualQualityReleaseScope(ctx, "model-quality", pluginapi.ManagementRequest{Method: "POST", Path: "/v8/management/plugins/model-quality/actions/release", Body: body})
++	callbackID, closeCallback := h.openCallbackContextForPluginInstance(releaseScope, "model-quality", instance)
++	releaseDoc := ojson.NewDoc(body)
++	_ = releaseDoc.Set("host_callback_id", callbackID)
++	releaseBody := releaseDoc.Bytes()
++	if _, err = h.callFromPlugin(ctx, pluginabi.MethodHostQualityRelease, releaseBody); err != nil {
++		t.Fatal(err)
++	}
++	closeCallback()
++	if _, err = h.callFromPlugin(ctx, pluginabi.MethodHostQualityRelease, releaseBody); err == nil {
++		t.Fatal("expired management callback accepted")
++	}
++
++	statusRaw, err = h.callFromPlugin(ctx, pluginabi.MethodHostQualityActionStatus, statusBody)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if ojson.GetBytes(statusRaw, "result.status").String() != "released" {
++		t.Fatalf("status %s", statusRaw)
++	}
++}
++
++func TestQualityReleaseScopeRequiresMatchingAuthenticatedAction(t *testing.T) {
++	h := New()
++	instance := &hostCallbackInstance{}
++	ctx := withHostCallbackIdentity(context.Background(), "model-quality", instance)
++	action := coreauth.QualityPause{RuleID: "rule", ActionID: "action", ActionRevision: 1}
++	for _, tc := range []struct {
++		name, method, path, rule, action string
++		revision                         uint64
++		allowed                          bool
++	}{
++		{"release", "POST", "/v8/management/plugins/model-quality/actions/release", "rule", "action", 1, true},
++		{"resource", "GET", "/v0/resource/plugins/model-quality/index.html", "rule", "action", 1, false},
++		{"run", "POST", "/v8/management/plugins/model-quality/runs", "rule", "action", 1, false},
++		{"wrong_action", "POST", "/v8/management/plugins/model-quality/actions/release", "rule", "different", 1, false},
++		{"wrong_rule", "POST", "/v8/management/plugins/model-quality/actions/release", "different", "action", 1, false},
++		{"wrong_revision", "POST", "/v8/management/plugins/model-quality/actions/release", "rule", "action", 2, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			doc := ojson.NewDocString(`{}`)
++			_ = doc.Set("rule_id", tc.rule)
++			_ = doc.Set("action_id", tc.action)
++			_ = doc.Set("action_revision", tc.revision)
++			scoped := withManualQualityReleaseScope(ctx, "model-quality", pluginapi.ManagementRequest{Method: tc.method, Path: tc.path, Body: doc.Bytes()})
++			id, closeCallback := h.openCallbackContextForPluginInstance(scoped, "model-quality", instance)
++			defer closeCallback()
++			request := ojson.NewDocString(`{}`)
++			_ = request.Set("host_callback_id", id)
++			if _, err := h.manualQualityReleaseContext(ctx, request.Bytes(), action); (err == nil) != tc.allowed {
++				t.Fatalf("scope allowed=%v, err=%v", tc.allowed, err)
++			}
++			foreign := withHostCallbackIdentity(context.Background(), "model-quality", &hostCallbackInstance{})
++			if _, err := h.manualQualityReleaseContext(foreign, request.Bytes(), action); err == nil {
++				t.Fatal("foreign instance release allowed")
++			}
++		})
++	}
++	raw, err := h.callFromPlugin(ctx, pluginabi.MethodHostQualityCapabilities, []byte(`{}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if ojson.GetBytes(raw, "result.version").Int() != 2 || !ojson.GetBytes(raw, "result.manual_release_only").Bool() || ojson.GetBytes(raw, "result.quality_retest").Bool() || ojson.GetBytes(raw, "result.automatic_recovery").Bool() {
++		t.Fatal(string(raw))
++	}
++}
++
++func TestQualityReleaseScopeRejectsClosedInstanceAndCancelledRequest(t *testing.T) {
++	for _, name := range []string{"closed_instance", "cancelled_request"} {
++		t.Run(name, func(t *testing.T) {
++			h := New()
++			instance := &hostCallbackInstance{}
++			ctx := withHostCallbackIdentity(context.Background(), "model-quality", instance)
++			requestCtx, cancel := context.WithCancel(ctx)
++			defer cancel()
++			action := coreauth.QualityPause{RuleID: "rule", ActionID: "action", ActionRevision: 1}
++			scoped := withManualQualityReleaseScope(requestCtx, "model-quality", pluginapi.ManagementRequest{
++				Method: "POST", Path: "/v8/management/plugins/model-quality/actions/release",
++				Body: []byte(`{"rule_id":"rule","action_id":"action","action_revision":1}`),
++			})
++			id, closeCallback := h.openCallbackContextForPluginInstance(scoped, "model-quality", instance)
++			defer closeCallback()
++			request := ojson.NewDocString(`{}`)
++			_ = request.Set("host_callback_id", id)
++			if _, err := h.manualQualityReleaseContext(ctx, request.Bytes(), action); err != nil {
++				t.Fatalf("active scope rejected: %v", err)
++			}
++			if name == "closed_instance" {
++				instance.closed.Store(true)
++			} else {
++				cancel()
++			}
++			if _, err := h.manualQualityReleaseContext(ctx, request.Bytes(), action); err == nil {
++				t.Fatal("inactive manual release scope accepted")
++			}
++		})
++	}
++}
+diff --git a/internal/pluginhost/model_evidence.go b/internal/pluginhost/model_evidence.go
+new file mode 100644
+index 0000000..03d9c54
+--- /dev/null
++++ b/internal/pluginhost/model_evidence.go
+@@ -0,0 +1,29 @@
++package pluginhost
++
++import (
++	"context"
++
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func (h *Host) prepareQualityExecution(ctx context.Context, req pluginapi.HostModelExecutionRequest) (context.Context, *coreexecutor.EvidenceCollector, error) {
++	ctx, err := h.qualityModelContext(ctx, req)
++	if err != nil {
++		return nil, nil, err
++	}
++	source := req.TrafficSource
++	switch source {
++	case "manual_test", "scheduled_probe", "judge":
++	default:
++		source = "internal_other"
++	}
++	ctx = usage.WithTrafficSource(ctx, source)
++	ctx, collector := coreexecutor.WithEvidenceCollector(ctx, req.Model, req.AuthID, req.Body)
++	return ctx, collector, nil
++}
++
++func modelEvidence(e coreexecutor.ExecutionEvidence) pluginapi.ModelEvidence {
++	return pluginapi.ModelEvidence{PayloadConfigVersion: e.PayloadConfigVersion, Verified: e.Verified, Reason: e.Reason, RequestedModel: e.RequestedModel, ResolvedModel: e.ResolvedModel, AuthID: e.AuthID, PayloadFingerprint: e.PayloadFingerprint, ConditionsChanged: e.ConditionsChanged, Path: e.Path}
++}
+diff --git a/internal/pluginhost/model_operations_quality_test.go b/internal/pluginhost/model_operations_quality_test.go
+new file mode 100644
+index 0000000..c2ea911
+--- /dev/null
++++ b/internal/pluginhost/model_operations_quality_test.go
+@@ -0,0 +1,116 @@
++package pluginhost
++
++import (
++	"context"
++	"net/http"
++	"testing"
++
++	"github.com/MoeForge/moego/ojson"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
++)
++
++func modelOperation(t *testing.T, h *Host, ctx context.Context) string {
++	t.Helper()
++	raw, err := h.callFromPlugin(ctx, pluginabi.MethodHostModelOperationOpen, []byte(`{}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	r, err := decodeRPCEnvelope[rpcHostHTTPOperationOpenResponse](raw)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return r.OperationID
++}
++func operationBody(op string, stream bool) []byte {
++	d := ojson.NewDocString(`{"entry_protocol":"openai","exit_protocol":"openai","model":"m","body":"e30=","traffic_source":"manual_test"}`)
++	_ = d.Set("operation_id", op)
++	_ = d.Set("stream", stream)
++	return d.Bytes()
++}
++func cancelOperation(t *testing.T, h *Host, ctx context.Context, op string) {
++	t.Helper()
++	d := ojson.NewDocString(`{}`)
++	_ = d.Set("operation_id", op)
++	if _, err := h.callFromPlugin(ctx, pluginabi.MethodHostModelCancel, d.Bytes()); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestModelOperationCancelsBeforeFirstByteAndNonStream(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		t.Run(map[bool]string{false: "nonstream", true: "first-byte"}[stream], func(t *testing.T) {
++			h := New()
++			instance := &hostCallbackInstance{}
++			ctx := withHostCallbackIdentity(context.Background(), "model-quality", instance)
++			started := make(chan struct{})
++			done := make(chan error, 1)
++			wait := func(ctx context.Context) {
++				if usage.TrafficSourceFromContext(ctx) != "manual_test" {
++					t.Error("missing trusted source")
++				}
++				close(started)
++				<-ctx.Done()
++			}
++			h.SetModelExecutor(&fakeHostModelExecutor{executeModel: func(ctx context.Context, _ handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
++				wait(ctx)
++				return handlers.ModelExecutionResponse{}, &interfaces.ErrorMessage{StatusCode: 499, Error: ctx.Err()}
++			}, executeModelStream: func(ctx context.Context, _ handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
++				wait(ctx)
++				return handlers.ModelExecutionStream{}, &interfaces.ErrorMessage{StatusCode: 499, Error: ctx.Err()}
++			}})
++			op := modelOperation(t, h, ctx)
++			method := pluginabi.MethodHostModelExecute
++			if stream {
++				method = pluginabi.MethodHostModelExecuteStream
++			}
++			go func() { _, err := h.callFromPlugin(ctx, method, operationBody(op, stream)); done <- err }()
++			<-started
++			cancelOperation(t, h, withHostCallbackIdentity(context.Background(), "other", &hostCallbackInstance{}), op)
++			select {
++			case <-done:
++				t.Fatal("other plugin cancelled operation")
++			default:
++			}
++			cancelOperation(t, h, ctx, op)
++			cancelOperation(t, h, ctx, op)
++			if err := <-done; err == nil {
++				t.Fatal("cancel returned success")
++			}
++		})
++	}
++}
++
++func TestModelOperationCancelsOpenStreamAndLifecycle(t *testing.T) {
++	h := New()
++	instance := &hostCallbackInstance{}
++	ctx := withHostCallbackIdentity(context.Background(), "model-quality", instance)
++	seen := make(chan context.Context, 1)
++	h.SetModelExecutor(&fakeHostModelExecutor{executeModelStream: func(c context.Context, _ handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
++		seen <- c
++		ch := make(chan handlers.ModelExecutionChunk)
++		go func() { <-c.Done(); close(ch) }()
++		return handlers.ModelExecutionStream{StatusCode: http.StatusOK, Chunks: ch}, nil
++	}})
++	op := modelOperation(t, h, ctx)
++	raw, err := h.callFromPlugin(ctx, pluginabi.MethodHostModelExecuteStream, operationBody(op, true))
++	if err != nil {
++		t.Fatal(err)
++	}
++	resp, err := decodeRPCEnvelope[struct {
++		StreamID string `json:"stream_id"`
++	}](raw)
++	if err != nil {
++		t.Fatal(err)
++	}
++	h.closeHostHTTPCallbackInstance("model-quality", instance)
++	<-((<-seen).Done())
++	if _, _, err := h.modelStreams.read(context.Background(), "model-quality", instance, resp.StreamID); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = h.callFromPlugin(ctx, pluginabi.MethodHostModelOperationOpen, []byte(`{}`)); err == nil {
++		t.Fatal("closed instance reused")
++	}
++}
+diff --git a/internal/pluginhost/model_quality_native_test.go b/internal/pluginhost/model_quality_native_test.go
+new file mode 100644
+index 0000000..ce0b3c9
+--- /dev/null
++++ b/internal/pluginhost/model_quality_native_test.go
+@@ -0,0 +1,334 @@
++//go:build cgo && (linux || darwin || freebsd)
++
++package pluginhost
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"runtime"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/MoeForge/moego/ojson"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++)
++
++// This opt-in test exercises the installed native binary, not a Go mock adapter.
++func TestModelQualityNativeLifecycle(t *testing.T) {
++	library := os.Getenv("MODEL_QUALITY_LIBRARY")
++	if library == "" {
++		t.Skip("set MODEL_QUALITY_LIBRARY to the built model-quality shared library")
++	}
++	var correct atomic.Bool
++	var calls atomic.Int64
++	var hold atomic.Bool
++	var omitTerminal atomic.Bool
++	holdStarted, holdCancelled := make(chan struct{}), make(chan struct{})
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		calls.Add(1)
++		requestBody, errRead := io.ReadAll(r.Body)
++		if errRead != nil {
++			t.Error(errRead)
++			return
++		}
++		if hold.Load() {
++			close(holdStarted)
++			<-r.Context().Done()
++			close(holdCancelled)
++			return
++		}
++		if r.Header.Get("Authorization") != "Bearer offline-key" {
++			t.Error("wrong credential")
++		}
++		answer := "0"
++		if correct.Load() {
++			answer = "4"
++		}
++		if ojson.GetBytes(requestBody, "stream").Bool() {
++			w.Header().Set("Content-Type", "text/event-stream")
++			terminal := "data: [DONE]\n\n"
++			if omitTerminal.Load() {
++				terminal = ""
++			}
++			_, errWrite := fmt.Fprintf(w, ": heartbeat\n\ndata: {\"model\":\"real-model\",\"choices\":[{\"delta\":{\"content\":\"%s\"},\"finish_reason\":null}]}\n\ndata: {\"model\":\"real-model\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":1,\"total_tokens\":13}}\n\n%s", answer, terminal)
++			if errWrite != nil {
++				t.Error(errWrite)
++			}
++			return
++		}
++		w.Header().Set("Content-Type", "application/json")
++		_, err := fmt.Fprintf(w, `{"id":"offline","model":"real-model","choices":[{"message":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13}}`, answer)
++		if err != nil {
++			t.Error(err)
++		}
++	}))
++	defer upstream.Close()
++	dir := t.TempDir()
++	libBytes, err := os.ReadFile(library)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pluginDir := filepath.Join(dir, "plugins")
++	if err = os.MkdirAll(pluginDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err = os.WriteFile(filepath.Join(pluginDir, "model-quality"+filepath.Ext(library)), libBytes, 0700); err != nil {
++		t.Fatal(err)
++	}
++	cfg, err := config.ParseConfigBytes([]byte(fmt.Sprintf("plugins:\n  enabled: true\n  dir: %q\n  configs:\n    model-quality:\n      enabled: true\n      data_dir: %q\n      automatic_pause: true\n", pluginDir, filepath.Join(dir, "plugin-data"))))
++	if err != nil {
++		t.Fatal(err)
++	}
++	cfg.AuthDir = filepath.Join(dir, "auth")
++	manager := coreauth.NewManager(nil, nil, nil)
++	manager.SetConfig(cfg)
++	qualityDB := filepath.Join(dir, "authority.db")
++	if err = manager.OpenQualityState(qualityDB); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if errClose := manager.CloseQualityState(); errClose != nil {
++			t.Error(errClose)
++		}
++	})
++	manager.RegisterExecutor(runtimeexecutor.NewOpenAICompatExecutor("offline", cfg))
++	a, err := manager.Register(context.Background(), &coreauth.Auth{ID: "offline-a", Provider: "offline", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "offline-key", "base_url": upstream.URL}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	registry.GetGlobalRegistry().RegisterClient(a.ID, "offline", []*registry.ModelInfo{{ID: "real-model", Type: "openai", OwnedBy: "offline"}})
++	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
++	manager.RefreshSchedulerEntry(a.ID)
++	base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager)
++	host := New()
++	host.SetAuthManager(manager)
++	host.SetModelExecutor(base)
++	host.ApplyConfig(context.Background(), cfg)
++	t.Cleanup(host.ShutdownAll)
++	if !host.PluginLoaded("model-quality") || !host.PluginRegistered("model-quality") {
++		t.Fatal("native plugin did not load/register")
++	}
++	host.RegisterManagementRoutes(context.Background(), nil)
++	call := func(method, path string, body []byte, want int) []byte {
++		t.Helper()
++		rec := httptest.NewRecorder()
++		req := httptest.NewRequest(method, "/v8/management/plugins/model-quality"+path, bytes.NewReader(body))
++		if !host.ServeManagementHTTP(rec, req) {
++			t.Fatalf("missing route %s %s", method, path)
++		}
++		if rec.Code != want {
++			t.Fatalf("%s %s: %d %s", method, path, rec.Code, rec.Body.String())
++		}
++		return rec.Body.Bytes()
++	}
++	poll := func(id string) []byte {
++		t.Helper()
++		end := time.Now().Add(15 * time.Second)
++		for time.Now().Before(end) {
++			b := call("GET", "/runs/detail?id="+id, nil, 200)
++			status := ojson.GetBytes(b, "status").String()
++			if status != "queued" && status != "running" {
++				return b
++			}
++			runtime.Gosched()
++		}
++		t.Fatal("run did not finish")
++		return nil
++	}
++	if calls.Load() != 0 {
++		t.Fatal("registration called model")
++	}
++	_ = call("GET", "/targets", nil, 200)
++	_ = call("GET", "/questions", nil, 200)
++	if calls.Load() != 0 {
++		t.Fatal("read-only API called model")
++	}
++	manual := []byte(`{"auth_id":"offline-a","provider":"offline","models":["real-model"],"question_id":"logic-boxes","samples":1,"parameters":{"max_tokens":64,"stream":false},"judge":{"mode":"deterministic"},"idempotency_key":"manual-native"}`)
++	created := call("POST", "/runs", manual, 202)
++	id := ojson.GetBytes(created, "run_id").String()
++	result := poll(id)
++	if ojson.GetBytes(result, "samples.0.quality_verdict").String() != "incorrect" || !ojson.GetBytes(result, "samples.0.comparable").Bool() {
++		t.Fatalf("bad manual evidence: %s", result)
++	}
++	if len(manager.QualityActions()) != 0 {
++		t.Fatal("manual test paused credential")
++	}
++	streamBody := ojson.NewDoc(manual)
++	_ = streamBody.Set("parameters.stream", true)
++	_ = streamBody.Set("idempotency_key", "stream-native")
++	streamCreated := call("POST", "/runs", streamBody.Bytes(), 202)
++	streamResult := poll(ojson.GetBytes(streamCreated, "run_id").String())
++	if ojson.GetBytes(streamResult, "samples.0.quality_verdict").String() != "incorrect" || !ojson.GetBytes(streamResult, "samples.0.comparable").Bool() {
++		t.Fatalf("bad streamed evidence %s", streamResult)
++	}
++	omitTerminal.Store(true)
++	eofBody := ojson.NewDoc(manual)
++	_ = eofBody.Set("parameters.stream", true)
++	_ = eofBody.Set("idempotency_key", "eof-native")
++	eofCreated := call("POST", "/runs", eofBody.Bytes(), 202)
++	eofResult := poll(ojson.GetBytes(eofCreated, "run_id").String())
++	if ojson.GetBytes(eofResult, "samples.0.quality_verdict").String() != "unknown" || ojson.GetBytes(eofResult, "samples.0.comparable").Bool() || ojson.GetBytes(eofResult, "samples.0.evidence.verified").Bool() {
++		t.Fatalf("EOF became quality evidence %s", eofResult)
++	}
++	omitTerminal.Store(false)
++	hold.Store(true)
++	cancelBody := ojson.NewDoc(manual)
++	_ = cancelBody.Set("parameters.stream", true)
++	_ = cancelBody.Set("idempotency_key", "cancel-native")
++	cancelCreated := call("POST", "/runs", cancelBody.Bytes(), 202)
++	cancelID := ojson.GetBytes(cancelCreated, "run_id").String()
++	select {
++	case <-holdStarted:
++	case <-time.After(10 * time.Second):
++		t.Fatal("cancelled run never started")
++	}
++	cancelDoc := ojson.NewDocString(`{}`)
++	_ = cancelDoc.Set("id", cancelID)
++	_ = call("POST", "/runs/cancel", cancelDoc.Bytes(), 200)
++	cancelResult := poll(cancelID)
++	if ojson.GetBytes(cancelResult, "status").String() != "cancelled" {
++		t.Fatalf("cancellation failed %s", cancelResult)
++	}
++	select {
++	case <-holdCancelled:
++	case <-time.After(10 * time.Second):
++		t.Fatal("upstream was not cancelled")
++	}
++	hold.Store(false)
++
++	rule := []byte(`{"name":"native integration","auth_id":"offline-a","provider":"offline","models":["real-model"],"question_id":"logic-boxes","samples":1,"parameters":{"max_tokens":64,"stream":false},"judge":{"mode":"deterministic"},"action":"pause_credential","enabled":true,"automatic_pause":true,"fail_threshold":3}`)
++	saved := call("POST", "/rules", rule, 200)
++	ruleID := ojson.GetBytes(saved, "id").String()
++	if ruleID == "" {
++		t.Fatalf("no rule id: %s", saved)
++	}
++	d := ojson.NewDocString(`{}`)
++	_ = d.Set("id", ruleID)
++	runBody := d.Bytes()
++	for i := 0; i < 3; i++ {
++		started := call("POST", "/rules/run", runBody, 202)
++		r := poll(ojson.GetBytes(started, "run_id").String())
++		if ojson.GetBytes(r, "samples.0.quality_verdict").String() != "incorrect" {
++			t.Fatalf("bad failure: %s", r)
++		}
++	}
++	if len(manager.QualityActions()) != 1 {
++		t.Fatalf("no automatic pause: %s", call("GET", "/rules", nil, 200))
++	}
++	production := func() bool {
++		_, errMsg := base.ExecuteModel(context.Background(), handlers.ModelExecutionRequest{EntryProtocol: "openai", ExitProtocol: "openai", Model: "real-model", AuthID: a.ID, ForcedProvider: "offline", Body: []byte(`{"model":"real-model","messages":[{"role":"user","content":"business"}]}`)})
++		return errMsg == nil
++	}
++	before := calls.Load()
++	if production() {
++		t.Fatal("paused production executed")
++	}
++	if calls.Load() != before {
++		t.Fatal("paused production reached upstream")
++	}
++	correct.Store(true)
++	rejected := func(method, path string, body []byte) {
++		t.Helper()
++		rec := httptest.NewRecorder()
++		req := httptest.NewRequest(method, "/v8/management/plugins/model-quality"+path, bytes.NewReader(body))
++		if !host.ServeManagementHTTP(rec, req) || rec.Code < 400 || rec.Code >= 500 {
++			t.Fatalf("paused request accepted %s %s: %d %s", method, path, rec.Code, rec.Body.String())
++		}
++	}
++	held := manager.QualityActions()[0]
++	for i := 0; i < 3; i++ {
++		rejected("POST", "/rules/run", runBody)
++	}
++	plain := ojson.NewDoc(manual)
++	_ = plain.Set("idempotency_key", "must-not-retest")
++	rejected("POST", "/runs", plain.Bytes())
++	if calls.Load() != before {
++		t.Fatal("paused detection or manual request reached upstream")
++	}
++	storedRules := call("GET", "/rules", nil, 200)
++	if ojson.GetBytes(storedRules, "items.0.enabled").Bool() {
++		t.Fatal("holding rule remains enabled")
++	}
++	if len(manager.QualityActions()) != 1 {
++		t.Fatal("completed samples automatically released pause")
++	}
++
++	// Reloading the native plugin cannot revive paused work or grant retest execution.
++	host.ShutdownAll()
++	host = New()
++	host.SetAuthManager(manager)
++	host.SetModelExecutor(base)
++	host.ApplyConfig(context.Background(), cfg)
++	t.Cleanup(host.ShutdownAll)
++	if !host.PluginRegistered("model-quality") {
++		t.Fatal("native plugin reload failed")
++	}
++	host.RegisterManagementRoutes(context.Background(), nil)
++	rejected("POST", "/rules/run", runBody)
++	rejected("POST", "/runs", plain.Bytes())
++	if calls.Load() != before || len(manager.QualityActions()) != 1 {
++		t.Fatal("reload re-executed or released paused credential")
++	}
++
++	releaseDoc := ojson.NewDocString(`{}`)
++	_ = releaseDoc.Set("rule_id", held.RuleID)
++	_ = releaseDoc.Set("action_id", held.ActionID)
++	_ = releaseDoc.Set("action_revision", held.ActionRevision)
++	_ = releaseDoc.Set("pause_rule", true)
++	_ = call("POST", "/actions/preview", releaseDoc.Bytes(), 200)
++	_ = call("POST", "/actions/release", releaseDoc.Bytes(), 200)
++	if len(manager.QualityActions()) != 0 || !production() {
++		t.Fatalf("manual release failed: %s", call("GET", "/rules", nil, 200))
++	}
++	rejected("POST", "/rules/run", runBody)
++	// Leave a fresh owned pause behind while unloading the native plugin.
++	target, err := manager.QualityTarget(a.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pause, err := manager.PauseQuality(context.Background(), "model-quality", coreauth.QualityPause{AuthID: a.ID, OwnerPlugin: "model-quality", RuleID: ruleID, RuleRevision: 1, ActionID: "unload-proof", ActionRevision: 1, EvidenceRunID: id, IdentityVersion: target.IdentityVersion, Reason: "offline lifecycle proof"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	host.ShutdownAll()
++	if production() {
++		t.Fatal("plugin unload released quality pause")
++	}
++	if err = manager.CloseQualityState(); err != nil {
++		t.Fatal(err)
++	}
++	restarted := coreauth.NewManager(nil, nil, nil)
++	restarted.SetConfig(cfg)
++	if err = restarted.OpenQualityState(qualityDB); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if errClose := restarted.CloseQualityState(); errClose != nil {
++			t.Error(errClose)
++		}
++	})
++	if _, err = restarted.Register(context.Background(), a); err != nil {
++		t.Fatal(err)
++	}
++	if restarted.QualityBusinessAllowed(a.ID) {
++		t.Fatal("restart released durable pause")
++	}
++	if _, err = restarted.ReleaseQualityAdministratively(context.Background(), pause); err != nil {
++		t.Fatal(err)
++	}
++	if !restarted.QualityBusinessAllowed(a.ID) {
++		t.Fatal("management fallback release failed")
++	}
++	t.Logf("native lifecycle verified: manual, streaming/heartbeat, missing-terminal rejection, first-byte cancellation, 3-fail terminal pause, blocked business/manual/rule execution, native reload without retest, scoped manual release, unload, restart, administrative release; %d offline upstream calls", calls.Load())
++}
+diff --git a/internal/pluginhost/model_stream_bridge.go b/internal/pluginhost/model_stream_bridge.go
+index c88116a..84ed593 100644
+--- a/internal/pluginhost/model_stream_bridge.go
++++ b/internal/pluginhost/model_stream_bridge.go
+@@ -9,6 +9,7 @@ import (
+ 	"sync/atomic"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ )
+ 
+ type modelStreamBridge struct {
+@@ -27,6 +28,7 @@ type modelStreamInflight struct {
+ }
+ 
+ type modelStreamEntry struct {
++	evidence         *coreexecutor.EvidenceCollector
+ 	pluginID         string
+ 	callbackPluginID string
+ 	instance         *hostCallbackInstance
+@@ -327,3 +329,27 @@ func closeModelStreamEntry(entry modelStreamEntry) {
+ 		entry.cancel()
+ 	}
+ }
++
++func (b *modelStreamBridge) setEvidence(pluginID string, instance *hostCallbackInstance, id string, evidence *coreexecutor.EvidenceCollector) {
++	if b == nil {
++		return
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	if e, ok := b.streams[id]; ok && e.pluginID == pluginID && e.instance == instance {
++		e.evidence = evidence
++		b.streams[id] = e
++	}
++}
++func (b *modelStreamBridge) evidenceFor(pluginID string, instance *hostCallbackInstance, id string) *coreexecutor.EvidenceCollector {
++	if b == nil {
++		return nil
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	e, ok := b.streams[id]
++	if !ok || e.pluginID != pluginID || e.instance != instance {
++		return nil
++	}
++	return e.evidence
++}
+diff --git a/internal/pluginhost/quality_callbacks.go b/internal/pluginhost/quality_callbacks.go
+new file mode 100644
+index 0000000..65f2b0b
+--- /dev/null
++++ b/internal/pluginhost/quality_callbacks.go
+@@ -0,0 +1,179 @@
++package pluginhost
++
++import (
++	"context"
++	"fmt"
++
++	"github.com/MoeForge/moego/ojson"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func (h *Host) callHostQuality(ctx context.Context, method string, body []byte) ([]byte, error) {
++	if method == pluginabi.MethodHostQualityCapabilities {
++		return marshalRPCResult(map[string]any{"version": 2, "manual_release_only": true, "quality_retest": false, "automatic_recovery": false, "management_v8": true, "model_operations": true, "quality_pause": true, "evidence_paths": []string{"openai-compatible/chat/completions"}})
++	}
++	if method == pluginabi.MethodHostQualityReleaseVerified {
++		return nil, fmt.Errorf("automatic_recovery_disabled_manual_release_required")
++	}
++	manager := h.currentAuthManager()
++	if manager == nil {
++		return nil, fmt.Errorf("quality authority unavailable")
++	}
++	if method == pluginabi.MethodHostQualityTargets {
++		var req struct {
++			AuthID string `json:"auth_id"`
++		}
++		if len(body) > 0 {
++			if !ojson.ValidBytes(body) {
++				return nil, fmt.Errorf("invalid quality target JSON")
++			}
++			req.AuthID = ojson.GetBytes(body, "auth_id").String()
++		}
++		targets := manager.QualityTargets()
++		if req.AuthID != "" {
++			t, err := manager.QualityTarget(req.AuthID)
++			if err != nil {
++				return nil, err
++			}
++			targets = []coreauth.QualityTarget{t}
++		}
++		out := make([]pluginapi.QualityTarget, 0, len(targets))
++		for _, t := range targets {
++			out = append(out, h.qualityTarget(t))
++		}
++		return marshalRPCResult(map[string]any{"targets": out})
++	}
++	if method == pluginabi.MethodHostQualityActions {
++		return marshalRPCResult(map[string]any{"actions": manager.QualityActions()})
++	}
++	owner := hostCallbackPluginIDFromContext(ctx)
++	instance := hostCallbackInstanceFromContext(ctx)
++	if owner == "" || instance == nil || instance.closed.Load() {
++		return nil, fmt.Errorf("quality mutation requires active native plugin identity")
++	}
++	if h.qualityHomeEnabled() {
++		return nil, fmt.Errorf("quality actions unsupported under Home control")
++	}
++	if method == pluginabi.MethodHostQualityActionStatus {
++		status, action, err := manager.QualityActionStatus(owner, ojson.GetBytes(body, "action_id").String())
++		if err != nil {
++			return nil, err
++		}
++		return marshalRPCResult(map[string]any{"status": status, "action": action})
++	}
++	var pause coreauth.QualityPause
++	if !ojson.ValidBytes(body) {
++		return nil, fmt.Errorf("invalid quality action JSON")
++	}
++	pause = qualityPauseFromJSON(body)
++	if pause.OwnerPlugin != "" && pause.OwnerPlugin != owner {
++		return nil, fmt.Errorf("quality owner mismatch")
++	}
++	pause.OwnerPlugin = owner
++	if method == pluginabi.MethodHostQualityPause {
++		p, err := manager.PauseQuality(ctx, owner, pause)
++		if err != nil {
++			return nil, err
++		}
++		return marshalRPCResult(map[string]any{"action": p})
++	}
++	if method != pluginabi.MethodHostQualityRelease {
++		return nil, fmt.Errorf("unsupported quality operation")
++	}
++	releaseCtx, err := h.manualQualityReleaseContext(ctx, body, pause)
++	if err != nil {
++		return nil, err
++	}
++	t, err := manager.ReleaseQuality(releaseCtx, owner, pause)
++	if err != nil {
++		return nil, err
++	}
++	return marshalRPCResult(map[string]any{"target": h.qualityTarget(t)})
++}
++
++func (h *Host) qualityHomeEnabled() bool {
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	return h.runtimeConfig != nil && h.runtimeConfig.Home.Enabled
++}
++
++func (h *Host) qualityTarget(t coreauth.QualityTarget) pluginapi.QualityTarget {
++	h.mu.Lock()
++	cfg := h.runtimeConfig
++	h.mu.Unlock()
++	configVersion := ""
++	if cfg != nil {
++		configVersion = coreexecutor.PayloadConfigurationFingerprint(cfg.Payload)
++	}
++	out := pluginapi.QualityTarget{PayloadConfigVersion: configVersion, ComparisonIdentity: t.ComparisonIdentity, AuthID: t.AuthID, AuthIndex: t.AuthIndex, Provider: t.Provider, Type: t.Kind, IdentityVersion: t.IdentityVersion, ManualDisabled: t.OperatorDisabled, QualityPaused: t.QualityPaused, EffectiveAvailable: t.EffectiveAvailable, Reasons: t.UnavailableReasons, CanPause: t.CanPause, CanRetest: t.CanRetest, UnsupportedReason: t.UnsupportedReason, Models: []string{}, Reasoning: map[string]*pluginapi.ThinkingSupport{}, Pauses: []pluginapi.QualityPause{}}
++	for _, p := range t.Pauses {
++		out.Pauses = append(out.Pauses, pluginapi.QualityPause(p))
++	}
++	for _, m := range registry.GetGlobalRegistry().GetModelsForClient(t.AuthID) {
++		if m == nil {
++			continue
++		}
++		out.Models = append(out.Models, m.ID)
++		if m.Thinking != nil {
++			out.Reasoning[m.ID] = &pluginapi.ThinkingSupport{Min: m.Thinking.Min, Max: m.Thinking.Max, ZeroAllowed: m.Thinking.ZeroAllowed, DynamicAllowed: m.Thinking.DynamicAllowed, Levels: append([]string(nil), m.Thinking.Levels...)}
++		} else {
++			out.Reasoning[m.ID] = nil
++		}
++	}
++	if h.qualityHomeEnabled() {
++		out.CanPause = false
++		out.CanRetest = false
++		out.UnsupportedReason = "Home authority does not expose quality controls"
++	}
++	return out
++}
++
++func (h *Host) qualityModelContext(ctx context.Context, req pluginapi.HostModelExecutionRequest) (context.Context, error) {
++	if req.QualityRetest != nil {
++		return nil, fmt.Errorf("quality_retest_disabled_manual_release_required")
++	}
++	return ctx, nil
++}
++
++type manualQualityReleaseScopeKey struct{}
++type manualQualityReleaseScope struct {
++	ruleID, actionID string
++	actionRevision   uint64
++}
++
++// Only a live authenticated v8 release request grants the one-action manual mutation scope.
++func withManualQualityReleaseScope(ctx context.Context, pluginID string, req pluginapi.ManagementRequest) context.Context {
++	if req.Method != "POST" || req.Path != "/v8/management/plugins/"+pluginID+"/actions/release" || !ojson.ValidBytes(req.Body) {
++		return ctx
++	}
++	body := ojson.ParseBytes(req.Body)
++	scope := manualQualityReleaseScope{ruleID: body.Get("rule_id").String(), actionID: body.Get("action_id").String(), actionRevision: body.Get("action_revision").Uint()}
++	if scope.ruleID == "" || scope.actionID == "" || scope.actionRevision == 0 {
++		return ctx
++	}
++	return context.WithValue(ctx, manualQualityReleaseScopeKey{}, scope)
++}
++func (h *Host) manualQualityReleaseContext(ctx context.Context, body []byte, pause coreauth.QualityPause) (context.Context, error) {
++	id := ojson.GetBytes(body, "host_callback_id").String()
++	callbackCtx, owner, instance, exists := h.lookupCallbackContext(id)
++	if !exists || owner != hostCallbackPluginIDFromContext(ctx) || instance == nil || instance != hostCallbackInstanceFromContext(ctx) || instance.closed.Load() {
++		return nil, fmt.Errorf("manual_release_requires_active_management_request")
++	}
++	if err := callbackCtx.Err(); err != nil {
++		return nil, err
++	}
++	scope, ok := callbackCtx.Value(manualQualityReleaseScopeKey{}).(manualQualityReleaseScope)
++	if !ok || scope.ruleID != pause.RuleID || scope.actionID != pause.ActionID || scope.actionRevision != pause.ActionRevision {
++		return nil, fmt.Errorf("manual_release_scope_mismatch")
++	}
++	return callbackCtx, nil
++}
++
++func qualityPauseFromJSON(body []byte) coreauth.QualityPause {
++	d := ojson.ParseBytes(body)
++	return coreauth.QualityPause{AuthID: d.Get("auth_id").String(), OwnerPlugin: d.Get("owner_plugin").String(), RuleID: d.Get("rule_id").String(), RuleRevision: d.Get("rule_revision").Uint(), ActionID: d.Get("action_id").String(), ActionRevision: d.Get("action_revision").Uint(), EvidenceRunID: d.Get("evidence_run_id").String(), IdentityVersion: d.Get("identity_version").String(), Reason: d.Get("reason").String(), CreatedAt: d.Get("created_at").Time()}
++}
+diff --git a/internal/pluginhost/rpc_client.go b/internal/pluginhost/rpc_client.go
+index ed96ba2..9883bbb 100644
+--- a/internal/pluginhost/rpc_client.go
++++ b/internal/pluginhost/rpc_client.go
+@@ -806,7 +806,12 @@ func (a *rpcPluginAdapter) RegisterManagement(ctx context.Context, req pluginapi
+ 		route.Handler = a
+ 		resources = append(resources, route)
+ 	}
+-	return pluginapi.ManagementRegistrationResponse{Routes: routes, Resources: resources}, nil
++	routesV8 := make([]pluginapi.ManagementRoute, 0, len(resp.RoutesV8))
++	for _, route := range resp.RoutesV8 {
++		route.Handler = a
++		routesV8 = append(routesV8, route)
++	}
++	return pluginapi.ManagementRegistrationResponse{Routes: routes, RoutesV8: routesV8, Resources: resources}, nil
+ }
+ 
+ func (a *rpcPluginAdapter) HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+diff --git a/internal/pluginhost/rpc_schema.go b/internal/pluginhost/rpc_schema.go
+index 9d320e7..f0baa76 100644
+--- a/internal/pluginhost/rpc_schema.go
++++ b/internal/pluginhost/rpc_schema.go
+@@ -147,6 +147,7 @@ type rpcManagementRequest struct {
+ }
+ 
+ type rpcManagementRegistrationResponse struct {
++	RoutesV8  []pluginapi.ManagementRoute `json:"routes_v8,omitempty"`
+ 	Routes    []pluginapi.ManagementRoute `json:"routes,omitempty"`
+ 	Resources []pluginapi.ResourceRoute   `json:"resources,omitempty"`
+ }
+diff --git a/internal/runtime/executor/codex_websockets_connection.go b/internal/runtime/executor/codex_websockets_connection.go
+index 05d22e9..ced2b93 100644
+--- a/internal/runtime/executor/codex_websockets_connection.go
++++ b/internal/runtime/executor/codex_websockets_connection.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
+ 	log "github.com/sirupsen/logrus"
+ 	"golang.org/x/net/proxy"
+@@ -56,7 +57,11 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
+ 	return conn, closer, resp, err
+ }
+ 
+-func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
++func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte, contexts ...context.Context) error {
++	var admissionCtx context.Context
++	if len(contexts) > 0 {
++		admissionCtx = contexts[0]
++	}
+ 	provider = strings.TrimSpace(provider)
+ 	if provider == "" {
+ 		provider = "codex"
+@@ -71,10 +76,13 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession,
+ 	log.Debugf("%s websockets: write payload started session=%s session_object=%s bytes=%d", provider, sessionID, sessionKind, payloadBytes)
+ 	var errSend error
+ 	if sess != nil {
+-		errSend = sess.writeMessage(conn, websocket.TextMessage, payload)
++		errSend = sess.writeMessage(conn, websocket.TextMessage, payload, admissionCtx)
+ 	} else if conn == nil {
+ 		errSend = fmt.Errorf("%s websockets executor: websocket conn is nil", provider)
+ 	} else {
++		if errAdmission := httptransport.CheckAdmission(admissionCtx); errAdmission != nil {
++			return errAdmission
++		}
+ 		errSend = conn.WriteMessage(websocket.TextMessage, payload)
+ 	}
+ 	if errSend != nil {
+@@ -85,8 +93,8 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession,
+ 	return errSend
+ }
+ 
+-func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+-	return writeWebsocketPayloadMessage("codex", sess, conn, payload)
++func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte, contexts ...context.Context) error {
++	return writeWebsocketPayloadMessage("codex", sess, conn, payload, contexts...)
+ }
+ 
+ func mapCodexWebsocketWriteError(sess *codexWebsocketSession, conn *websocket.Conn, err error) error {
+diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
+index 29cd156..4c7628d 100644
+--- a/internal/runtime/executor/codex_websockets_duplex.go
++++ b/internal/runtime/executor/codex_websockets_duplex.go
+@@ -638,7 +638,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 			helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
+ 				URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
+ 			})
+-			if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
++			if errWrite := writeCodexWebsocketMessage(sess, conn, payload, streamCtx); errWrite != nil {
+ 				fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
+ 				return false
+ 			}
+@@ -770,7 +770,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 					helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
+ 						URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
+ 					})
+-					if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
++					if errWrite := writeCodexWebsocketMessage(sess, conn, payload, streamCtx); errWrite != nil {
+ 						fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
+ 						return
+ 					}
+diff --git a/internal/runtime/executor/codex_websockets_execute.go b/internal/runtime/executor/codex_websockets_execute.go
+index e1b44eb..e1a7725 100644
+--- a/internal/runtime/executor/codex_websockets_execute.go
++++ b/internal/runtime/executor/codex_websockets_execute.go
+@@ -236,7 +236,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+ 	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
+ 
+ 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
+-	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
++	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody, ctx); errSend != nil {
+ 		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
+ 		if sess != nil && !isEphemeralSession {
+ 			if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
+@@ -284,7 +284,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+ 				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+ 				reporter.StartResponseTTFT()
+ 				cliproxyexecutor.MarkUpstreamAttempt(ctx)
+-				if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry == nil {
++				if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry, ctx); errSendRetry == nil {
+ 					wsReqBody = wsReqBodyRetry
+ 				} else {
+ 					errSendRetry = mapCodexWebsocketWriteError(sess, connRetry, errSendRetry)
+diff --git a/internal/runtime/executor/codex_websockets_session.go b/internal/runtime/executor/codex_websockets_session.go
+index e0a6340..abbfdc2 100644
+--- a/internal/runtime/executor/codex_websockets_session.go
++++ b/internal/runtime/executor/codex_websockets_session.go
+@@ -14,6 +14,7 @@ import (
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
+ 	log "github.com/sirupsen/logrus"
+ )
+ 
+@@ -235,7 +236,7 @@ var (
+ 	testWebsocketWriteChunkHook   func(chunkIndex int, totalChunks int)
+ )
+ 
+-func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
++func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte, contexts ...context.Context) error {
+ 	if s == nil {
+ 		return fmt.Errorf("codex websockets executor: session is nil")
+ 	}
+@@ -247,6 +248,11 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int,
+ 	if testWebsocketWritePayloadHook != nil {
+ 		testWebsocketWritePayloadHook(conn)
+ 	}
++	if len(contexts) > 0 {
++		if errAdmission := httptransport.CheckAdmission(contexts[0]); errAdmission != nil {
++			return errAdmission
++		}
++	}
+ 	if len(payload) <= codexWebsocketWriteChunkSize {
+ 		return conn.WriteMessage(msgType, payload)
+ 	}
+diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
+index e01dc78..ee45225 100644
+--- a/internal/runtime/executor/codex_websockets_stream.go
++++ b/internal/runtime/executor/codex_websockets_stream.go
+@@ -205,7 +205,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
+ 		}
+ 	}
+ 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
+-	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
++	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody, ctx); errSend != nil {
+ 		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
+ 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
+ 		if sess != nil && !isEphemeralSession && cliproxyexecutor.DownstreamWebsocket(ctx) {
+@@ -272,7 +272,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
+ 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+ 			reporter.StartResponseTTFT()
+ 			cliproxyexecutor.MarkUpstreamAttempt(ctx)
+-			if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry != nil {
++			if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry, ctx); errSendRetry != nil {
+ 				errSendRetry = mapCodexWebsocketWriteError(sess, conn, errSendRetry)
+ 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
+ 				e.invalidateUpstreamConn(sess, conn, "send_error", errSendRetry)
+diff --git a/internal/runtime/executor/openai_compat_executor.go b/internal/runtime/executor/openai_compat_executor.go
+index c4ac7e0..7834f5a 100644
+--- a/internal/runtime/executor/openai_compat_executor.go
++++ b/internal/runtime/executor/openai_compat_executor.go
+@@ -183,6 +183,13 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth
+ 	url := strings.TrimSuffix(baseURL, "/") + endpoint
+ 	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+ 	translated = doc.Bytes()
++	if auth != nil && to.String() == "openai" {
++		qualityConfigVersion := ""
++		if e.cfg != nil {
++			qualityConfigVersion = cliproxyexecutor.PayloadConfigurationFingerprint(e.cfg.Payload)
++		}
++		cliproxyexecutor.ObserveOpenAIQualityPayload(ctx, auth.ID, baseModel, from.String(), "openai-compatible/chat/completions", translated, qualityConfigVersion)
++	}
+ 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+ 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+ 	if err != nil {
+@@ -428,6 +435,13 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
+ 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+ 	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+ 	translated = doc.Bytes()
++	if auth != nil && to.String() == "openai" {
++		qualityConfigVersion := ""
++		if e.cfg != nil {
++			qualityConfigVersion = cliproxyexecutor.PayloadConfigurationFingerprint(e.cfg.Payload)
++		}
++		cliproxyexecutor.ObserveOpenAIQualityPayload(ctx, auth.ID, baseModel, from.String(), "openai-compatible/chat/completions", translated, qualityConfigVersion)
++	}
+ 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+ 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+ 	if err != nil {
+@@ -503,6 +517,10 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
+ 		var sawFinishReason bool
+ 		var streamFailed bool
+ 		var streamAborted bool
++		var qualityTerminal bool
++		defer func() {
++			cliproxyexecutor.FinalizeQualityStreamEvidence(ctx, qualityTerminal && !streamFailed && !streamAborted)
++		}()
+ 		var upstreamEvent string
+ 		var frameData [][]byte
+ 		defer streamUsage.Publish(ctx, reporter)
+@@ -585,6 +603,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
+ 				return true
+ 			}
+ 			if isDone {
++				qualityTerminal = true
+ 				seenDone = true
+ 				return true
+ 			}
+diff --git a/internal/runtime/executor/quality_admission_test.go b/internal/runtime/executor/quality_admission_test.go
+new file mode 100644
+index 0000000..8bdaef6
+--- /dev/null
++++ b/internal/runtime/executor/quality_admission_test.go
+@@ -0,0 +1,25 @@
++package executor
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++)
++
++func TestQualityAdmissionRecheckedBeforeWebsocketPayloadWrite(t *testing.T) {
++	denied := errors.New("quality pause committed during request preparation")
++	ctx := httptransport.WithAdmission(context.Background(), func() error { return denied })
++	// A connection without a transport must never be used when admission is denied.
++	conn := &websocket.Conn{}
++	for _, session := range []*codexWebsocketSession{nil, {sessionID: "retained-session"}} {
++		if err := writeCodexWebsocketMessage(session, conn, []byte(`{"type":"response.create"}`), ctx); !errors.Is(err, denied) {
++			t.Fatalf("Codex write bypassed admission: %v", err)
++		}
++		if err := writeWebsocketPayloadMessage("xai", session, conn, []byte(`{"type":"response.create"}`), ctx); !errors.Is(err, denied) {
++			t.Fatalf("xAI write bypassed admission: %v", err)
++		}
++	}
++}
+diff --git a/internal/runtime/executor/xai_websockets_executor.go b/internal/runtime/executor/xai_websockets_executor.go
+index 09943aa..ecb2c79 100644
+--- a/internal/runtime/executor/xai_websockets_executor.go
++++ b/internal/runtime/executor/xai_websockets_executor.go
+@@ -606,7 +606,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
+ 	}
+ 
+ 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
+-	if errSend := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBody); errSend != nil {
++	if errSend := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBody, ctx); errSend != nil {
+ 		errSend = mapXAIWebsocketWriteError(sess, conn, errSend)
+ 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
+ 		if sess != nil && !isEphemeralSession {
+@@ -661,7 +661,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
+ 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+ 			reporter.StartResponseTTFT()
+ 			cliproxyexecutor.MarkUpstreamAttempt(ctx)
+-			if errSendRetry := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBodyRetry); errSendRetry != nil {
++			if errSendRetry := writeWebsocketPayloadMessage("xai", sess, conn, wsReqBodyRetry, ctx); errSendRetry != nil {
+ 				errSendRetry = mapXAIWebsocketWriteError(sess, connRetry, errSendRetry)
+ 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
+ 				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
+diff --git a/internal/util/nocopy_invariant_test.go b/internal/util/nocopy_invariant_test.go
+index 368e68c..68801dc 100644
+--- a/internal/util/nocopy_invariant_test.go
++++ b/internal/util/nocopy_invariant_test.go
+@@ -104,6 +104,7 @@ type reviewedInPlaceByteWrite struct {
+ }
+ 
+ var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
++	"sdk/cliproxy/auth/selector_weighted.go":                        {2, "shifts []weightedPoolMember structs during insertion/removal; no JSON payload bytes are written or aliased by these member records"},
+ 	"internal/kvstore/bolt_store.go":                                {1, "copies into a freshly allocated envelope before publication; no no-copy JSON result can alias the destination"},
+ 	"internal/translator/common/apply_patch_responses.go":           {1, "shifts [][]byte item references in a private output slice; no byte of any JSON payload is rewritten"},
+ 	"internal/translator/common/vertex_partial_args.go":             {1, "shifts []string object keys to insert a key; no byte of any payload is rewritten"},
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 125f204..3e82469 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -405,6 +405,7 @@ func (h *OpenAIResponsesAPIHandler) authenticateResponsesWebsocketTurn(c *gin.Co
+ 		}
+ 		if c.Request != nil {
+ 			reqCtx := usage.WithAPIKey(c.Request.Context(), result.Principal)
++			reqCtx = usage.WithTrafficSource(reqCtx, "production")
+ 			reqCtx = usage.WithAccessProvider(reqCtx, result.Provider)
+ 			reqCtx = usage.WithIsNativeKey(reqCtx, usage.IsNativeAccessProvider(result.Provider))
+ 			c.Request = c.Request.WithContext(reqCtx)
+@@ -948,7 +949,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
+ 			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
+ 				current, ok := sessionAuthByID(authID)
+-				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled
++				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled && h.AuthManager.QualityBusinessAllowed(authID)
+ 			})
+ 			boundPrincipal := usage.APIKeyFromContext(cliCtx)
+ 			cliCtx = cliproxyexecutor.WithWebsocketTurnAuthorizer(cliCtx, func(turnPayload []byte) ([]byte, error) {
+diff --git a/sdk/cliproxy/auth/codex_siwc_bind.go b/sdk/cliproxy/auth/codex_siwc_bind.go
+index a2240c8..4ca2138 100644
+--- a/sdk/cliproxy/auth/codex_siwc_bind.go
++++ b/sdk/cliproxy/auth/codex_siwc_bind.go
+@@ -158,6 +158,10 @@ func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch ui
+ 		updated.CredentialVersion = max(current.CredentialVersion, 1) + 1
+ 		updated.UpdatedAt = now
+ 		updated.ClearFileSnapshot()
++		if errQuality := m.qualitySyncIdentity(updated, false, true); errQuality != nil {
++			m.mu.Unlock()
++			return errQuality
++		}
+ 		m.auths[id] = updated
+ 		m.notifyAuthChangeLocked(id)
+ 		committed = updated.Clone()
+diff --git a/sdk/cliproxy/auth/conductor.go b/sdk/cliproxy/auth/conductor.go
+index 3f485fc..7f37006 100644
+--- a/sdk/cliproxy/auth/conductor.go
++++ b/sdk/cliproxy/auth/conductor.go
+@@ -172,6 +172,7 @@ type resultPolicyHolder struct {
+ 
+ // Manager orchestrates auth lifecycle, selection, execution, and persistence.
+ type Manager struct {
++	quality                   atomic.Pointer[qualityState]
+ 	store                     Store
+ 	cooldownStore             CooldownStateStore
+ 	pendingCooldownStateStore CooldownStateStore
+diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
+index d6441a3..4fdae8b 100644
+--- a/sdk/cliproxy/auth/conductor_execution.go
++++ b/sdk/cliproxy/auth/conductor_execution.go
+@@ -732,7 +732,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 			executionSeq := m.nextExecutionSeq()
+ 			startExec := time.Now()
+-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
++			resp, errExec := m.qualityExecute(execCtx, executor, auth, execReq, execOpts)
+ 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 			durationExec := time.Since(startExec)
+ 			if errExec != nil {
+@@ -750,7 +750,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
++					resp, errExec = m.qualityExecute(execCtx, executor, auth, execReq, execOpts)
+ 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 					durationRetry := time.Since(startRetry)
+ 					if errExec != nil {
+@@ -950,7 +950,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 			executionSeq := m.nextExecutionSeq()
+ 			startExec := time.Now()
+-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
++			resp, errExec := m.qualityCountTokens(execCtx, executor, auth, execReq, execOpts)
+ 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 			durationExec := time.Since(startExec)
+ 			if errExec != nil {
+@@ -968,7 +968,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
++					resp, errExec = m.qualityCountTokens(execCtx, executor, auth, execReq, execOpts)
+ 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 					durationRetry := time.Since(startRetry)
+ 					if errExec != nil {
+@@ -2420,12 +2420,12 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
+ 	credVersion := auth.CredentialVersion
+ 	regEpoch := auth.RegistrationEpoch
+ 
+-	streamRes, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
++	streamRes, errStream := m.qualityExecuteStream(execCtx, executor, auth, req, opts)
+ 	if errStream != nil {
+ 		rerr := resultErrorFromError(errStream)
+ 		if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
+ 			opts.Stream = false
+-			resp, errExec := executor.Execute(execCtx, auth, req, opts)
++			resp, errExec := m.qualityExecute(execCtx, executor, auth, req, opts)
+ 			rerrExec := resultErrorFromError(errExec)
+ 			if rerrExec != nil {
+ 				rerrExec.Message = sanitizeRenewalMessage(rerrExec.Message)
+diff --git a/sdk/cliproxy/auth/conductor_home.go b/sdk/cliproxy/auth/conductor_home.go
+index ddd7a2b..68cd5f0 100644
+--- a/sdk/cliproxy/auth/conductor_home.go
++++ b/sdk/cliproxy/auth/conductor_home.go
+@@ -1515,7 +1515,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
+ 			execReq.Model = upstreamModel
+ 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
+ 			executionSeq := m.nextExecutionSeq()
+-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
++			resp, errExec := m.qualityExecute(creditsCtx, c.executor, c.auth, execReq, creditsOpts)
+ 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts, CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+ 			if errExec != nil {
+ 				result.Error = resultErrorFromError(errExec)
+diff --git a/sdk/cliproxy/auth/conductor_home_execution.go b/sdk/cliproxy/auth/conductor_home_execution.go
+index 11fcf62..13b95da 100644
+--- a/sdk/cliproxy/auth/conductor_home_execution.go
++++ b/sdk/cliproxy/auth/conductor_home_execution.go
+@@ -243,9 +243,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
+ 			executor := executorForAuth(selection.Executor, preparedAuth)
+ 			execute := func() (cliproxyexecutor.Response, error) {
+ 				if countTokens {
+-					return executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
++					return m.qualityCountTokens(executorCtx, executor, preparedAuth, execReq, execOpts)
+ 				}
+-				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
++				return m.qualityExecute(execCtx, executor, preparedAuth, execReq, execOpts)
+ 			}
+ 			startHomeExec := time.Now()
+ 			response, errExecute = execute()
+diff --git a/sdk/cliproxy/auth/conductor_lifecycle.go b/sdk/cliproxy/auth/conductor_lifecycle.go
+index 1128cdb..dc066fc 100644
+--- a/sdk/cliproxy/auth/conductor_lifecycle.go
++++ b/sdk/cliproxy/auth/conductor_lifecycle.go
+@@ -155,6 +155,10 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
+ 		}
+ 	}
+ 	auth.ClearFileSnapshot()
++	if errQuality := m.qualitySyncIdentity(auth, false, m.auths[auth.ID] != nil); errQuality != nil {
++		m.mu.Unlock()
++		return nil, errQuality
++	}
+ 	authClone := auth.Clone()
+ 	m.auths[auth.ID] = authClone
+ 	m.notifyAuthChangeLocked(auth.ID)
+@@ -644,6 +648,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
+ 	}
+ 	auth.ClearFileSnapshot()
+ 	authClone := auth.Clone()
++	if errQuality := m.qualitySyncIdentity(auth, mode != updateModeReplace, false); errQuality != nil {
++		m.mu.Unlock()
++		return nil, false, false, errQuality
++	}
+ 	m.auths[auth.ID] = authClone
+ 	m.notifyAuthChangeLocked(auth.ID)
+ 	// Snapshot before unlocking: MarkResult mutates the published auth in place.
+@@ -712,6 +720,11 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
+ 		m.mu.Unlock()
+ 		return false
+ 	}
++	if errQuality := m.qualityDeleteIdentity(id); errQuality != nil {
++		m.mu.Unlock()
++		log.WithError(errQuality).Error("quality deletion persistence failed; admission remains blocked")
++		return false
++	}
+ 	provider := strings.TrimSpace(existing.Provider)
+ 	delete(m.auths, id)
+ 	m.notifyAuthChangeLocked(id)
+@@ -843,6 +856,10 @@ func (m *Manager) Load(ctx context.Context) error {
+ 		if auth.CredentialVersion == 0 {
+ 			auth.CredentialVersion = 1
+ 		}
++		if errQuality := m.qualitySyncIdentity(auth, false, false); errQuality != nil {
++			m.mu.Unlock()
++			return errQuality
++		}
+ 		m.auths[auth.ID] = auth.Clone()
+ 	}
+ 
+@@ -853,6 +870,10 @@ func (m *Manager) Load(ctx context.Context) error {
+ 	var removedTombstones []removalTombstone
+ 	for prevID := range previousAuths {
+ 		if _, exists := m.auths[prevID]; !exists {
++			if errQuality := m.qualityDeleteIdentity(prevID); errQuality != nil {
++				m.mu.Unlock()
++				return errQuality
++			}
+ 			m.authEpochs[prevID]++
+ 			removedTombstones = append(removedTombstones, removalTombstone{
+ 				id:    prevID,
+diff --git a/sdk/cliproxy/auth/conductor_selection.go b/sdk/cliproxy/auth/conductor_selection.go
+index c9bb0db..cd98a4b 100644
+--- a/sdk/cliproxy/auth/conductor_selection.go
++++ b/sdk/cliproxy/auth/conductor_selection.go
+@@ -937,6 +937,15 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
+ // unless session affinity or an across-priorities scheduler is active, in which case the selector
+ // or scheduler additionally receives lower priority tiers.
+ func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool, clientHeaders ...http.Header) (priorityAuths, selectorAuths []*Auth, err error) {
++	if m.quality.Load() != nil {
++		filtered := make([]*Auth, 0, len(auths))
++		for _, a := range auths {
++			if a != nil && !m.qualityBlocked(ctx, a.ID) {
++				filtered = append(filtered, a)
++			}
++		}
++		auths = filtered
++	}
+ 	_, sessionAffinity := selector.(*SessionAffinitySelector)
+ 	if _, weighted := selector.(*WeightedRoundRobinSelector); weighted {
+ 		// Exclude zero-weight credentials before priority selection, just as the
+@@ -2550,6 +2559,7 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
+ }
+ 
+ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
++	tried = m.qualityExcluded(ctx, tried)
+ 	opts.EnsureMetadata()
+ 	clearSchedulerSelectionID(opts.Metadata)
+ 	if m.HomeEnabled() {
+@@ -2863,6 +2873,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
+ }
+ 
+ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
++	tried = m.qualityExcluded(ctx, tried)
+ 	opts.EnsureMetadata()
+ 	clearSchedulerSelectionID(opts.Metadata)
+ 	if m.HomeEnabled() {
+diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
+index 3c37ace..d2f050a 100644
+--- a/sdk/cliproxy/auth/conductor_stream.go
++++ b/sdk/cliproxy/auth/conductor_stream.go
+@@ -438,7 +438,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+ 		executionSeq := m.nextExecutionSeq()
+ 		startStream := time.Now()
+-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
++		streamResult, errStream := m.qualityExecuteStream(ctx, executor, auth, execReq, execOpts)
+ 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+ 		if hasUpstreamExecutionAttempt(errStream) {
+ 			upstreamErr = errStream
+@@ -460,7 +460,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
++					streamResult, errStream = m.qualityExecuteStream(ctx, executor, auth, execReq, execOpts)
+ 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+ 					if hasUpstreamExecutionAttempt(errStream) {
+ 						upstreamErr = errStream
+@@ -541,7 +541,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 					ctx = m.newUpstreamAttemptContext(ctx)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
++					retryStream, retryErr := m.qualityExecuteStream(ctx, executor, auth, execReq, execOpts)
+ 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
+ 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
+ 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
+diff --git a/sdk/cliproxy/auth/quality.go b/sdk/cliproxy/auth/quality.go
+new file mode 100644
+index 0000000..04162cd
+--- /dev/null
++++ b/sdk/cliproxy/auth/quality.go
+@@ -0,0 +1,617 @@
++package auth
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"encoding/gob"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/google/uuid"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	bolt "go.etcd.io/bbolt"
++)
++
++// QualityPause is an owned, durable credential-wide admission restriction.
++type QualityPause struct {
++	AuthID          string    `json:"auth_id"`
++	OwnerPlugin     string    `json:"owner_plugin"`
++	RuleID          string    `json:"rule_id"`
++	RuleRevision    uint64    `json:"rule_revision"`
++	ActionID        string    `json:"action_id"`
++	ActionRevision  uint64    `json:"action_revision"`
++	EvidenceRunID   string    `json:"evidence_run_id"`
++	IdentityVersion string    `json:"identity_version"`
++	Reason          string    `json:"reason"`
++	CreatedAt       time.Time `json:"created_at"`
++}
++
++// QualityTarget deliberately excludes credential material and source paths.
++type QualityTarget struct {
++	AuthID             string         `json:"auth_id"`
++	AuthIndex          string         `json:"auth_index"`
++	Provider           string         `json:"provider"`
++	Kind               string         `json:"kind"`
++	IdentityVersion    string         `json:"identity_version"`
++	ComparisonIdentity string         `json:"comparison_identity"`
++	OperatorDisabled   bool           `json:"operator_disabled"`
++	NativeDisabled     bool           `json:"native_disabled"`
++	QualityPaused      bool           `json:"quality_paused"`
++	EffectiveAvailable bool           `json:"effective_available"`
++	UnavailableReasons []string       `json:"unavailable_reasons"`
++	CanPause           bool           `json:"can_pause"`
++	CanRetest          bool           `json:"can_retest"`
++	UnsupportedReason  string         `json:"unsupported_reason,omitempty"`
++	Pauses             []QualityPause `json:"pauses"`
++}
++
++type qualityIdentity struct {
++	Version, Grant string
++	Deleted        bool
++}
++type qualityState struct {
++	mu         sync.RWMutex
++	db         *bolt.DB
++	path       string
++	identities map[string]qualityIdentity
++	actions    map[string]QualityPause
++	retired    map[string]QualityPause
++	closed     bool
++	fault      error
++}
++
++var qualityBucket = []byte("quality-v1")
++
++// OpenQualityState loads restrictions before any credential is admitted. Failure is fatal to startup.
++func (m *Manager) OpenQualityState(path string) error {
++	if m == nil || strings.TrimSpace(path) == "" {
++		return errors.New("quality state path required")
++	}
++	if m.quality.Load() != nil {
++		return errors.New("quality state already open")
++	}
++	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
++		return fmt.Errorf("quality directory: %w", err)
++	}
++	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: time.Second})
++	if err != nil {
++		return fmt.Errorf("open quality authority: %w", err)
++	}
++	q := &qualityState{db: db, path: path, identities: map[string]qualityIdentity{}, actions: map[string]QualityPause{}}
++	err = db.Update(func(tx *bolt.Tx) error {
++		b, e := tx.CreateBucketIfNotExists(qualityBucket)
++		if e != nil {
++			return e
++		}
++		if v := b.Get([]byte("state")); v != nil {
++			var state struct {
++				Identities map[string]qualityIdentity
++				Actions    map[string]QualityPause
++				Retired    map[string]QualityPause
++			}
++			if e = gob.NewDecoder(bytes.NewReader(v)).Decode(&state); e != nil {
++				return e
++			}
++			q.identities = state.Identities
++			q.actions = state.Actions
++			q.retired = state.Retired
++		}
++		return nil
++	})
++	if err != nil {
++		return errors.Join(fmt.Errorf("load quality authority: %w", err), db.Close())
++	}
++	if q.identities == nil {
++		q.identities = map[string]qualityIdentity{}
++	}
++	if q.actions == nil {
++		q.actions = map[string]QualityPause{}
++	}
++	if q.retired == nil {
++		q.retired = map[string]QualityPause{}
++	}
++	if !m.quality.CompareAndSwap(nil, q) {
++		return errors.Join(errors.New("quality state already open"), db.Close())
++	}
++	for _, a := range m.List() {
++		if err = m.qualitySyncIdentity(a, false, false); err != nil {
++			return errors.Join(err, m.CloseQualityState())
++		}
++	}
++	return nil
++}
++
++// CloseQualityState retains the restrictions and fails admission closed after shutdown.
++func (m *Manager) CloseQualityState() error {
++	q := m.quality.Load()
++	if q == nil {
++		return nil
++	}
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	if q.closed {
++		return nil
++	}
++	q.closed = true
++	return q.db.Close()
++}
++func (q *qualityState) saveLocked() error {
++	if q.closed {
++		return errors.New("quality authority closed")
++	}
++	var buf bytes.Buffer
++	if err := gob.NewEncoder(&buf).Encode(struct {
++		Identities map[string]qualityIdentity
++		Actions    map[string]QualityPause
++		Retired    map[string]QualityPause
++	}{q.identities, q.actions, q.retired}); err != nil {
++		return err
++	}
++	return q.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(qualityBucket).Put([]byte("state"), buf.Bytes()) })
++}
++
++// qualitySyncIdentity is called under the credential mutation gate before publication.
++// Refresh updates the grant fingerprint while retaining the durable incarnation.
++func (m *Manager) qualitySyncIdentity(a *Auth, refresh, replaced bool) error {
++	q := m.quality.Load()
++	if q == nil || a == nil {
++		return nil
++	}
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	if q.closed || q.fault != nil {
++		return errors.New("quality authority unavailable")
++	}
++	old, exists := q.identities[a.ID]
++	next := old
++	grant := a.Provider + ":" + AuthGrantFingerprint(a)
++	if !exists || old.Deleted || replaced || (!refresh && old.Grant != grant) {
++		next.Version = uuid.NewString()
++	}
++	next.Grant = grant
++	next.Deleted = false
++	if old == next {
++		return nil
++	}
++	q.identities[a.ID] = next
++	if err := q.saveLocked(); err != nil {
++		q.identities[a.ID] = old
++		q.fault = err
++		return fmt.Errorf("persist quality identity: %w", err)
++	}
++	return nil
++}
++func (m *Manager) qualityDeleteIdentity(id string) error {
++	q := m.quality.Load()
++	if q == nil {
++		return nil
++	}
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	old := q.identities[id]
++	next := old
++	next.Deleted = true
++	q.identities[id] = next
++	if err := q.saveLocked(); err != nil {
++		q.identities[id] = old
++		q.fault = err
++		return fmt.Errorf("persist quality tombstone: %w", err)
++	}
++	return nil
++}
++
++// QualityTargets includes runtime-only and paused credentials instead of inferring deletion from filtered lists.
++func (m *Manager) QualityTargets() []QualityTarget {
++	out := []QualityTarget{}
++	for _, a := range m.List() {
++		if t, e := m.QualityTarget(a.ID); e == nil {
++			out = append(out, t)
++		}
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].AuthID < out[j].AuthID })
++	return out
++}
++func (m *Manager) QualityTarget(id string) (QualityTarget, error) {
++	a, ok := m.GetByID(id)
++	if !ok || a == nil {
++		return QualityTarget{}, errors.New("credential_deleted")
++	}
++	t := QualityTarget{ComparisonIdentity: qualityComparisonIdentity(a), AuthID: a.ID, AuthIndex: a.Index, Provider: a.Provider, Kind: a.AuthKind(), OperatorDisabled: qualityOperatorDisabled(a), NativeDisabled: a.Disabled || a.Status == StatusDisabled, Pauses: []QualityPause{}, UnavailableReasons: []string{}}
++	q := m.quality.Load()
++	if m.HomeEnabled() {
++		t.UnsupportedReason = "home_controlled"
++	} else if q == nil {
++		t.UnsupportedReason = "quality_authority_unavailable"
++	} else {
++		q.mu.RLock()
++		identity := q.identities[id]
++		t.IdentityVersion = identity.Version
++		t.CanPause = !q.closed && q.fault == nil && identity.Version != "" && !identity.Deleted
++		t.CanRetest = false
++		for _, p := range q.actions {
++			if p.AuthID == id {
++				t.Pauses = append(t.Pauses, p)
++			}
++		}
++		q.mu.RUnlock()
++		if !t.CanPause {
++			t.UnsupportedReason = "quality_identity_unavailable"
++		}
++	}
++	if t.OperatorDisabled {
++		t.UnavailableReasons = append(t.UnavailableReasons, "operator_disabled")
++	}
++	if a.RequiresSignIn {
++		t.UnavailableReasons = append(t.UnavailableReasons, "requires_sign_in")
++	}
++	if a.Unavailable || a.NextRetryAfter.After(time.Now()) {
++		t.UnavailableReasons = append(t.UnavailableReasons, "native_unavailable")
++	}
++	if !qualityHasIdentityMaterial(a) {
++		t.CanPause = false
++		t.CanRetest = false
++		t.UnsupportedReason = "stable_credential_identity_unavailable"
++	}
++	t.QualityPaused = len(t.Pauses) > 0
++	if t.QualityPaused {
++		t.UnavailableReasons = append(t.UnavailableReasons, "quality_pause")
++	}
++	t.EffectiveAvailable = len(t.UnavailableReasons) == 0
++	return t, nil
++}
++func (m *Manager) QualityActions() []QualityPause {
++	out := []QualityPause{}
++	q := m.quality.Load()
++	if q == nil {
++		return out
++	}
++	q.mu.RLock()
++	defer q.mu.RUnlock()
++	for _, p := range q.actions {
++		out = append(out, p)
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].ActionID < out[j].ActionID })
++	return out
++}
++func qualityBindingMatches(a, b QualityPause) bool {
++	return a.AuthID == b.AuthID && a.OwnerPlugin == b.OwnerPlugin && a.RuleID == b.RuleID && a.RuleRevision == b.RuleRevision && a.ActionID == b.ActionID && a.ActionRevision == b.ActionRevision && a.IdentityVersion == b.IdentityVersion
++}
++
++// PauseQuality commits an idempotent restriction without changing operator disable or native cooldown.
++func (m *Manager) PauseQuality(ctx context.Context, owner string, p QualityPause) (QualityPause, error) {
++	if m.HomeEnabled() {
++		return QualityPause{}, errors.New("home_controlled")
++	}
++	if owner == "" || p.OwnerPlugin != owner || p.AuthID == "" || p.RuleID == "" || p.RuleRevision == 0 || p.ActionID == "" || p.ActionRevision != 1 || p.EvidenceRunID == "" || p.IdentityVersion == "" || len(p.Reason) > 1024 {
++		return QualityPause{}, errors.New("invalid_quality_action")
++	}
++	release, err := m.lockAuthMutationContext(ctx, p.AuthID)
++	if err != nil {
++		return QualityPause{}, err
++	}
++	defer release()
++	a, ok := m.GetByID(p.AuthID)
++	if !ok {
++		return QualityPause{}, errors.New("credential_deleted")
++	}
++	if qualityOperatorDisabled(a) {
++		return QualityPause{}, errors.New("operator_disabled")
++	}
++	if a.RequiresSignIn {
++		return QualityPause{}, errors.New("requires_sign_in")
++	}
++	if !qualityHasIdentityMaterial(a) {
++		return QualityPause{}, errors.New("stable_credential_identity_unavailable")
++	}
++	q := m.quality.Load()
++	if q == nil {
++		return QualityPause{}, errors.New("quality_authority_unavailable")
++	}
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	if q.closed || q.fault != nil {
++		return QualityPause{}, errors.New("quality_authority_unavailable")
++	}
++	identity := q.identities[p.AuthID]
++	if identity.Deleted || identity.Version != p.IdentityVersion {
++		return QualityPause{}, errors.New("identity_conflict")
++	}
++	if _, retired := q.retired[p.ActionID]; retired {
++		return QualityPause{}, errors.New("action_already_released")
++	}
++	if old, exists := q.actions[p.ActionID]; exists {
++		if qualityBindingMatches(old, p) && old.EvidenceRunID == p.EvidenceRunID {
++			return old, nil
++		}
++		return QualityPause{}, errors.New("action_conflict")
++	}
++	for _, old := range q.actions {
++		if old.AuthID == p.AuthID && old.OwnerPlugin == owner && old.RuleID == p.RuleID {
++			return QualityPause{}, errors.New("rule_already_owns_pause")
++		}
++	}
++	p.CreatedAt = time.Now().UTC()
++	q.actions[p.ActionID] = p
++	if err = q.saveLocked(); err != nil {
++		delete(q.actions, p.ActionID)
++		return QualityPause{}, fmt.Errorf("persist quality pause: %w", err)
++	}
++	return p, nil
++}
++
++// ReleaseQuality releases exactly the supplied ownership revision. It never enables a credential.
++func (m *Manager) ReleaseQuality(ctx context.Context, owner string, p QualityPause) (QualityTarget, error) {
++	return m.releaseQuality(ctx, owner, p, false)
++}
++
++// ReleaseQualityAdministratively permits an authenticated operator to release an orphaned or replaced identity, with exact ownership CAS.
++func (m *Manager) ReleaseQualityAdministratively(ctx context.Context, p QualityPause) (QualityTarget, error) {
++	return m.releaseQuality(ctx, p.OwnerPlugin, p, true)
++}
++func (m *Manager) releaseQuality(ctx context.Context, owner string, p QualityPause, administrative bool) (QualityTarget, error) {
++	if m.HomeEnabled() {
++		return QualityTarget{}, errors.New("home_controlled")
++	}
++	release, err := m.lockAuthMutationContext(ctx, p.AuthID)
++	if err != nil {
++		return QualityTarget{}, err
++	}
++	defer release()
++	q := m.quality.Load()
++	if q == nil {
++		return QualityTarget{}, errors.New("quality_authority_unavailable")
++	}
++	q.mu.Lock()
++	if q.closed || q.fault != nil {
++		q.mu.Unlock()
++		return QualityTarget{}, errors.New("quality_authority_unavailable")
++	}
++	old, ok := q.actions[p.ActionID]
++	if !ok {
++		retired, released := q.retired[p.ActionID]
++		q.mu.Unlock()
++		if !released || retired.OwnerPlugin != owner || !qualityBindingMatches(retired, p) {
++			return QualityTarget{}, errors.New("action_conflict")
++		}
++		target, err := m.QualityTarget(p.AuthID)
++		if administrative && err != nil {
++			return QualityTarget{AuthID: p.AuthID, UnavailableReasons: []string{"credential_deleted"}}, nil
++		}
++		return target, err
++	}
++	if old.OwnerPlugin != owner || !qualityBindingMatches(old, p) {
++		q.mu.Unlock()
++		return QualityTarget{}, errors.New("action_conflict")
++	}
++	if !administrative && (q.identities[p.AuthID].Deleted || q.identities[p.AuthID].Version != p.IdentityVersion) {
++		q.mu.Unlock()
++		return QualityTarget{}, errors.New("identity_conflict")
++	}
++	delete(q.actions, p.ActionID)
++	q.retired[p.ActionID] = old
++	if err = q.saveLocked(); err != nil {
++		q.actions[p.ActionID] = old
++		delete(q.retired, p.ActionID)
++		q.mu.Unlock()
++		return QualityTarget{}, fmt.Errorf("persist quality release: %w", err)
++	}
++	q.mu.Unlock()
++	target, errTarget := m.QualityTarget(p.AuthID)
++	if administrative && errTarget != nil {
++		return QualityTarget{AuthID: p.AuthID, UnavailableReasons: []string{"credential_deleted"}}, nil
++	}
++	return target, errTarget
++}
++
++// QualityRetestContext rejects the removed bypass contract, including calls from older plugins.
++// Deprecated: paused credentials require an explicit manual release before any execution.
++func (m *Manager) QualityRetestContext(context.Context, string, string, QualityPause) (context.Context, error) {
++	return nil, errors.New("quality_retest_disabled_manual_release_required")
++}
++func (m *Manager) qualityBlocked(ctx context.Context, id string) bool {
++	q := m.quality.Load()
++	if q == nil {
++		return false
++	}
++	q.mu.RLock()
++	defer q.mu.RUnlock()
++	if q.closed || q.fault != nil {
++		return true
++	}
++	for _, p := range q.actions {
++		if p.AuthID == id {
++			return true
++		}
++	}
++	return false
++}
++func (m *Manager) checkQualityAdmission(ctx context.Context, id, model string) error {
++	if m.quality.Load() == nil {
++		return nil
++	}
++	a, ok := m.GetByID(id)
++	if !ok {
++		return &Error{Code: ErrorCodeRequestScoped, Message: "credential_deleted", HTTPStatus: 409}
++	}
++	if m.qualityBlocked(ctx, id) {
++		return &Error{Code: ErrorCodeRequestScoped, Message: "quality_pause", HTTPStatus: 409}
++	}
++	if qualityOperatorDisabled(a) || a.RequiresSignIn {
++		return &Error{Code: ErrorCodeRequestScoped, Message: "credential_blocked", HTTPStatus: 409}
++	}
++	return nil
++}
++func (m *Manager) qualityExecute(ctx context.Context, e ProviderExecutor, a *Auth, r cliproxyexecutor.Request, o cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
++	if err := m.checkQualityAdmission(ctx, a.ID, r.Model); err != nil {
++		return cliproxyexecutor.Response{}, err
++	}
++	return e.Execute(m.qualityExecutionContext(ctx, a.ID, r.Model), a, r, o)
++}
++func (m *Manager) qualityExecuteStream(ctx context.Context, e ProviderExecutor, a *Auth, r cliproxyexecutor.Request, o cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
++	if err := m.checkQualityAdmission(ctx, a.ID, r.Model); err != nil {
++		return nil, err
++	}
++	return e.ExecuteStream(m.qualityExecutionContext(ctx, a.ID, r.Model), a, r, o)
++}
++func (m *Manager) qualityCountTokens(ctx context.Context, e ProviderExecutor, a *Auth, r cliproxyexecutor.Request, o cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
++	if err := m.checkQualityAdmission(ctx, a.ID, r.Model); err != nil {
++		return cliproxyexecutor.Response{}, err
++	}
++	return e.CountTokens(m.qualityExecutionContext(ctx, a.ID, r.Model), a, r, o)
++}
++
++// QualityBusinessAllowed is used for new duplex WebSocket turns on an already open transport.
++func (m *Manager) QualityBusinessAllowed(authID string) bool {
++	return !m.qualityBlocked(context.Background(), authID)
++}
++
++func qualityHasIdentityMaterial(a *Auth) bool {
++	if a == nil {
++		return false
++	}
++	if authAccessToken(a) != "" || authOuterAccessToken(a) != "" || authRefreshToken(a) != "" {
++		return true
++	}
++	for _, key := range []string{"api_key", "session_token"} {
++		if strings.TrimSpace(a.Attributes[key]) != "" || authMetadataString(a, key) != "" {
++			return true
++		}
++	}
++	return false
++}
++
++// qualityExcluded keeps scheduler caches intact and excludes restrictions per operation.
++func (m *Manager) qualityExcluded(ctx context.Context, tried map[string]struct{}) map[string]struct{} {
++	q := m.quality.Load()
++	if q == nil {
++		return tried
++	}
++	q.mu.RLock()
++	unavailable := q.closed || q.fault != nil
++	ids := make([]string, 0, len(q.actions))
++	for _, p := range q.actions {
++		ids = append(ids, p.AuthID)
++	}
++	q.mu.RUnlock()
++	if unavailable {
++		for _, a := range m.List() {
++			ids = append(ids, a.ID)
++		}
++	}
++	if len(ids) == 0 {
++		return tried
++	}
++	result := make(map[string]struct{}, len(tried)+len(ids))
++	for id := range tried {
++		result[id] = struct{}{}
++	}
++	for _, id := range ids {
++		if m.qualityBlocked(ctx, id) {
++			result[id] = struct{}{}
++		}
++	}
++	return result
++}
++
++// ReleaseQualityVerified rejects automatic recovery retained only for source and wire compatibility.
++// Deprecated: use an explicit authenticated manual release.
++func (m *Manager) ReleaseQualityVerified(context.Context, string, QualityPause, []string) (QualityTarget, error) {
++	return QualityTarget{}, errors.New("automatic_recovery_disabled_manual_release_required")
++}
++
++// QualityActionStatus reconciles a durable action intent without replaying a released action.
++func (m *Manager) QualityActionStatus(owner, actionID string) (string, *QualityPause, error) {
++	q := m.quality.Load()
++	if q == nil {
++		return "", nil, errors.New("quality_authority_unavailable")
++	}
++	q.mu.RLock()
++	defer q.mu.RUnlock()
++	if q.closed || q.fault != nil {
++		return "", nil, errors.New("quality_authority_unavailable")
++	}
++	p, exists := q.actions[actionID]
++	status := "active"
++	if !exists {
++		p, exists = q.retired[actionID]
++		status = "released"
++	}
++	if !exists {
++		return "absent", nil, nil
++	}
++	if p.OwnerPlugin != owner {
++		return "", nil, errors.New("action_owner_conflict")
++	}
++	return status, &p, nil
++}
++func qualityComparisonIdentity(a *Auth) string {
++	if !qualityHasIdentityMaterial(a) {
++		return ""
++	}
++	material := ""
++	for _, key := range []string{"account_id", "email"} {
++		if value := authMetadataString(a, key); value != "" {
++			material = key + ":" + value
++			break
++		}
++		if value := strings.TrimSpace(a.Attributes[key]); value != "" {
++			material = key + ":" + value
++			break
++		}
++	}
++	if material == "" {
++		for _, key := range []string{"api_key", "session_token"} {
++			if value := strings.TrimSpace(a.Attributes[key]); value != "" {
++				material = key + ":" + value
++				break
++			}
++			if value := authMetadataString(a, key); value != "" {
++				material = key + ":" + value
++				break
++			}
++		}
++	}
++	if material == "" {
++		material = "refresh:" + authRefreshToken(a)
++	}
++	if material == "refresh:" {
++		material = "access:" + authOuterAccessToken(a)
++		if material == "access:" {
++			material = "access:" + authAccessToken(a)
++		}
++	}
++	// Provider names are routing labels and cannot establish independent controls.
++	digest := sha256.Sum256([]byte(material))
++	return hex.EncodeToString(digest[:])
++}
++
++func (m *Manager) qualityExecutionContext(ctx context.Context, authID, model string) context.Context {
++	if m.quality.Load() == nil {
++		return ctx
++	}
++	return httptransport.WithAdmission(ctx, func() error { return m.checkQualityAdmission(ctx, authID, model) })
++}
++
++func qualityOperatorDisabled(a *Auth) bool {
++	if a == nil {
++		return true
++	}
++	if a.Disabled || a.Status == StatusDisabled {
++		return true
++	}
++	for _, pattern := range strings.Split(a.Attributes["excluded_models"], ",") {
++		if strings.TrimSpace(pattern) == "*" {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/sdk/cliproxy/auth/quality_test.go b/sdk/cliproxy/auth/quality_test.go
+new file mode 100644
+index 0000000..25c5fb0
+--- /dev/null
++++ b/sdk/cliproxy/auth/quality_test.go
+@@ -0,0 +1,593 @@
++package auth
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net/http"
++	"path/filepath"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	ex "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++)
++
++type qualityTestExecutor struct {
++	calls   atomic.Int64
++	started chan struct{}
++	finish  chan struct{}
++	fail    bool
++}
++
++func (e *qualityTestExecutor) Identifier() string { return "quality-test" }
++func (e *qualityTestExecutor) Execute(ctx context.Context, a *Auth, r ex.Request, o ex.Options) (ex.Response, error) {
++	e.calls.Add(1)
++	if e.started != nil {
++		close(e.started)
++		select {
++		case <-e.finish:
++		case <-ctx.Done():
++			return ex.Response{}, ctx.Err()
++		}
++	}
++	if e.fail {
++		return ex.Response{}, &Error{HTTPStatus: 503, Message: "synthetic failure"}
++	}
++	return ex.Response{Payload: []byte(`{"choices":[{"message":{"content":"21"},"finish_reason":"stop"}]}`)}, nil
++}
++func (e *qualityTestExecutor) ExecuteStream(ctx context.Context, a *Auth, r ex.Request, o ex.Options) (*ex.StreamResult, error) {
++	e.calls.Add(1)
++	ch := make(chan ex.StreamChunk, 1)
++	ch <- ex.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
++	close(ch)
++	return &ex.StreamResult{Chunks: ch}, nil
++}
++func (e *qualityTestExecutor) CountTokens(context.Context, *Auth, ex.Request, ex.Options) (ex.Response, error) {
++	e.calls.Add(1)
++	return ex.Response{Payload: []byte(`{"tokens":1}`)}, nil
++}
++func (e *qualityTestExecutor) Refresh(_ context.Context, a *Auth) (*Auth, error) { return a, nil }
++func (e *qualityTestExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
++	return nil, errors.New("unused")
++}
++func newQualityManager(t *testing.T, path string) (*Manager, *qualityTestExecutor, *Auth) {
++	t.Helper()
++	m := NewManager(nil, nil, nil)
++	if err := m.OpenQualityState(path); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := m.CloseQualityState(); err != nil {
++			t.Error(err)
++		}
++	})
++	e := &qualityTestExecutor{}
++	m.RegisterExecutor(e)
++	a, err := m.Register(context.Background(), &Auth{ID: t.Name(), Provider: e.Identifier(), Status: StatusActive, Attributes: map[string]string{"api_key": "fake-offline-key"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: "quality-model-a"}, {ID: "quality-model-b"}})
++	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
++	m.RefreshSchedulerEntry(a.ID)
++	return m, e, a
++}
++func pauseQualityTest(t *testing.T, m *Manager, a *Auth, owner, action string) QualityPause {
++	t.Helper()
++	target, err := m.QualityTarget(a.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	p, err := m.PauseQuality(context.Background(), owner, QualityPause{AuthID: a.ID, OwnerPlugin: owner, RuleID: action + "-rule", RuleRevision: 1, ActionID: action, ActionRevision: 1, IdentityVersion: target.IdentityVersion, EvidenceRunID: "run-offline", Reason: "explicit incorrect evidence"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return p
++}
++func TestQualityPauseGatesEveryModelAndRejectsAllRetests(t *testing.T) {
++	m, e, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	ctx := context.Background()
++	opts := ex.Options{Metadata: map[string]any{ex.PinnedAuthMetadataKey: a.ID}}
++	if _, err := m.Execute(ctx, []string{a.Provider}, ex.Request{Model: "quality-model-a"}, opts); err != nil {
++		t.Fatal(err)
++	}
++	p := pauseQualityTest(t, m, a, "model-quality", "action-1")
++	for _, model := range []string{"quality-model-a", "quality-model-b"} {
++		if _, err := m.Execute(ctx, []string{a.Provider}, ex.Request{Model: model}, opts); err == nil {
++			t.Fatal("paused execution admitted")
++		}
++		if _, err := m.ExecuteStream(ctx, []string{a.Provider}, ex.Request{Model: model}, opts); err == nil {
++			t.Fatal("paused stream admitted")
++		}
++		if _, err := m.ExecuteCount(ctx, []string{a.Provider}, ex.Request{Model: model}, opts); err == nil {
++			t.Fatal("paused token count admitted")
++		}
++	}
++	if e.calls.Load() != 1 {
++		t.Fatal("paused request reached upstream")
++	}
++	if m.QualityBusinessAllowed(a.ID) {
++		t.Fatal("duplex turn bypassed pause")
++	}
++	retest, err := m.QualityRetestContext(ctx, "model-quality", "instance-1", p)
++	if err == nil || retest != nil {
++		t.Fatal("retired retest capability granted execution context")
++	}
++	target, err := m.QualityTarget(a.ID)
++	if err != nil || target.CanRetest {
++		t.Fatal("paused target advertised retest capability", target, err)
++	}
++	current, _ := m.GetByID(a.ID)
++	if current.Disabled {
++		t.Fatal("quality pause changed native Disabled")
++	}
++	if m.QualityBusinessAllowed(a.ID) {
++		t.Fatal("retest globally enabled credential")
++	}
++	if _, err = m.ReleaseQuality(ctx, "model-quality", p); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = m.PauseQuality(ctx, "model-quality", p); err == nil {
++		t.Fatal("retired action replay re-paused")
++	}
++	if _, err = m.Execute(ctx, []string{a.Provider}, ex.Request{Model: "quality-model-a"}, opts); err != nil {
++		t.Fatal("manual release did not permit ordinary execution", err)
++	}
++	if e.calls.Load() != 2 {
++		t.Fatal("unexpected upstream call count")
++	}
++}
++func TestQualityOwnershipOperatorAndCooldown(t *testing.T) {
++	m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	ctx := context.Background()
++	p := pauseQualityTest(t, m, a, "model-quality", "action-1")
++	wrong := p
++	wrong.ActionRevision++
++	if _, err := m.ReleaseQuality(ctx, "model-quality", wrong); err == nil {
++		t.Fatal("stale revision released")
++	}
++	if _, err := m.QualityRetestContext(ctx, "other", "instance", p); err == nil {
++		t.Fatal("wrong owner retested")
++	}
++	other := pauseQualityTest(t, m, a, "other-owner", "action-2")
++	if _, err := m.QualityRetestContext(ctx, "model-quality", "instance", p); err == nil {
++		t.Fatal("other owner bypassed")
++	}
++	if _, err := m.ReleaseQuality(ctx, "other-owner", other); err != nil {
++		t.Fatal(err)
++	}
++	current, _ := m.GetByID(a.ID)
++	current.Disabled = true
++	if _, err := m.Update(ctx, current); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := m.QualityRetestContext(ctx, "model-quality", "instance", p); err == nil {
++		t.Fatal("operator disable bypassed")
++	}
++	target, err := m.ReleaseQuality(ctx, "model-quality", p)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !target.OperatorDisabled || target.EffectiveAvailable {
++		t.Fatal("release cleared operator disable")
++	}
++	current, _ = m.GetByID(a.ID)
++	current.Disabled = false
++	current.Status = StatusActive
++	if _, err = m.Update(ctx, current); err != nil {
++		t.Fatal(err)
++	}
++	p = pauseQualityTest(t, m, a, "model-quality", "action-3")
++	current, _ = m.GetByID(a.ID)
++	current.Unavailable = true
++	current.NextRetryAfter = time.Now().Add(time.Hour)
++	if _, err = m.Update(ctx, current); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = m.QualityRetestContext(ctx, "model-quality", "instance", p); err == nil {
++		t.Fatal("native cooldown bypassed")
++	}
++}
++func TestQualityIdentityRefreshReplacementAndRestart(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "quality.db")
++	m, _, a := newQualityManager(t, path)
++	ctx := context.Background()
++	p := pauseQualityTest(t, m, a, "model-quality", "action-1")
++	base, _ := m.GetByID(a.ID)
++	updated := base.Clone()
++	updated.Attributes["api_key"] = "fake-refreshed"
++	if _, err := m.UpdateRefreshedAuth(ctx, base, updated); err != nil {
++		t.Fatal(err)
++	}
++	target, _ := m.QualityTarget(a.ID)
++	if target.IdentityVersion != p.IdentityVersion {
++		t.Fatal("normal refresh changed identity")
++	}
++	if err := m.CloseQualityState(); err != nil {
++		t.Fatal(err)
++	}
++	restarted := NewManager(nil, nil, nil)
++	if err := restarted.OpenQualityState(path); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := restarted.CloseQualityState(); err != nil {
++			t.Error(err)
++		}
++	})
++	if _, err := restarted.Register(ctx, updated); err != nil {
++		t.Fatal(err)
++	}
++	target, _ = restarted.QualityTarget(a.ID)
++	if !target.QualityPaused || target.IdentityVersion != p.IdentityVersion {
++		t.Fatal("restart lost pause or refresh identity")
++	}
++	current, _ := restarted.GetByID(a.ID)
++	current.Attributes["api_key"] = "fake-new-owner"
++	if _, err := restarted.Update(ctx, current); err != nil {
++		t.Fatal(err)
++	}
++	target, _ = restarted.QualityTarget(a.ID)
++	if target.IdentityVersion == p.IdentityVersion {
++		t.Fatal("replacement reused identity")
++	}
++	if _, err := restarted.QualityRetestContext(ctx, "model-quality", "instance-2", p); err == nil {
++		t.Fatal("old evidence retested replacement")
++	}
++	if _, err := restarted.ReleaseQuality(ctx, "model-quality", p); err == nil {
++		t.Fatal("old evidence released replacement")
++	}
++	if _, err := restarted.ReleaseQualityAdministratively(ctx, p); err != nil {
++		t.Fatal(err)
++	}
++}
++func TestQualityDeletedRecreatedIdentityAndOrphanRelease(t *testing.T) {
++	m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	ctx := context.Background()
++	p := pauseQualityTest(t, m, a, "model-quality", "action-1")
++	m.Remove(ctx, a.ID)
++	if _, err := m.QualityTarget(a.ID); err == nil {
++		t.Fatal("deleted target found")
++	}
++	if len(m.QualityActions()) != 1 {
++		t.Fatal("deletion erased pause ownership")
++	}
++	if _, err := m.Register(ctx, a); err != nil {
++		t.Fatal(err)
++	}
++	target, _ := m.QualityTarget(a.ID)
++	if target.IdentityVersion == p.IdentityVersion {
++		t.Fatal("recreated identity reused")
++	}
++	if m.QualityBusinessAllowed(a.ID) {
++		t.Fatal("replacement silently admitted under old pause")
++	}
++	if _, err := m.ReleaseQualityAdministratively(ctx, p); err != nil {
++		t.Fatal(err)
++	}
++}
++func TestQualityPauseAllowsInflightCompletionButStopsRetryAndNewAdmission(t *testing.T) {
++	m, e, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	e.started = make(chan struct{})
++	e.finish = make(chan struct{})
++	done := make(chan error, 1)
++	go func() {
++		_, err := m.Execute(context.Background(), []string{a.Provider}, ex.Request{Model: "quality-model-a"}, ex.Options{})
++		done <- err
++	}()
++	<-e.started
++	pauseQualityTest(t, m, a, "model-quality", "action-1")
++	if _, err := m.Execute(context.Background(), []string{a.Provider}, ex.Request{Model: "quality-model-b"}, ex.Options{}); err == nil {
++		t.Fatal("new admission allowed")
++	}
++	close(e.finish)
++	if err := <-done; err != nil {
++		t.Fatal("inflight call interrupted", err)
++	}
++	if e.calls.Load() != 1 {
++		t.Fatal("unexpected extra call")
++	}
++}
++func TestQualityIdempotentConcurrentPauseAndFailClosed(t *testing.T) {
++	m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	p := pauseQualityTest(t, m, a, "model-quality", "action-1")
++	var wg sync.WaitGroup
++	for range 12 {
++		wg.Go(func() {
++			if _, err := m.PauseQuality(context.Background(), "model-quality", p); err != nil {
++				t.Error(err)
++			}
++		})
++	}
++	wg.Wait()
++	if len(m.QualityActions()) != 1 {
++		t.Fatal("duplicate pause")
++	}
++	if err := m.CloseQualityState(); err != nil {
++		t.Fatal(err)
++	}
++	if m.QualityBusinessAllowed(a.ID) {
++		t.Fatal("closed authority admitted")
++	}
++}
++func TestQualityHomeModeUnsupported(t *testing.T) {
++	m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	m.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
++	target, err := m.QualityTarget(a.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if target.CanPause || target.UnsupportedReason != "home_controlled" {
++		t.Fatal("Home capability bypass")
++	}
++}
++
++func TestQualityStickySessionCannotReusePausedCredential(t *testing.T) {
++	m, e, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	m.SetSelector(NewSessionAffinitySelector(&FillFirstSelector{}))
++	opts := ex.Options{Metadata: map[string]any{ex.CanonicalSessionIDMetadataKey: "same-session"}}
++	if _, err := m.Execute(context.Background(), []string{a.Provider}, ex.Request{Model: "quality-model-a"}, opts); err != nil {
++		t.Fatal(err)
++	}
++	pauseQualityTest(t, m, a, "model-quality", "action-1")
++	if _, err := m.Execute(context.Background(), []string{a.Provider}, ex.Request{Model: "quality-model-a"}, opts); err == nil {
++		t.Fatal("sticky session bypassed pause")
++	}
++	if e.calls.Load() != 1 {
++		t.Fatal("paused sticky execution reached upstream")
++	}
++}
++func TestQualityPauseStopsAnInflightFailureRetry(t *testing.T) {
++	m, e, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	m.SetRetryConfig(3, 0, 0)
++	e.started = make(chan struct{})
++	e.finish = make(chan struct{})
++	e.fail = true
++	done := make(chan error, 1)
++	go func() {
++		_, err := m.Execute(context.Background(), []string{a.Provider}, ex.Request{Model: "quality-model-a"}, ex.Options{})
++		done <- err
++	}()
++	<-e.started
++	pauseQualityTest(t, m, a, "model-quality", "action-1")
++	close(e.finish)
++	if err := <-done; err == nil {
++		t.Fatal("expected original upstream failure")
++	}
++	if e.calls.Load() != 1 {
++		t.Fatal("retry bypassed pause")
++	}
++}
++func TestQualityMutationFailureCannotReportSuccess(t *testing.T) {
++	m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	target, _ := m.QualityTarget(a.ID)
++	if err := m.CloseQualityState(); err != nil {
++		t.Fatal(err)
++	}
++	_, err := m.PauseQuality(context.Background(), "model-quality", QualityPause{AuthID: a.ID, OwnerPlugin: "model-quality", RuleID: "rule", RuleRevision: 1, ActionID: "action", ActionRevision: 1, IdentityVersion: target.IdentityVersion, EvidenceRunID: "run"})
++	if err == nil {
++		t.Fatal("closed store returned successful pause")
++	}
++}
++func TestQualityIndependentSourceChildrenAndUnknownRuntimeCapabilities(t *testing.T) {
++	m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	ctx := context.Background()
++	sibling := a.Clone()
++	sibling.ID = a.ID + "-sibling"
++	sibling.Attributes["source"] = "same-source.json"
++	if _, err := m.Register(ctx, sibling); err != nil {
++		t.Fatal(err)
++	}
++	unknown := &Auth{ID: a.ID + "-runtime", Provider: a.Provider, Status: StatusActive, Runtime: struct{}{}}
++	if _, err := m.Register(ctx, unknown); err != nil {
++		t.Fatal(err)
++	}
++	target, _ := m.QualityTarget(unknown.ID)
++	if target.CanPause || target.CanRetest || target.UnsupportedReason == "" {
++		t.Fatal("unverifiable runtime identity advertised actions")
++	}
++	pauseQualityTest(t, m, a, "model-quality", "action-1")
++	if !m.QualityBusinessAllowed(sibling.ID) {
++		t.Fatal("pause affected source sibling")
++	}
++	if len(m.QualityTargets()) != 3 {
++		t.Fatal("runtime or paused target disappeared")
++	}
++}
++
++func TestQualityAutomaticRecoveryAlwaysRejectedAndManualReleasePreservesRestrictions(t *testing.T) {
++	for _, kind := range []string{"healthy", "operator", "cooldown", "other_owner"} {
++		t.Run(kind, func(t *testing.T) {
++			m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++			p := pauseQualityTest(t, m, a, "model-quality", "action-1")
++			if _, err := m.QualityRetestContext(context.Background(), "model-quality", "instance", p); err == nil {
++				t.Fatal("legacy retest accepted")
++			}
++			switch kind {
++			case "operator":
++				current, _ := m.GetByID(a.ID)
++				current.Disabled = true
++				if _, err := m.Update(context.Background(), current); err != nil {
++					t.Fatal(err)
++				}
++			case "cooldown":
++				current, _ := m.GetByID(a.ID)
++				current.Unavailable = true
++				current.NextRetryAfter = time.Now().Add(time.Hour)
++				if _, err := m.Update(context.Background(), current); err != nil {
++					t.Fatal(err)
++				}
++			case "other_owner":
++				pauseQualityTest(t, m, a, "other-owner", "action-2")
++			}
++			if _, err := m.ReleaseQualityVerified(context.Background(), "model-quality", p, []string{"quality-model-a"}); err == nil {
++				t.Fatal("stale successful evidence released after blocker changed")
++			}
++			status, _, err := m.QualityActionStatus("model-quality", p.ActionID)
++			if err != nil || status != "active" {
++				t.Fatal("blocked recovery lost ownership", status, err)
++			}
++			target, err := m.ReleaseQuality(context.Background(), "model-quality", p)
++			if err != nil {
++				t.Fatal("manual release failed", err)
++			}
++			if kind == "operator" && !target.OperatorDisabled {
++				t.Fatal("manual release cleared operator disable")
++			}
++			if kind == "cooldown" && target.EffectiveAvailable {
++				t.Fatal("manual release cleared cooldown")
++			}
++			if kind == "other_owner" && !target.QualityPaused {
++				t.Fatal("manual release cleared another owner")
++			}
++
++			status, binding, err := m.QualityActionStatus("model-quality", p.ActionID)
++			if err != nil || status != "released" || binding == nil || binding.IdentityVersion != p.IdentityVersion {
++				t.Fatal("durable receipt missing", status, err)
++			}
++		})
++	}
++}
++func TestQualityComparisonDeduplicatesCredentialAliases(t *testing.T) {
++	m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	b := a.Clone()
++	b.ID += "-alias"
++	if _, err := m.Register(context.Background(), b); err != nil {
++		t.Fatal(err)
++	}
++	ta, _ := m.QualityTarget(a.ID)
++	tb, _ := m.QualityTarget(b.ID)
++	if ta.IdentityVersion == tb.IdentityVersion || ta.ComparisonIdentity == "" || ta.ComparisonIdentity != tb.ComparisonIdentity {
++		t.Fatal("aliases not distinguished from incarnations")
++	}
++	b.Attributes["api_key"] = "different-fake-key"
++	if _, err := m.Update(context.Background(), b); err != nil {
++		t.Fatal(err)
++	}
++	tb, _ = m.QualityTarget(b.ID)
++	if ta.ComparisonIdentity == tb.ComparisonIdentity {
++		t.Fatal("distinct grant deduplication collision")
++	}
++}
++
++type qualityTransportFunc func(*http.Request) (*http.Response, error)
++
++func (f qualityTransportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++type qualityPreparingExecutor struct {
++	qualityTestExecutor
++	prepared, proceed chan struct{}
++	submitted         atomic.Int64
++}
++
++func (e *qualityPreparingExecutor) Execute(ctx context.Context, _ *Auth, _ ex.Request, _ ex.Options) (ex.Response, error) {
++	client := httptransport.Decorate(ctx, &http.Client{Transport: qualityTransportFunc(func(r *http.Request) (*http.Response, error) {
++		e.submitted.Add(1)
++		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("21")), Header: make(http.Header)}, nil
++	})})
++	close(e.prepared)
++	<-e.proceed
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://offline.invalid/model", strings.NewReader("{}"))
++	if err != nil {
++		return ex.Response{}, err
++	}
++	resp, err := client.Do(req)
++	if err != nil {
++		return ex.Response{}, err
++	}
++	return ex.Response{}, resp.Body.Close()
++}
++func TestQualityPauseDuringPreparationStopsFinalTransportSubmission(t *testing.T) {
++	m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	e := &qualityPreparingExecutor{prepared: make(chan struct{}), proceed: make(chan struct{})}
++	m.RegisterExecutor(e)
++	result := make(chan error, 1)
++	go func() {
++		_, err := m.Execute(context.Background(), []string{a.Provider}, ex.Request{Model: "quality-model-a"}, ex.Options{})
++		result <- err
++	}()
++	<-e.prepared
++	pauseQualityTest(t, m, a, "model-quality", "action-1")
++	close(e.proceed)
++	if err := <-result; err == nil {
++		t.Fatal("request prepared before pause was admitted afterward")
++	}
++	if e.submitted.Load() != 0 {
++		t.Fatal("paused request reached final upstream transport")
++	}
++}
++
++func TestQualityConfigKeyExcludedAllRemainsOperatorDisable(t *testing.T) {
++	m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++	p := pauseQualityTest(t, m, a, "model-quality", "action-1")
++	current, _ := m.GetByID(a.ID)
++	current.Attributes["excluded_models"] = "*"
++	if _, err := m.Update(context.Background(), current); err != nil {
++		t.Fatal(err)
++	}
++	target, _ := m.QualityTarget(a.ID)
++	if !target.OperatorDisabled || target.NativeDisabled || target.EffectiveAvailable {
++		t.Fatal("config exclusion mislabeled as native Enabled")
++	}
++	if _, err := m.QualityRetestContext(context.Background(), "model-quality", "instance", p); err == nil {
++		t.Fatal("config disabled key retested")
++	}
++	if _, err := m.ReleaseQualityVerified(context.Background(), "model-quality", p, []string{"quality-model-a"}); err == nil {
++		t.Fatal("config disabled key recovered")
++	}
++	if _, err := m.ReleaseQuality(context.Background(), "model-quality", p); err != nil {
++		t.Fatal(err)
++	}
++	current, _ = m.GetByID(a.ID)
++	if current.Attributes["excluded_models"] != "*" {
++		t.Fatal("release cleared config exclusion")
++	}
++	target, _ = m.QualityTarget(a.ID)
++	p.ActionID = "action-2"
++	p.IdentityVersion = target.IdentityVersion
++	if _, err := m.PauseQuality(context.Background(), "model-quality", p); err == nil {
++		t.Fatal("claimed an operator-disabled credential")
++	}
++}
++
++func TestQualityComparisonIgnoresProviderRoutingAliases(t *testing.T) {
++	for _, kind := range []string{"api_key", "email"} {
++		t.Run(kind, func(t *testing.T) {
++			m, _, a := newQualityManager(t, filepath.Join(t.TempDir(), "quality.db"))
++			if kind == "email" {
++				a.Metadata = map[string]any{"email": "same-account@example.test", "access_token": "fake-access-token"}
++				var err error
++				a, err = m.Update(context.Background(), a)
++				if err != nil {
++					t.Fatal(err)
++				}
++			}
++			b := a.Clone()
++			b.ID += "-provider-alias"
++			b.Provider = "different-routing-label"
++			if _, err := m.Register(context.Background(), b); err != nil {
++				t.Fatal(err)
++			}
++			first, err := m.QualityTarget(a.ID)
++			if err != nil {
++				t.Fatal(err)
++			}
++			alias, err := m.QualityTarget(b.ID)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if first.ComparisonIdentity == "" || first.ComparisonIdentity != alias.ComparisonIdentity {
++				t.Fatal("provider alias falsely counted as independent credential")
++			}
++			if first.IdentityVersion == alias.IdentityVersion {
++				t.Fatal("comparison deduplication changed action incarnation identity")
++			}
++		})
++	}
++}
+diff --git a/sdk/cliproxy/executor/evidence.go b/sdk/cliproxy/executor/evidence.go
+new file mode 100644
+index 0000000..3899f5e
+--- /dev/null
++++ b/sdk/cliproxy/executor/evidence.go
+@@ -0,0 +1,156 @@
++package executor
++
++import (
++	"context"
++	"crypto/sha256"
++	"fmt"
++	"reflect"
++	"sort"
++	"sync"
++
++	"github.com/MoeForge/moego/ojson"
++)
++
++type evidenceContextKey struct{}
++
++// ExecutionEvidence is a read-only observation of a verified outbound path.
++type ExecutionEvidence struct {
++	PayloadConfigVersion                                                    string
++	Verified                                                                bool
++	Reason, RequestedModel, ResolvedModel, AuthID, PayloadFingerprint, Path string
++	ConditionsChanged                                                       bool
++}
++
++// EvidenceCollector compares frozen caller conditions with the final outbound payload.
++// It deliberately remains unknown for paths without a final observation hook.
++type EvidenceCollector struct {
++	mu               sync.Mutex
++	body             []byte
++	expectedAuth     string
++	result           ExecutionEvidence
++	observations     int
++	upstreamComplete bool
++}
++
++func WithEvidenceCollector(ctx context.Context, model, authID string, body []byte) (context.Context, *EvidenceCollector) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	c := &EvidenceCollector{body: append([]byte(nil), body...), expectedAuth: authID, result: ExecutionEvidence{RequestedModel: model, Reason: "final execution conditions were not observed"}}
++	return context.WithValue(ctx, evidenceContextKey{}, c), c
++}
++
++func (c *EvidenceCollector) Snapshot() ExecutionEvidence {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return c.result
++}
++
++// ObserveOpenAIQualityPayload runs after the final payload barrier without changing the payload.
++func ObserveOpenAIQualityPayload(ctx context.Context, authID, resolvedModel, fromProtocol, path string, final []byte, configVersion ...string) {
++	if ctx == nil {
++		return
++	}
++	c, _ := ctx.Value(evidenceContextKey{}).(*EvidenceCollector)
++	if c == nil {
++		return
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.observations++
++	c.result.Verified = false
++	c.result.AuthID, c.result.ResolvedModel, c.result.Path = authID, resolvedModel, path
++	if len(configVersion) > 0 {
++		c.result.PayloadConfigVersion = configVersion[0]
++	}
++	c.result.PayloadFingerprint = qualityPayloadFingerprint(final, resolvedModel)
++	if fromProtocol != "openai" || path != "openai-compatible/chat/completions" || !ojson.ValidBytes(final) || !ojson.ValidBytes(c.body) || c.expectedAuth == "" || authID != c.expectedAuth {
++		c.result.Reason = "execution path or credential cannot be compared"
++		return
++	}
++	expected := qualityComparablePayload(c.body)
++	actual := qualityComparablePayload(final)
++	c.result.ConditionsChanged = !reflect.DeepEqual(expected, actual) || ojson.GetBytes(final, "model").String() != resolvedModel
++	if c.result.ConditionsChanged {
++		c.result.Verified = false
++		c.result.Reason = "final payload differs from frozen test conditions"
++		return
++	}
++	if c.observations != 1 {
++		c.result.Verified = false
++		c.result.Reason = "multiple upstream attempts require independent evidence"
++		return
++	}
++	c.result.Verified = true
++	c.result.Reason = ""
++}
++
++func qualityComparablePayload(body []byte) map[string]any {
++	d := ojson.ParseBytes(body).Value()
++	m, _ := d.(map[string]any)
++	// These are transport/session fields, not question or reasoning conditions.
++	delete(m, "model")
++	delete(m, "stream")
++	delete(m, "stream_options")
++	delete(m, "prompt_cache_key")
++	if v, ok := m["max_tokens"]; ok {
++		m["max_completion_tokens"] = v
++		delete(m, "max_tokens")
++	}
++	return m
++}
++
++// qualityPayloadFingerprint excludes independent session/transport decoration so
++// different credentials and samples with the same conditions remain comparable.
++func qualityPayloadFingerprint(body []byte, model string) string {
++	m := qualityComparablePayload(body)
++	if m == nil {
++		return ""
++	}
++	m["model"] = model
++	keys := make([]string, 0, len(m))
++	for k := range m {
++		keys = append(keys, k)
++	}
++	sort.Strings(keys)
++	d := ojson.NewDocString(`{}`)
++	for _, k := range keys {
++		if err := d.Set(ojson.Escape(k), m[k]); err != nil {
++			return ""
++		}
++	}
++	return fmt.Sprintf("%x", sha256.Sum256(d.Bytes()))
++}
++
++// PayloadConfigurationFingerprint identifies one immutable payload-rule snapshot.
++func PayloadConfigurationFingerprint(value any) string {
++	d := ojson.NewDocString(`{}`)
++	if err := d.Set("payload", value); err != nil {
++		return ""
++	}
++	return fmt.Sprintf("%x", sha256.Sum256(d.Bytes()))
++}
++
++// FinalizeQualityStreamEvidence records the actual upstream terminal observation.
++// Translator-synthesized completion and a clean early EOF are not proof of completion.
++func FinalizeQualityStreamEvidence(ctx context.Context, complete bool) {
++	if ctx == nil {
++		return
++	}
++	c, _ := ctx.Value(evidenceContextKey{}).(*EvidenceCollector)
++	if c == nil {
++		return
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.upstreamComplete = complete
++	if !complete {
++		c.result.Verified = false
++		c.result.Reason = "upstream stream ended without a verified terminal marker"
++	}
++}
++func (c *EvidenceCollector) UpstreamComplete() bool {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return c.upstreamComplete
++}
+diff --git a/sdk/cliproxy/executor/evidence_test.go b/sdk/cliproxy/executor/evidence_test.go
+new file mode 100644
+index 0000000..7ff603f
+--- /dev/null
++++ b/sdk/cliproxy/executor/evidence_test.go
+@@ -0,0 +1,66 @@
++package executor
++
++import (
++	"context"
++	"testing"
++)
++
++func TestQualityEvidenceOnlyVerifiesFinalComparablePayload(t *testing.T) {
++	body := []byte(`{"model":"alias","messages":[{"role":"user","content":"Answer only 7"}],"max_tokens":64,"temperature":0}`)
++	for _, tc := range []struct {
++		name, final, auth, path string
++		ok, changed             bool
++	}{
++		{"exact", `{"temperature":0,"max_completion_tokens":64,"messages":[{"content":"Answer only 7","role":"user"}],"model":"real","stream":true,"stream_options":{"include_usage":true}}`, "a", "openai-compatible/chat/completions", true, false},
++		{"rewritten question", `{"model":"real","messages":[{"role":"user","content":"Answer 9"}],"max_tokens":64,"temperature":0}`, "a", "openai-compatible/chat/completions", false, true},
++		{"budget", `{"model":"real","messages":[{"role":"user","content":"Answer only 7"}],"max_tokens":1,"temperature":0}`, "a", "openai-compatible/chat/completions", false, true},
++		{"wrong auth", string(body), "b", "openai-compatible/chat/completions", false, false},
++		{"unknown path", string(body), "a", "unknown", false, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			ctx, c := WithEvidenceCollector(context.Background(), "alias", "a", body)
++			ObserveOpenAIQualityPayload(ctx, tc.auth, "real", "openai", tc.path, []byte(tc.final))
++			got := c.Snapshot()
++			if got.Verified != tc.ok || got.ConditionsChanged != tc.changed {
++				t.Fatalf("evidence=%+v", got)
++			}
++		})
++	}
++	ctx, c := WithEvidenceCollector(context.Background(), "alias", "a", body)
++	if c.Snapshot().Verified {
++		t.Fatal("unobserved path verified")
++	}
++	final := []byte(`{"model":"real","messages":[{"role":"user","content":"Answer only 7"}],"max_tokens":64,"temperature":0}`)
++	ObserveOpenAIQualityPayload(ctx, "a", "real", "openai", "openai-compatible/chat/completions", final)
++	ObserveOpenAIQualityPayload(ctx, "a", "real", "openai", "openai-compatible/chat/completions", final)
++	if c.Snapshot().Verified {
++		t.Fatal("multiple attempts verified")
++	}
++}
++
++func TestQualityFingerprintIgnoresOnlyTransportAndSessionDecoration(t *testing.T) {
++	a := []byte(`{"model":"alias","messages":[{"role":"user","content":"same"}],"max_tokens":64,"prompt_cache_key":"session-a","stream":false}`)
++	b := []byte(`{"stream_options":{"include_usage":true},"prompt_cache_key":"session-b","messages":[{"content":"same","role":"user"}],"model":"different-alias","max_completion_tokens":64,"stream":true}`)
++	if qualityPayloadFingerprint(a, "resolved") != qualityPayloadFingerprint(b, "resolved") {
++		t.Fatal("equivalent conditions differ")
++	}
++	if qualityPayloadFingerprint(a, "resolved") == qualityPayloadFingerprint(a, "other") {
++		t.Fatal("different actual models collapsed")
++	}
++	c := []byte(`{"messages":[{"role":"user","content":"changed"}],"max_tokens":64}`)
++	if qualityPayloadFingerprint(a, "resolved") == qualityPayloadFingerprint(c, "resolved") {
++		t.Fatal("different questions collapsed")
++	}
++}
++
++func TestQualityStreamRequiresActualTerminalObservation(t *testing.T) {
++	body := []byte(`{"model":"m","messages":[{"role":"user","content":"q"}]}`)
++	for _, complete := range []bool{false, true} {
++		ctx, c := WithEvidenceCollector(context.Background(), "m", "a", body)
++		ObserveOpenAIQualityPayload(ctx, "a", "m", "openai", "openai-compatible/chat/completions", body)
++		FinalizeQualityStreamEvidence(ctx, complete)
++		if c.UpstreamComplete() != complete || c.Snapshot().Verified != complete {
++			t.Fatalf("terminal=%v evidence=%+v", complete, c.Snapshot())
++		}
++	}
++}
+diff --git a/sdk/cliproxy/service_executionregistry_test.go b/sdk/cliproxy/service_executionregistry_test.go
+index 5bd4dc3..6f3081c 100644
+--- a/sdk/cliproxy/service_executionregistry_test.go
++++ b/sdk/cliproxy/service_executionregistry_test.go
+@@ -1443,16 +1443,20 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
+ 	}
+ 
+ 	close(loseFirst)
++	// Reconnect is the synchronization event. The transport uses a jittered
++	// retry delay, so a one-second timer is not an ordering assertion.
+ 	select {
+ 	case <-started:
+ 		t.Fatal("heartbeat failover started draining the blocking scope")
+-	case <-time.After(50 * time.Millisecond):
+-	}
+-	select {
+ 	case <-secondSubscribe:
+-	case <-time.After(time.Second):
++	case <-time.After(5 * time.Second):
+ 		t.Fatal("new subscription did not start while the old scope remained active")
+ 	}
++	select {
++	case <-started:
++		t.Fatal("heartbeat failover drained the scope before reconnect")
++	default:
++	}
+ 	service.homeMu.Lock()
+ 	exposedRegistry := service.homeRegistry
+ 	service.homeMu.Unlock()
+@@ -1466,7 +1470,7 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
+ 	select {
+ 	case <-serviceCtx.Done():
+ 		t.Fatal("heartbeat failover canceled the service run")
+-	case <-time.After(50 * time.Millisecond):
++	default:
+ 	}
+ 
+ 	close(release)
+diff --git a/sdk/cliproxy/service_lifecycle.go b/sdk/cliproxy/service_lifecycle.go
+index 3da9334..240accc 100644
+--- a/sdk/cliproxy/service_lifecycle.go
++++ b/sdk/cliproxy/service_lifecycle.go
+@@ -5,6 +5,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"os"
++	"path/filepath"
+ 	"time"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+@@ -74,6 +75,11 @@ func (s *Service) Run(ctx context.Context) error {
+ 		if errShutdown := s.Shutdown(shutdownCtx); errShutdown != nil {
+ 			log.Errorf("service shutdown returned error: %v", errShutdown)
+ 		}
++		if s.coreManager != nil {
++			if errClose := s.coreManager.CloseQualityState(); errClose != nil {
++				log.WithError(errClose).Error("close quality authority")
++			}
++		}
+ 	}()
+ 
+ 	if !homeEnabled {
+@@ -86,6 +92,12 @@ func (s *Service) Run(ctx context.Context) error {
+ 	s.applyRetryConfig(cfg)
+ 	s.configureCooldownStateStore(cfg)
+ 
++	if s.coreManager != nil && !homeEnabled {
++		if errQuality := s.coreManager.OpenQualityState(filepath.Join(cfg.AuthDir, "quality-state.db")); errQuality != nil {
++			return errQuality
++		}
++	}
++
+ 	s.registerPluginAuthParser()
+ 	if s.coreManager != nil && !homeEnabled {
+ 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
+diff --git a/sdk/cliproxy/usage/manager.go b/sdk/cliproxy/usage/manager.go
+index dd1f84e..e21988d 100644
+--- a/sdk/cliproxy/usage/manager.go
++++ b/sdk/cliproxy/usage/manager.go
+@@ -24,6 +24,9 @@ const AutoServiceTier = "auto"
+ 
+ // Record contains the usage statistics captured for a single provider request.
+ type Record struct {
++	// TrafficSource is internal provenance; Source is legacy untrusted integration data.
++	TrafficSource string
++	EventKind     string
+ 	// RequestID uniquely identifies this specific model execution instance (UUID v4).
+ 	RequestID string
+ 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
+@@ -726,6 +729,8 @@ func (m *Manager) RegisterNamed(name string, plugin Plugin) {
+ // Publish enqueues a usage record for processing. If no plugin is registered
+ // the record will be discarded downstream.
+ func (m *Manager) Publish(ctx context.Context, record Record) {
++	record.TrafficSource = TrafficSourceFromContext(ctx)
++	record.EventKind = "attempt"
+ 	if m == nil {
+ 		return
+ 	}
+diff --git a/sdk/cliproxy/usage/provenance.go b/sdk/cliproxy/usage/provenance.go
+new file mode 100644
+index 0000000..b79b27d
+--- /dev/null
++++ b/sdk/cliproxy/usage/provenance.go
+@@ -0,0 +1,28 @@
++package usage
++
++import "context"
++
++type trafficSourceContextKey struct{}
++
++// WithTrafficSource attaches host-derived classification outside the upstream payload.
++func WithTrafficSource(ctx context.Context, source string) context.Context {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	switch source {
++	case "production", "manual_test", "scheduled_probe", "judge", "internal_other":
++	default:
++		source = "unknown"
++	}
++	return context.WithValue(ctx, trafficSourceContextKey{}, source)
++}
++
++// TrafficSourceFromContext never infers production from missing historical data.
++func TrafficSourceFromContext(ctx context.Context) string {
++	if ctx != nil {
++		if s, ok := ctx.Value(trafficSourceContextKey{}).(string); ok {
++			return s
++		}
++	}
++	return "unknown"
++}
+diff --git a/sdk/cliproxy/usage/provenance_test.go b/sdk/cliproxy/usage/provenance_test.go
+new file mode 100644
+index 0000000..4b988ff
+--- /dev/null
++++ b/sdk/cliproxy/usage/provenance_test.go
+@@ -0,0 +1,20 @@
++package usage
++
++import (
++	"context"
++	"testing"
++)
++
++func TestTrustedTrafficSourceDoesNotInferProduction(t *testing.T) {
++	if TrafficSourceFromContext(nil) != "unknown" || TrafficSourceFromContext(context.Background()) != "unknown" {
++		t.Fatal("missing provenance classified as production")
++	}
++	for _, s := range []string{"production", "manual_test", "scheduled_probe", "judge", "internal_other"} {
++		if got := TrafficSourceFromContext(WithTrafficSource(context.Background(), s)); got != s {
++			t.Fatalf("%s became %s", s, got)
++		}
++	}
++	if got := TrafficSourceFromContext(WithTrafficSource(context.Background(), "credential-secret")); got != "unknown" {
++		t.Fatal("untrusted label persisted")
++	}
++}
+diff --git a/sdk/httptransport/admission.go b/sdk/httptransport/admission.go
+new file mode 100644
+index 0000000..e028303
+--- /dev/null
++++ b/sdk/httptransport/admission.go
+@@ -0,0 +1,61 @@
++package httptransport
++
++import (
++	"context"
++	"net/http"
++)
++
++type admissionKey struct{}
++type decorationSuppressedKey struct{}
++
++// WithAdmission installs a trusted host admission check outside business payloads.
++// Admission is checked at transport submission, after all request preparation.
++func WithAdmission(ctx context.Context, check func() error) context.Context {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	return context.WithValue(ctx, admissionKey{}, check)
++}
++
++// CheckAdmission rejects a new transport submission but never cancels an admitted response.
++func CheckAdmission(ctx context.Context) error {
++	if ctx == nil {
++		return nil
++	}
++	check, _ := ctx.Value(admissionKey{}).(func() error)
++	if check != nil {
++		return check()
++	}
++	return nil
++}
++func decorateAdmission(ctx context.Context, client *http.Client) *http.Client {
++	if ctx == nil || client == nil {
++		return client
++	}
++	if suppressed, _ := ctx.Value(decorationSuppressedKey{}).(bool); suppressed {
++		return client
++	}
++	check, _ := ctx.Value(admissionKey{}).(func() error)
++	if check == nil {
++		return client
++	}
++	next := client.Transport
++	if next == nil {
++		next = http.DefaultTransport
++	}
++	clone := *client
++	clone.Transport = admissionTransport{next, check}
++	return &clone
++}
++
++type admissionTransport struct {
++	next  http.RoundTripper
++	check func() error
++}
++
++func (t admissionTransport) RoundTrip(req *http.Request) (*http.Response, error) {
++	if err := t.check(); err != nil {
++		return nil, err
++	}
++	return t.next.RoundTrip(req)
++}
+diff --git a/sdk/httptransport/decorator.go b/sdk/httptransport/decorator.go
+index 7ef524e..ecf963f 100644
+--- a/sdk/httptransport/decorator.go
++++ b/sdk/httptransport/decorator.go
+@@ -29,7 +29,7 @@ func WithDecorator(ctx context.Context, decorator Decorator) context.Context {
+ // executor that further configures its helper's transport must apply Decorate
+ // once, after its own protocol/pool policy is complete.
+ func WithoutDecorator(ctx context.Context) context.Context {
+-	return WithDecorator(ctx, nil)
++	return context.WithValue(WithDecorator(ctx, nil), decorationSuppressedKey{}, true)
+ }
+ 
+ // InheritDecorator copies a decorator from fallback into ctx when ctx does not
+@@ -41,6 +41,11 @@ func InheritDecorator(ctx, fallback context.Context) context.Context {
+ 	if fallback == nil {
+ 		return ctx
+ 	}
++	if _, hasCheck := ctx.Value(admissionKey{}).(func() error); !hasCheck {
++		if check, ok := fallback.Value(admissionKey{}).(func() error); ok {
++			ctx = WithAdmission(ctx, check)
++		}
++	}
+ 	if _, ok := ctx.Value(decoratorKey{}).(Decorator); ok {
+ 		return ctx
+ 	}
+@@ -53,7 +58,8 @@ func InheritDecorator(ctx, fallback context.Context) context.Context {
+ // Decorate applies a context decorator AFTER transport selection. With no
+ // decorator, the exact original client is returned. Only the client value is
+ // copied; the original selected transport/pool and all client policy survive.
+-func Decorate(ctx context.Context, client *http.Client) *http.Client {
++func Decorate(ctx context.Context, client *http.Client) (result *http.Client) {
++	defer func() { result = decorateAdmission(ctx, result) }()
+ 	if ctx == nil || client == nil {
+ 		return client
+ 	}
+diff --git a/sdk/pluginabi/types.go b/sdk/pluginabi/types.go
+index 49a8c97..c935e51 100644
+--- a/sdk/pluginabi/types.go
++++ b/sdk/pluginabi/types.go
+@@ -129,25 +129,34 @@ const (
+ 	MethodQuotaFetch      = "quota.fetch"
+ 	MethodQuotaReset      = "quota.reset"
+ 
+-	MethodHostHTTPDo             = "host.http.do"
+-	MethodHostHTTPDoStream       = "host.http.do_stream"
+-	MethodHostHTTPOperationOpen  = "host.http.operation_open"
+-	MethodHostHTTPCancel         = "host.http.cancel"
+-	MethodHostHTTPStreamRead     = "host.http.stream_read"
+-	MethodHostHTTPStreamClose    = "host.http.stream_close"
+-	MethodHostModelExecute       = "host.model.execute"
+-	MethodHostModelExecuteStream = "host.model.execute_stream"
+-	MethodHostModelStreamRead    = "host.model.stream_read"
+-	MethodHostModelStreamClose   = "host.model.stream_close"
+-	MethodHostStreamEmit         = "host.stream.emit"
+-	MethodHostStreamClose        = "host.stream.close"
+-	MethodHostLog                = "host.log"
+-	MethodHostAuthList           = "host.auth.list"
+-	MethodHostAuthGet            = "host.auth.get"
+-	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
+-	MethodHostAuthSave           = "host.auth.save"
+-	MethodHostAuthModels         = "host.auth.models"
+-	MethodHostAffinityLookup     = "host.affinity.lookup"
++	MethodHostHTTPDo                 = "host.http.do"
++	MethodHostHTTPDoStream           = "host.http.do_stream"
++	MethodHostHTTPOperationOpen      = "host.http.operation_open"
++	MethodHostHTTPCancel             = "host.http.cancel"
++	MethodHostHTTPStreamRead         = "host.http.stream_read"
++	MethodHostHTTPStreamClose        = "host.http.stream_close"
++	MethodHostModelExecute           = "host.model.execute"
++	MethodHostModelOperationOpen     = "host.model.operation_open"
++	MethodHostModelCancel            = "host.model.cancel"
++	MethodHostQualityCapabilities    = "host.quality.capabilities"
++	MethodHostQualityTargets         = "host.quality.targets"
++	MethodHostQualityActions         = "host.quality.actions"
++	MethodHostQualityPause           = "host.quality.pause"
++	MethodHostQualityRelease         = "host.quality.release"
++	MethodHostQualityReleaseVerified = "host.quality.release_verified"
++	MethodHostQualityActionStatus    = "host.quality.action_status"
++	MethodHostModelExecuteStream     = "host.model.execute_stream"
++	MethodHostModelStreamRead        = "host.model.stream_read"
++	MethodHostModelStreamClose       = "host.model.stream_close"
++	MethodHostStreamEmit             = "host.stream.emit"
++	MethodHostStreamClose            = "host.stream.close"
++	MethodHostLog                    = "host.log"
++	MethodHostAuthList               = "host.auth.list"
++	MethodHostAuthGet                = "host.auth.get"
++	MethodHostAuthGetRuntime         = "host.auth.get_runtime"
++	MethodHostAuthSave               = "host.auth.save"
++	MethodHostAuthModels             = "host.auth.models"
++	MethodHostAffinityLookup         = "host.affinity.lookup"
+ 
+ 	MethodHostRoutingResetCooldown = "host.routing.reset_cooldown"
+ )
+diff --git a/sdk/pluginapi/quality.go b/sdk/pluginapi/quality.go
+new file mode 100644
+index 0000000..b633a75
+--- /dev/null
++++ b/sdk/pluginapi/quality.go
+@@ -0,0 +1,52 @@
++package pluginapi
++
++import "time"
++
++// QualityPause is a durable credential-wide restriction and its CAS identity.
++type QualityPause struct {
++	AuthID          string    `json:"auth_id"`
++	OwnerPlugin     string    `json:"owner_plugin"`
++	RuleID          string    `json:"rule_id"`
++	RuleRevision    uint64    `json:"rule_revision"`
++	ActionID        string    `json:"action_id"`
++	ActionRevision  uint64    `json:"action_revision"`
++	EvidenceRunID   string    `json:"evidence_run_id"`
++	IdentityVersion string    `json:"identity_version"`
++	Reason          string    `json:"reason"`
++	CreatedAt       time.Time `json:"created_at"`
++}
++
++// ModelEvidence describes observed conditions without exposing request secrets.
++type ModelEvidence struct {
++	PayloadConfigVersion string `json:"payload_config_version"`
++	Verified             bool   `json:"verified"`
++	Reason               string `json:"reason,omitempty"`
++	RequestedModel       string `json:"requested_model"`
++	ResolvedModel        string `json:"resolved_model,omitempty"`
++	AuthID               string `json:"auth_id,omitempty"`
++	PayloadFingerprint   string `json:"payload_fingerprint,omitempty"`
++	ConditionsChanged    bool   `json:"conditions_changed"`
++	Path                 string `json:"path,omitempty"`
++}
++
++// QualityTarget is a stable, redacted management snapshot.
++type QualityTarget struct {
++	PayloadConfigVersion string   `json:"payload_config_version"`
++	ComparisonIdentity   string   `json:"comparison_identity"`
++	AuthID               string   `json:"auth_id"`
++	AuthIndex            string   `json:"auth_index"`
++	Provider             string   `json:"provider"`
++	Type                 string   `json:"type"`
++	IdentityVersion      string   `json:"identity_version"`
++	ManualDisabled       bool     `json:"manual_disabled"`
++	QualityPaused        bool     `json:"quality_paused"`
++	EffectiveAvailable   bool     `json:"effective_available"`
++	Reasons              []string `json:"reasons"`
++	CanPause             bool     `json:"can_pause"`
++	// CanRetest remains false under manual-release-only capability v2.
++	CanRetest         bool                        `json:"can_retest"`
++	UnsupportedReason string                      `json:"unsupported_reason,omitempty"`
++	Pauses            []QualityPause              `json:"pauses"`
++	Models            []string                    `json:"models"`
++	Reasoning         map[string]*ThinkingSupport `json:"reasoning"`
++}
+diff --git a/sdk/pluginapi/types.go b/sdk/pluginapi/types.go
+index 9e84fa2..69a5649 100644
+--- a/sdk/pluginapi/types.go
++++ b/sdk/pluginapi/types.go
+@@ -765,6 +765,12 @@ type HostHTTPClient interface {
+ 
+ // HostModelExecutionRequest describes a model execution request issued through the host.
+ type HostModelExecutionRequest struct {
++	// OperationID supports cancellation before the upstream response starts.
++	OperationID string `json:"operation_id,omitempty"`
++	// TrafficSource is trusted only on native plugin callbacks.
++	TrafficSource string `json:"traffic_source,omitempty"`
++	// QualityRetest is a deprecated wire field; capability v2 rejects all pause bypass requests.
++	QualityRetest *QualityPause `json:"quality_retest,omitempty"`
+ 	// EntryProtocol is the inbound client protocol format.
+ 	EntryProtocol string `json:"entry_protocol"`
+ 	// ExitProtocol is the target provider protocol format.
+@@ -798,6 +804,7 @@ type HostModelExecutionRequest struct {
+ 
+ // HostModelExecutionResponse describes a non-streaming host model execution response.
+ type HostModelExecutionResponse struct {
++	Evidence ModelEvidence `json:"evidence"`
+ 	// StatusCode is the model execution HTTP status code.
+ 	StatusCode int `json:"status_code"`
+ 	// Headers contains response headers.
+@@ -808,6 +815,7 @@ type HostModelExecutionResponse struct {
+ 
+ // HostModelStreamResponse describes a streaming host model execution response.
+ type HostModelStreamResponse struct {
++	Evidence ModelEvidence `json:"evidence"`
+ 	// StatusCode is the model execution HTTP status code.
+ 	StatusCode int `json:"status_code"`
+ 	// Headers contains response headers.
+@@ -824,6 +832,10 @@ type HostModelStreamReadRequest struct {
+ 
+ // HostModelStreamReadResponse returns one model stream chunk or terminal state.
+ type HostModelStreamReadResponse struct {
++	// UpstreamComplete requires an actual observed upstream terminal marker.
++	UpstreamComplete bool `json:"upstream_complete"`
++	// Evidence reflects every observed upstream attempt through this read.
++	Evidence *ModelEvidence `json:"evidence,omitempty"`
+ 	// Payload contains the raw stream chunk bytes.
+ 	Payload []byte `json:"payload"`
+ 	// Error reports a stream error associated with this read.
+@@ -1567,6 +1579,8 @@ type ManagementAPI interface {
+ 
+ // ManagementRegistrationRequest carries host context for Management API registration.
+ type ManagementRegistrationRequest struct {
++	// V8BasePath is the authenticated per-plugin v8 prefix.
++	V8BasePath string
+ 	// Plugin is the metadata of the plugin being registered.
+ 	Plugin Metadata
+ 	// BasePath is the only Management API prefix plugins may register under.
+@@ -1577,6 +1591,8 @@ type ManagementRegistrationRequest struct {
+ 
+ // ManagementRegistrationResponse lists plugin-owned Management API and resource routes.
+ type ManagementRegistrationResponse struct {
++	// RoutesV8 declares exact authenticated routes relative to V8BasePath.
++	RoutesV8 []ManagementRoute
+ 	// Routes contains the exact Management API routes to expose.
+ 	Routes []ManagementRoute
+ 	// Resources contains browser-navigable plugin resources exposed under /v0/resource/plugins/<pluginID>/.
+@@ -1642,6 +1658,10 @@ type ManagementResponse struct {
+ 
+ // UsageRecord describes request usage and billing metadata.
+ type UsageRecord struct {
++	// TrafficSource is host context provenance, never the legacy Source field.
++	TrafficSource string
++	// EventKind is attempt; retries are separate events identified by RequestID.
++	EventKind string
+ 	// RequestID uniquely identifies this specific model execution instance (UUID v4).
+ 	RequestID string
+ 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).

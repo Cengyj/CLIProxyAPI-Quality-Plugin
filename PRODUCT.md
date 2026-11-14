@@ -1,0 +1,98 @@
+# Product
+
+<!-- impeccable:product-schema 1 -->
+
+## Platform
+
+web
+
+## Users
+
+The primary user is a single self-hosting administrator who already knows CLIProxyAPI (CPA), evaluates model output, and manages the quality of their own credentials. The user confirmed this audience on 2026-11-14. Team administration and onboarding for a broad public audience are not confirmed primary use cases.
+
+## Product Purpose
+
+Model Quality is a standalone CPA native plugin with an embedded web quality console. It helps the administrator collect comparable model-output evidence, distinguish incorrect answers from execution problems, and apply a credential-wide quality pause through explicitly enabled quality rules.
+
+Success means the administrator can understand what was tested, whether the evidence supports a decision, which credential is affected, and which restrictions remain after a manual release. Manual evaluation itself never pauses or releases credentials automatically.
+
+## Positioning
+
+Model-level results provide evidence; the host enforces the action against the entire credential. Quality pauses have durable ownership and remain separate from operator disable, native cooldown, and restrictions held by other owners. The plugin uses the host's normal model execution pipeline with a fixed credential instead of creating a separate provider client.
+
+A paused credential cannot be tested again, including as a control or judge. Only an explicit authenticated administrator action can release the matching owned pause. Release leaves dependent rules stopped and does not promise that the credential is otherwise usable.
+
+## Operating Context
+
+The administrator runs a standalone CPA host with the required extensions and opens the plugin's browser interface. The existing implementation uses plain HTML, CSS, and JavaScript ES modules embedded in a separate Go module and native C ABI library. It has no frontend framework, external font service, runtime CDN, or analytics dependency.
+
+The two existing workspaces are:
+
+- **Manual evaluation** (current UI label: 手动评测): choose a credential and models, select a versioned logic/random/SVG question or a custom prompt (including HTML), set 1–8 samples per model, explicitly start a task, compare outputs, inspect frozen conditions, review samples, copy output, cancel, rerun when eligible, and export redacted JSON. Saving or loading a preset does not execute a model.
+- **Quality operations** (质量运维): configure observation and pause rules, explicitly run or schedule detection, inspect credential restrictions and evidence, pause or resume detection rules, review audit history and budgets, and preview then manually release an owned credential pause.
+
+Tasks run in the background independently of the browser. Closing the page does not cancel a task. An explicit cancellation uses the host operation lifecycle. Interrupted tasks are retained after restart without automatically replaying potentially billable model requests.
+
+The administrator connects using the existing management key, held only in page memory. The public `/v0/resource/plugins/model-quality/index.html` entry serves static content; data and actions use authenticated same-origin `/v8/management/plugins/model-quality/` APIs. Opening the page, connecting, or saving configuration does not call a model.
+
+## Capabilities and Constraints
+
+### Credential and rule semantics
+
+- Default to observation. Scheduling and automatic pause require separate explicit configuration, including the applicable global and rule controls. There is no automatic recovery switch or retest interval.
+- A quality pause blocks new business executions for every model on the credential. Business transmissions already admitted by the host may finish naturally.
+- Pausing a credential stops all dependent detection rules, queued tasks, and ongoing evaluations, including dependencies that use it as a control or judge. There are no manual or automatic retests, bypass grants, or automatic recovery paths.
+- Manual release removes only the pause with matching ownership, identity, and action version. Dependent rules remain stopped, old failure counters are cleared, and an explicit rule resume is required before new detection. Operator disable, native cooldown, and other owners' restrictions remain effective.
+- Pausing a detection rule does not release a credential pause. Rule state, operator disable, quality pause, and effective availability must remain distinct in language and behavior.
+- Pauses survive restart, plugin disable, and uninstall. The host retains an authenticated manual release path when the plugin is unavailable.
+- The current release has no groups or per-model isolation. At most one rule with the `pause_credential` action may target a credential, even when its automatic pause switch is off; manual evaluations and observation rules can coexist.
+
+### Evidence and interpretation
+
+- Keep execution status, quality verdict, and action status separate. A successful HTTP response does not establish a correct answer.
+- Only complete, comparable, explicitly incorrect evidence advances a quality-failure decision. By default, every selected detection model must fail in each of three consecutive valid rounds before a credential pause. A model round requires all planned samples to be complete, comparable, and decidable; at least one incorrect sample then constitutes failure.
+- Missing samples, unknown outcomes, mixed model outcomes, or changed conditions break consecutive failure evidence. Network errors, authentication failures, rate limits, server errors, refusal, empty or truncated output, cancellation, and judge failures do not count as incorrect answers.
+- “All models failed” means all selected detection models, not every model the credential can serve. Random-question automatic decisions additionally require a valid passing control under the same comparable conditions.
+- Show quality pass rate alongside coverage. Unknown timing, reasoning capability, or usage remains unknown; missing usage is not zero cost. `response_model` is an upstream label, not proof of model identity. There is no calibrated general IQ score.
+
+### Deployment, safety, and scope
+
+- The current plugin requires a patched CPA host with quality capability v2; it is not plug-and-play with the original 8.0.67 source archive. Current platform verification covers macOS arm64; other platforms require their own build and validation.
+- Automatic decision evidence currently covers the native OpenAI-compatible chat/completions execution paths. Unverified paths remain observation-only. Home quality actions are unsupported; the plugin must respect Home's control boundary.
+- Preserve fixed credential selection, host model mapping, thinking configuration, and the final payload rules. Conditions that cannot be proven comparable cannot support automatic pause.
+- Keep calls, samples, output, concurrency, queues, storage, and known usage bounded. Development and demonstrations use offline fake upstreams and isolated fake credentials, never real model accounts or copied production credentials.
+- Model-generated HTML/SVG is untrusted. Show escaped source and an isolated preview without scripts, external network access, forms, navigation, or access to the parent page.
+- Never expose management keys or raw credentials through URLs, browser storage, logs, or exports. Production prompts and answers are not stored by default.
+- Account groups, automatic credential deletion, external notifications, BPS, Jev, ModelTrace, and Codex ticket probes are outside the current core scope.
+
+## Brand Commitments
+
+The existing product name is **Model Quality**, plugin ID `model-quality`, with the Chinese descriptor 模型质量控制台. The interface currently uses Simplified Chinese and the two workspace labels recorded above. Preserve the precise distinctions between 暂停检测规则, 质量暂停, 人工禁用, 有效可用状态, and 人工解除.
+
+The interface is an independent console. The 2026-11-14 redesign inherits CPA Management Center color roles only: warm light, white, and warm dark, adapted into accessible plugin semantic tokens. Navigation, composition, components, and interaction are independently designed around evaluation and credential operations. The fixed reference and license are recorded in plugin/NOTICE.md; DESIGN.md documents the implemented system.
+
+## Evidence on Hand
+
+- [AGENTS.md](AGENTS.md), the override at the beginning of [PROMPT_CN.md](PROMPT_CN.md), and [docs/RESEARCH_CN.md](docs/RESEARCH_CN.md) establish current invariants and source boundaries. Historical retest/recovery requirements below those overrides are superseded.
+- [README_CN.md](README_CN.md), [docs/DESIGN_CN.md](docs/DESIGN_CN.md), [docs/API_CN.md](docs/API_CN.md), and [docs/INSTALL_CN.md](docs/INSTALL_CN.md) describe current capabilities, semantics, deployment requirements, and limits.
+- [plugin/ui/index.html](plugin/ui/index.html), its sibling JavaScript/CSS files, and [docs/UI_CN.md](docs/UI_CN.md) contain the existing two-workspace interface. Desktop light/dark and mobile captures are in `artifacts/verification/`; they use mock data and are not customer or production evidence.
+- [docs/TEST_REPORT_CN.md](docs/TEST_REPORT_CN.md) records module, native lifecycle, fake-API UI, and native-host browser verification. These are existing reports, not tests rerun by init. [docs/DEMO_CN.md](docs/DEMO_CN.md) documents the offline demonstration; `python3 scripts/demo.py start` reports its local page URL, and `python3 scripts/demo.py stop` stops it.
+- [plugin/NOTICE.md](plugin/NOTICE.md) and [docs/SOURCE_AUDIT_CN.md](docs/SOURCE_AUDIT_CN.md) record reference sources and licensing. This context does not establish customer testimonials, commercial pricing, public adoption, or generalized model benchmark claims.
+
+## Product Principles
+
+1. **Evidence before action.** Preserve comparability, provenance, coverage, and uncertainty; infrastructure failure is not answer-quality failure.
+2. **Make the scope explicit.** Model evidence, credential-wide restrictions, and rule scheduling are different concepts with different consequences.
+3. **Keep authority with the administrator.** Observation is the default, automation is opt-in, and release plus rule resumption are separate explicit actions.
+4. **Preserve ownership across lifecycle events.** Restart, unload, identity changes, and stale tasks must not erase restrictions or reuse invalid evidence.
+5. **Make execution intentional.** Viewing or saving does not spend model budget; retries, cancellation, unknown cost, and unsupported capabilities remain visible and bounded.
+
+## Accessibility & Inclusion
+
+The current web interface declares `zh-CN`, supports narrow screens and reduced-motion preferences, and uses native form controls with accessible labels and state announcements. Preserve those existing capabilities. No formal accessibility conformance target or additional user-specific accommodation was established during init; do not claim certification.
+
+## Planned Work and Open Decisions
+
+[docs/OPENAI_2FA_PLAN_CN.md](docs/OPENAI_2FA_PLAN_CN.md) describes a pending OpenAI credential-login workbench. It is a proposal, not an implemented capability or a new primary workspace. Its implementation timing and delivery are outside this init request. If developed, successful authorization must not imply quality approval, release a quality pause, resume a rule, clear cooldown, or trigger model execution.
+
+Broader team roles, public-distribution onboarding requirements, and a formal accessibility standard remain unconfirmed. Do not introduce them as established product requirements.

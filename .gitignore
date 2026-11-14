@@ -1,0 +1,40 @@
+# Generated builds, verification captures, and isolated runtime state.
+/artifacts/
+
+# Reproducible host working copy and independent reference checkouts.
+# Source changes are retained in host-patches/ with their baseline manifest.
+/workspaces/
+
+# Impeccable runtime sessions and disposable visual exploration.
+/.impeccable/*
+!/.impeccable/design.json
+!/.impeccable/surfaces/
+
+# Local configuration, credentials, and persistent service state.
+.env
+.env.*
+!.env.example
+!.env.sample
+config.yaml
+auths/
+logs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+
+# Tool caches and platform metadata.
+node_modules/
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+
+# Native build outputs.
+*.dylib
+*.so
+*.dll
+*.exe
+*.test
+*.out
