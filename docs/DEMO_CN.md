@@ -33,7 +33,7 @@ python3 scripts/demo.py stop
 - 流式响应包含心跳、多块内容、finish_reason、usage 和上游完成标记。
 - 本机 `/control` 支持 `correct`、`incorrect`、`empty`、`truncated`、`401`、`429`、`hold` 模式，仅用于离线验证。
 
-默认定时检测和自动暂停开关关闭。自动恢复已移除，暂停后仅人工解除。打开页面和连接管理 API 不调用模型。请先在“手动智商测试”中选择假凭证、模型及题目，显式点击开始测试。
+默认定时检测和自动暂停开关关闭。自动恢复已移除，暂停后仅人工解除。打开页面和连接管理 API 不调用模型。请先在“手动评测”中选择假凭证、模型及题目，显式点击开始测试。
 
 ## 实际宿主浏览器验证
 
@@ -50,3 +50,15 @@ node scripts/verify_native_ui.cjs
 2026-11-13 在 macOS arm64、Chrome 157.0.8103.78 完成上述 9 项原生浏览器检查。fake upstream 共收到 6 次显式调用：2 个手动样本、3 轮失败检测，以及人工解除并显式恢复规则后的 1 次新检测；暂停期间为 0 次调用，任务数量和调用预算均不增长。演示进程已在验证结束后停止。截图已检查手动多样本、等待人工解除和解除预览三个页面状态。
 
 最新结果以 `artifacts/verification/native-ui-results.json` 为准，失败时写 `native-ui-failure.txt`。实际宿主截图为 `native-manual-page.png`、`native-operations-page.png`、`native-release-preview.png`。fake 管理 API 的前端测试结果在 `ui-results.json`，两者分别记录，不混淆验证范围。
+
+## 与已有演示并行验证
+
+4.1.0 的验收使用 `MQ_DEMO_DIR` 指定独立状态目录，避免接管已经运行的演示。启动、查询和停止必须使用相同目录，例如：
+
+```sh
+MQ_DEMO_DIR="$PWD/artifacts/polish-preview" python3 scripts/demo.py start
+MQ_DEMO_DIR="$PWD/artifacts/polish-preview" python3 scripts/demo.py status
+MQ_DEMO_DIR="$PWD/artifacts/polish-preview" python3 scripts/demo.py stop
+```
+
+这里的状态目录只用于离线假数据，不是安装载荷；使用根构建产物前先核对候选版本。原生浏览器验收和候选解包验收自行使用独立目录并在结束时停止。本文上方 2026-11-13 的九项记录为历史证据，本轮报告位于 `artifacts/polish-4.1.0/verification-final2/native-ui-results.json`。

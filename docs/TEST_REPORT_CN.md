@@ -1,3 +1,27 @@
+# 0.3.1 / UI 4.2.0 题目测试验收
+
+2026-11-14，macOS arm64。当前证据目录为 `artifacts/question-test-4.2.0/`，与下方历史报告分开。只使用本机 fake upstream，没有调用真实模型或复制生产凭证。
+
+- 独立插件 `go test -count=1 ./...` 通过；`go test -race -count=1 ./quality ./cmd/model-quality` 通过。糖果题新增穷举与准确题面绑定测试，证明这版题面答案为 21。
+- UI 静态构建、`node scripts/test_question_test.mjs` 和实际 `go build -buildmode=c-shared` 通过。宿主 Go 源码没有改动，本轮未重跑宿主全量测试或重新编译宿主。
+- `python3 scripts/verify_question_test.py` 的 8 组实际宿主/C ABI检查通过，最终报告为 `native-api.json`，绑定最终源码、库、宿主和实际返回资源的哈希。覆盖题库不泄漏答案、手动双样本不评分、改题无答案继承、HTML、旧规则暂停、暂停拒绝测试、人工解除后规则仍停止。共 7 次 mock 调用。
+- CUA 浏览器验证使用另一个独立实际宿主：多回答、首包前取消、取消后历史立即更新、HTML沙箱、同页结果、390px手机布局及深色主题通过；最终实例3个任务、4次mock调用。截图与范围记录在 `browser-verification.json`。初次发现的历史陈旧及手机留白已修复并复验。
+- 已将同一动态库安装到常驻 `127.0.0.1:8317` CPA，5个静态资源与源码逐字节一致，插件有效启用。常驻实例没有创建测试任务，配置和数据保留；旧库备份在 `previous-installation/`。两个独立mock实例均已停止，常驻CPA继续后台运行。
+
+最终截图：`installed-cpa.jpg`、`final-desktop.jpg`、`final-mobile.jpg`、`final-dark.jpg`、`final-html-preview.jpg`、`final-cancel-history.jpg`。只读审阅结论通过，无交付阻断项。没有进行真实模型质量测量、实体手机或 Windows/Linux验证。
+
+复跑入口为 `scripts/test_question_test.mjs` 和 `scripts/verify_question_test.py`；旧 UI 4.1 浏览器脚本不作为当前版本验收。API脚本首次自身属性访问错误的失败记录及后续旧构建报告保存在 `native-api-history/`，没有覆盖为通过。
+
+---
+
+# UI 4.1.0 本轮验收与历史记录
+
+2026-11-14 的界面精修验收：65项fake API浏览器检查、10项实际宿主浏览器检查、独立插件tests/race/vet、实际共享库构建和装载生命周期、宿主fresh tests/race/compile均通过。完整命令、哈希、前后截图、检测告警处理与未验证范围见 [UI_POLISH_REPORT_CN.md](UI_POLISH_REPORT_CN.md)。本轮证据根为 `artifacts/polish-4.1.0/verification-final2/`，候选解包报告单独绑定安装归档哈希。
+
+以下为保留的0.3.0历史验收说明；其中38/9检查数量及 `artifacts/verification/` 路径不代表本轮结果。
+
+---
+
 # 0.3.0 验收记录
 
 本轮语义：暂停后禁止全部复测，仅人工解除；quality capability v2 / 插件 schema 2。旧版复测恢复验证不作为本轮验收。

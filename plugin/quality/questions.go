@@ -3,6 +3,7 @@ package quality
 import (
 	"bytes"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -15,9 +16,16 @@ import (
 	"github.com/MoeForge/moego/ojson"
 )
 
-// Built-in questions are original, versioned instances, not copied source assets.
+// The copied question text retains its upstream license and attribution in NOTICE.md.
+//
+//go:embed questiondata/candy-sub2api.txt
+var candyQuestionText string
+
+// Questions returns fresh, versioned instances; legacy IDs keep their original prompts.
 func Questions() []Question {
 	return []Question{
+		{ID: "logic-candy", Version: "sub2api-ccf997c7-v1", Title: "糖果逻辑测试", Kind: "logic", Prompt: strings.TrimSuffix(candyQuestionText, "\n") + "\n\n只输出最终整数，不要解释。", Answer: "21"},
+		{ID: "visual-pelican-html", Version: "1", Title: "鹈鹕骑自行车（HTML）", Kind: "visual", Prompt: "创建一个独立 HTML 页面，用内联 SVG 绘制鹈鹕骑自行车的循环 2D 动画。清楚呈现鹈鹕的长喙、双轮车架、车轮转动与踩踏动作。直接输出完整 HTML，不要 Markdown 代码块或解释。所有样式与动画都包含在页面中，不使用外部资源、网络请求、表单或弹窗。"},
 		{ID: "logic-boxes", Version: "1", Title: "约束盒子", Kind: "logic", Prompt: "A、B、C 三个盒子各有一个不同的正整数，且都小于 8。A + B = 9，B + C = 7，A + C = 8。B 中的整数是多少？仅输出一个整数。", Answer: "4"},
 		{ID: "random-linear", Version: "1", Title: "可复现随机约束题", Kind: "random", Family: "bounded-linear-v1", Prompt: "提交时根据 seed 生成独立题面。"},
 		{ID: "visual-pelican", Version: "1", Title: "鹈鹕骑自行车", Kind: "visual", Prompt: "Create a single self-contained SVG illustrating a pelican riding a bicycle. Output only SVG markup. Do not use external assets."},

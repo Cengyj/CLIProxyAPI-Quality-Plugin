@@ -67,6 +67,9 @@ func (en *Engine) validate(c *RunConfig) error {
 	return nil
 }
 func (en *Engine) Submit(ctx context.Context, c RunConfig) (*Run, error) {
+	if c.Judge.Mode == "" {
+		c.Judge.Mode = "manual"
+	}
 	return en.submit(ctx, c, "", 0)
 }
 func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, scheduledRevision uint64) (*Run, error) {

@@ -20,7 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
-DEMO = ROOT / "artifacts/demo"
+DEMO = Path(os.environ.get("MQ_DEMO_DIR", str(ROOT / "artifacts/demo"))).resolve()
 STATE = DEMO / "state.json"
 ADMIN_KEY = "mq-demo-admin-not-a-live-secret"
 BUSINESS_KEY = "mq-demo-client-not-a-live-key"
@@ -123,7 +123,11 @@ class FakeUpstream(BaseHTTPRequestHandler):
         answer = "4"
         if "SVG" in text or "svg" in text.lower() or "visual" in payload.get("model", ""):
             answer = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 300"><rect width="600" height="300" fill="#f2f6eb"/><style>.wheel{transform-box:fill-box;transform-origin:center;animation:turn 3s linear infinite}@keyframes turn{to{transform:rotate(360deg)}}</style><g fill="none" stroke="#28604a" stroke-width="6"><circle class="wheel" cx="200" cy="220" r="43"/><circle class="wheel" cx="390" cy="220" r="43"/><path d="M200 220 260 130 315 220 200 220M260 130 370 130 390 220M315 220 370 130"/></g><ellipse cx="295" cy="95" rx="48" ry="32" fill="white" stroke="#6e875f" stroke-width="3"/><path d="M325 77q10-44 42-25l12 14 74 17-81 17" fill="#efc768" stroke="#6e875f" stroke-width="3"/><circle cx="365" cy="63" r="4" fill="#193c2a"/><path d="M285 120 265 174 310 205" fill="none" stroke="#dfac4a" stroke-width="8"/><text x="30" y="35" font-size="15" fill="#6e875f">OFFLINE MOCK · SVG REVIEW</text></svg>'
+            if "独立 HTML" in text:
+                answer = '<!doctype html><html><head><meta charset="utf-8"><title>Offline pelican</title></head><body>' + answer + '</body></html>'
         else:
+            if "苹果味 桃子味 西瓜味" in text:
+                answer = "21"
             sums = re.search(r"A\+B=(\d+), B\+C=(\d+), A\+C=(\d+)", text)
             if sums:
                 ab, bc, ac = map(int, sums.groups())

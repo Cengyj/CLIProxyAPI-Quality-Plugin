@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-14T05:31:29.357145Z",
+  "generatedAt": "2026-11-14T06:38:11.731028Z",
   "title": "Design System: Model Quality",
   "extensions": {
     "colorMeta": {
@@ -656,15 +656,19 @@
       },
       "answer": {
         "displayName": "Answer",
-        "purpose": "Original model output."
+        "purpose": "Escaped natural-language model output in the system sans stack; original line breaks and content remain intact."
       },
       "code": {
         "displayName": "Code",
-        "purpose": "Source and raw evidence."
+        "purpose": "Secondary source and raw diagnostic evidence."
       },
       "metric": {
         "displayName": "Metric",
         "purpose": "Metric values with tabular numerals."
+      },
+      "answer-code": {
+        "displayName": "Code Answer",
+        "purpose": "Escaped code, HTML, or SVG model output in monospace."
       }
     },
     "shadows": [
@@ -714,7 +718,7 @@
       "refersTo": "button-primary",
       "description": "Native text-led action using the primary variant.",
       "html": "<button type=\"button\" class=\"ds-button-primary\">开始评测</button>",
-      "css": ".ds-button-primary{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;background:var(--accent,#726d67);color:var(--on-accent,#ffffff);}.ds-button-primary:hover{background:var(--accent-hover,#5f5a54);}.ds-button-primary:active:not(:hover){background:var(--border,#e3e1db);}.ds-button-primary:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-button-primary:disabled{opacity:.48;cursor:not-allowed;}.ds-button-primary[aria-busy=\"true\"]{opacity:.7;cursor:progress;}@media(prefers-reduced-motion:reduce){.ds-button-primary{transition:none;}}"
+      "css": ".ds-button-primary{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;background:var(--accent,#726d67);color:var(--on-accent,#ffffff);}.ds-button-primary:hover{background:var(--accent-hover,#5f5a54);}.ds-button-primary:active:not(:hover){background:var(--border,#e3e1db);}.ds-button-primary:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-button-primary:disabled{opacity:.48;cursor:not-allowed;}.ds-button-primary[aria-busy=\"true\"]{opacity:.7;cursor:progress;}@media(prefers-reduced-motion:reduce){.ds-button-primary{transition:none;}}@media(max-width:760px){.ds-button-primary{min-height:44px;}}"
     },
     {
       "name": "Subtle Button",
@@ -722,7 +726,7 @@
       "refersTo": "button-subtle",
       "description": "Native text-led action using the subtle variant.",
       "html": "<button type=\"button\" class=\"ds-button-subtle\">脱敏导出</button>",
-      "css": ".ds-button-subtle{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;background:var(--surface,#fffdf9);color:var(--ink,#2d2a26);border-color:var(--border-strong,#b5afa7);}.ds-button-subtle:hover{background:var(--hover,#e9e6df);}.ds-button-subtle:active{background:var(--border,#e3e1db);}.ds-button-subtle:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-button-subtle:disabled{opacity:.48;cursor:not-allowed;}.ds-button-subtle[aria-busy=\"true\"]{opacity:.7;cursor:progress;}@media(prefers-reduced-motion:reduce){.ds-button-subtle{transition:none;}}"
+      "css": ".ds-button-subtle{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;background:var(--surface,#fffdf9);color:var(--ink,#2d2a26);border-color:var(--border-strong,#8e877e);}.ds-button-subtle:hover{background:var(--hover,#e9e6df);}.ds-button-subtle:active{background:var(--border,#e3e1db);}.ds-button-subtle:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-button-subtle:disabled{opacity:.48;cursor:not-allowed;}.ds-button-subtle[aria-busy=\"true\"]{opacity:.7;cursor:progress;}@media(prefers-reduced-motion:reduce){.ds-button-subtle{transition:none;}}@media(max-width:760px){.ds-button-subtle{min-height:44px;}}"
     },
     {
       "name": "Consequential Button",
@@ -730,7 +734,7 @@
       "refersTo": "button-danger",
       "description": "Native text-led action using the danger variant.",
       "html": "<button type=\"button\" class=\"ds-button-danger\">确认解除，保持检测停止</button>",
-      "css": ".ds-button-danger{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;background:var(--surface,#fffdf9);color:var(--bad,#8a3a30);border-color:var(--bad,#8a3a30);}.ds-button-danger:hover{background:var(--bad-bg,#f9e8e3);}.ds-button-danger:active:not(:hover){background:var(--border,#e3e1db);}.ds-button-danger:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-button-danger:disabled{opacity:.48;cursor:not-allowed;}.ds-button-danger[aria-busy=\"true\"]{opacity:.7;cursor:progress;}@media(prefers-reduced-motion:reduce){.ds-button-danger{transition:none;}}"
+      "css": ".ds-button-danger{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;background:var(--surface,#fffdf9);color:var(--bad,#8a3a30);border-color:var(--bad,#8a3a30);}.ds-button-danger:hover{background:var(--bad-bg,#f9e8e3);}.ds-button-danger:active:not(:hover){background:var(--border,#e3e1db);}.ds-button-danger:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-button-danger:disabled{opacity:.48;cursor:not-allowed;}.ds-button-danger[aria-busy=\"true\"]{opacity:.7;cursor:progress;}@media(prefers-reduced-motion:reduce){.ds-button-danger{transition:none;}}@media(max-width:760px){.ds-button-danger{min-height:44px;}}"
     },
     {
       "name": "Text Button",
@@ -738,7 +742,7 @@
       "refersTo": "button-text",
       "description": "Native text-led action using the text variant.",
       "html": "<button type=\"button\" class=\"ds-button-text\">条件详情</button>",
-      "css": ".ds-button-text{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;background:transparent;color:var(--muted,#68625b);padding:7px 9px;}.ds-button-text:hover{background:var(--hover,#e9e6df);color:var(--ink,#2d2a26);}.ds-button-text:active{background:var(--border,#e3e1db);}.ds-button-text:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-button-text:disabled{opacity:.48;cursor:not-allowed;}.ds-button-text[aria-busy=\"true\"]{opacity:.7;cursor:progress;}@media(prefers-reduced-motion:reduce){.ds-button-text{transition:none;}}"
+      "css": ".ds-button-text{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;background:transparent;color:var(--muted,#68625b);padding:7px 9px;}.ds-button-text:hover{background:var(--hover,#e9e6df);color:var(--ink,#2d2a26);}.ds-button-text:active{background:var(--border,#e3e1db);}.ds-button-text:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-button-text:disabled{opacity:.48;cursor:not-allowed;}.ds-button-text[aria-busy=\"true\"]{opacity:.7;cursor:progress;}@media(prefers-reduced-motion:reduce){.ds-button-text{transition:none;}}@media(max-width:760px){.ds-button-text{min-height:44px;}}"
     },
     {
       "name": "Native Text Field",
@@ -746,7 +750,7 @@
       "refersTo": "input",
       "description": "Visible label, raised field, and strong border; native editing remains intact.",
       "html": "<label class=\"ds-field\">判题模型<input class=\"ds-field-input\" placeholder=\"输入模型 ID\"></label>",
-      "css": ".ds-field{display:block;color:var(--ink,#2d2a26);font-weight:550;line-height:1.6;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;}.ds-field-input{display:block;margin-top:7px;width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--border-strong,#b5afa7);border-radius:6px;background:var(--surface-raised,#ffffff);color:inherit;font:inherit;font-weight:400;line-height:1.45;}.ds-field-input:hover{border-color:var(--muted,#68625b);}.ds-field-input::placeholder{color:var(--muted,#68625b);opacity:1;}.ds-field-input:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-field-input:disabled{background:var(--surface-muted,#f0eee8);}"
+      "css": ".ds-field{display:block;color:var(--ink,#2d2a26);font-weight:550;line-height:1.6;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;}.ds-field-input{display:block;margin-top:7px;width:100%;min-height:44px;padding:10px 12px;border:1px solid var(--border-strong,#8e877e);border-radius:6px;background:var(--surface-raised,#ffffff);color:inherit;font:inherit;font-weight:400;line-height:1.45;}.ds-field-input:hover{border-color:var(--muted,#68625b);}.ds-field-input::placeholder{color:var(--muted,#68625b);opacity:1;}.ds-field-input:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-field-input:disabled{background:var(--surface-muted,#f0eee8);}@media(max-width:760px){.ds-field-input{min-height:44px;font-size:16px;}}"
     },
     {
       "name": "Local View Navigation",
@@ -754,7 +758,7 @@
       "refersTo": "navigation",
       "description": "Quiet view buttons; an ink underline identifies the current workspace view.",
       "html": "<nav class=\"ds-nav\" aria-label=\"评测工作区\"><button class=\"ds-nav-button ds-nav-active\" aria-current=\"page\">配置评测</button><button class=\"ds-nav-button\">当前任务</button><button class=\"ds-nav-button\">任务历史</button></nav>",
-      "css": ".ds-nav{display:flex;gap:24px;border-bottom:1px solid var(--border,#e3e1db);}.ds-nav-button{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;border-radius:0;padding:12px 2px;border-bottom:2px solid transparent;background:transparent;color:var(--muted,#68625b);}.ds-nav-button:hover{background:var(--hover,#e9e6df);}.ds-nav-button:active{background:var(--border,#e3e1db);}.ds-nav-active{color:var(--ink,#2d2a26);border-bottom-color:var(--ink,#2d2a26);}.ds-nav-button:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}@media(prefers-reduced-motion:reduce){.ds-nav-button{transition:none;}}"
+      "css": ".ds-nav{display:flex;gap:24px;border-bottom:1px solid var(--border,#e3e1db);}.ds-nav-button{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;border-radius:0;padding:12px 2px;border-bottom:2px solid transparent;background:transparent;color:var(--muted,#68625b);}.ds-nav-button:hover{background:var(--hover,#e9e6df);}.ds-nav-button:active{background:var(--border,#e3e1db);}.ds-nav-active{color:var(--ink,#2d2a26);border-bottom-color:var(--ink,#2d2a26);}.ds-nav-button:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}@media(prefers-reduced-motion:reduce){.ds-nav-button{transition:none;}}@media(max-width:760px){.ds-nav-button{min-height:44px;}}"
     },
     {
       "name": "Selectable Model Chip",
@@ -762,23 +766,23 @@
       "refersTo": "model-chip",
       "description": "A native button exposes model selection through aria-pressed.",
       "html": "<button class=\"ds-model-chip\" type=\"button\" aria-pressed=\"true\">example-model</button>",
-      "css": ".ds-model-chip{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;font-size:12px;min-height:36px;padding:7px 10px;border-color:var(--border,#e3e1db);border-radius:6px;background:var(--surface,#fffdf9);color:var(--ink,#2d2a26);overflow-wrap:anywhere;text-align:left;max-width:100%;}.ds-model-chip:hover{background:var(--hover,#e9e6df);}.ds-model-chip:active{background:var(--border,#e3e1db);}.ds-model-chip[aria-pressed=\"true\"]{background:var(--surface-muted,#f0eee8);border-color:var(--muted,#68625b);}.ds-model-chip:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}@media(prefers-reduced-motion:reduce){.ds-model-chip{transition:none;}}"
+      "css": ".ds-model-chip{min-height:40px;padding:8px 15px;border:1px solid transparent;border-radius:var(--radius,8px);cursor:pointer;font-weight:550;line-height:1.4;transition:background-color var(--motion,180ms),border-color var(--motion,180ms),color var(--motion,180ms);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;font-size:12px;min-height:36px;padding:7px 10px;border-color:var(--border,#e3e1db);border-radius:6px;background:var(--surface,#fffdf9);color:var(--ink,#2d2a26);overflow-wrap:anywhere;text-align:left;max-width:100%;}.ds-model-chip:hover{background:var(--hover,#e9e6df);}.ds-model-chip:active{background:var(--border,#e3e1db);}.ds-model-chip[aria-pressed=\"true\"]{background:var(--surface-muted,#f0eee8);border-color:var(--muted,#68625b);}.ds-model-chip:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}@media(prefers-reduced-motion:reduce){.ds-model-chip{transition:none;}}@media(max-width:760px){.ds-model-chip{min-height:44px;}}"
     },
     {
       "name": "Named State Tags",
       "kind": "chip",
       "refersTo": "status-tag",
-      "description": "Independent, noninteractive state labels pair readable text with semantic colors.",
-      "html": "<div class=\"ds-tags\"><span class=\"ds-tag ds-tag-good\">条件可比较</span><span class=\"ds-tag ds-tag-warn\">证据不足</span><span class=\"ds-tag ds-tag-bad\">回答错误</span></div>",
-      "css": ".ds-tags{display:flex;flex-wrap:wrap;gap:6px;}.ds-tag{display:inline-flex;padding:3px 8px;border-radius:4px;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:11px;font-weight:550;line-height:1.6;background:var(--surface-muted,#f0eee8);color:var(--muted,#68625b);overflow-wrap:anywhere;}.ds-tag-good{background:var(--good-bg,#e2f3e9);color:var(--good,#065f46);}.ds-tag-warn{background:var(--warn-bg,#fcf0d8);color:var(--warn,#92400e);}.ds-tag-bad{background:var(--bad-bg,#f9e8e3);color:var(--bad,#8a3a30);}"
+      "description": "Separate execution, verdict, and evidence roles use readable 13px labels; successful completion/comparability remain neutral.",
+      "html": "<div class=\"ds-tags\"><span class=\"ds-tag\">执行 · 已完成</span><span class=\"ds-tag ds-tag-good\">质量 · 正确</span><span class=\"ds-tag\">证据 · 条件可比较</span></div>",
+      "css": ".ds-tags{display:flex;flex-wrap:wrap;gap:6px;}.ds-tag{display:inline-flex;padding:3px 8px;border-radius:4px;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:13px;font-weight:550;line-height:1.6;background:var(--surface-muted,#f0eee8);color:var(--muted,#68625b);overflow-wrap:anywhere;}.ds-tag-good{background:var(--good-bg,#e2f3e9);color:var(--good,#065f46);}.ds-tag-warn{background:var(--warn-bg,#fcf0d8);color:var(--warn,#92400e);}.ds-tag-bad{background:var(--bad-bg,#f9e8e3);color:var(--bad,#8a3a30);}"
     },
     {
       "name": "Model Result Container",
       "kind": "card",
       "refersTo": "result-card",
-      "description": "Flat model header and raised answer field; production places these containers in the shared comparison subgrid.",
+      "description": "Flat model identity, copy-ID action, and content-sized prose/code answers; production aligns same-numbered samples in a comparison subgrid.",
       "html": "<section class=\"ds-result\"><div class=\"ds-result-heading\"><h3 class=\"ds-model-title\">example-model</h3><span class=\"ds-model-count\">1 个样本</span></div><article class=\"ds-sample\"><h4 class=\"ds-sample-title\">样本 1</h4><pre class=\"ds-answer\">这里展示模型原始回答。\n原文保留换行并按可用宽度折行。</pre></article></section>",
-      "css": ".ds-result{border:1px solid var(--border,#e3e1db);border-radius:var(--radius,8px);background:var(--surface,#fffdf9);color:var(--ink,#2d2a26);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;}.ds-result-heading{display:flex;justify-content:space-between;align-items:baseline;gap:16px;padding:18px 20px;border-bottom:1px solid var(--border,#e3e1db);background:var(--surface-muted,#f0eee8);border-radius:var(--radius,8px) var(--radius,8px) 0 0;}.ds-model-title{margin:0;font-size:15px;font-weight:600;line-height:1.5;overflow-wrap:anywhere;}.ds-model-count{font-size:12px;color:var(--muted,#68625b);white-space:nowrap;}.ds-sample{padding:20px;}.ds-sample-title{margin:0 0 16px;font-size:12px;font-weight:600;color:var(--muted,#68625b);}.ds-answer{margin:0;min-height:150px;max-height:420px;overflow:auto;padding:18px;background:var(--surface-raised,#ffffff);border:1px solid var(--border,#e3e1db);border-radius:6px;font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;font-size:13px;line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere;}"
+      "css": ".ds-result{border:1px solid var(--border,#e3e1db);border-radius:var(--radius,8px);background:var(--surface,#fffdf9);color:var(--ink,#2d2a26);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;}.ds-result-heading{display:flex;justify-content:space-between;align-items:baseline;gap:16px;padding:12px 16px;border-bottom:1px solid var(--border,#e3e1db);background:var(--surface-muted,#f0eee8);border-radius:var(--radius,8px) var(--radius,8px) 0 0;}.ds-model-title{margin:0;font-size:15px;font-weight:600;line-height:1.5;overflow-wrap:anywhere;}.ds-model-count{font-size:12px;color:var(--muted,#68625b);white-space:nowrap;}.ds-sample{padding:16px;}.ds-sample-title{margin:0 0 12px;font-size:13px;font-weight:600;color:var(--muted,#68625b);}.ds-answer{margin:0;min-height:0;max-height:420px;overflow:auto;padding:14px 16px;background:var(--surface-raised,#ffffff);border:1px solid var(--border,#e3e1db);border-radius:6px;font-family:inherit;font-size:16px;line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere;}"
     },
     {
       "name": "Frozen Conditions Disclosure",
@@ -786,7 +790,7 @@
       "refersTo": "disclosure",
       "description": "A native disclosure keeps exact run conditions available next to the answers.",
       "html": "<details class=\"ds-disclosure\"><summary class=\"ds-summary\">本轮冻结条件 <span class=\"ds-summary-note\">题目、模型、参数与判据</span></summary><p class=\"ds-disclosure-content\">配置在执行前冻结；条件未知时明确显示未知。</p></details>",
-      "css": ".ds-disclosure{border-bottom:1px solid var(--border,#e3e1db);color:var(--ink,#2d2a26);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;}.ds-summary{cursor:pointer;padding:16px 0;min-height:44px;font-weight:550;line-height:1.6;}.ds-summary:hover{color:var(--muted,#68625b);}.ds-summary:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-summary-note{font-weight:400;color:var(--muted,#68625b);font-size:12px;margin-left:10px;}.ds-disclosure-content{margin:0;padding-bottom:20px;color:var(--muted,#68625b);line-height:1.7;}"
+      "css": ".ds-disclosure{border-bottom:1px solid var(--border,#e3e1db);color:var(--ink,#2d2a26);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;}.ds-summary{cursor:pointer;padding:10px 0;min-height:44px;font-weight:550;line-height:1.6;}.ds-summary:hover{color:var(--muted,#68625b);}.ds-summary:focus-visible{outline:2px solid var(--focus,#8a3a30);outline-offset:3px;}.ds-summary-note{font-weight:400;color:var(--muted,#68625b);font-size:12px;margin-left:10px;}.ds-disclosure-content{margin:0;padding-bottom:20px;color:var(--muted,#68625b);line-height:1.7;}"
     }
   ],
   "narrative": {
@@ -794,9 +798,9 @@
     "overview": "Model Quality uses a quiet, exact working language: warm neutrals establish the workspace, white or raised dark fields carry answers, and clear separators keep related facts aligned. Compact system typography leaves room for model output and operational evidence. The personality is deliberate and restrained, with emphasis earned by the next action or a named state.\n\nThis system inherits the color families of CPA Management Center while independently defining its navigation, composition, and components. Native controls and disclosures keep familiar behavior. Broad sections stay flat; modal depth is reserved for focused inspection or consequential confirmation. The product mark is inline vector artwork; no raster asset is shipped.",
     "keyCharacteristics": [
       "Warm light, white, and warm dark themes with semantic color roles.",
-      "Compact system sans for interface text, monospace for answers and source.",
+      "Compact system sans for the interface and readable prose answers; monospace for code and diagnostic source.",
       "Fine separators and restrained rounded corners instead of elevated card grids.",
-      "Persistent navigation, scoped disclosures, and explicit labels for independent states.",
+      "Direct workspace navigation, scoped feedback, and explicit labels for independent states.",
       "Alignment for comparison, with readable single-column reflow on narrow screens."
     ],
     "rules": [
@@ -812,7 +816,7 @@
       },
       {
         "name": "The Reading Hierarchy Rule",
-        "body": "Use the compact heading scale for interface hierarchy. Reserve monospace for answer text, source, and raw evidence; use tabular numerals for metric values and navigation counts.",
+        "body": "Use the compact heading scale for interface hierarchy. Reserve monospace for code answers, source, and raw evidence. Use tabular numerals for comparable metrics, timing, dates, evidence values, and pagination. Missing values remain unknown; a recorded zero remains zero.",
         "section": "typography"
       },
       {

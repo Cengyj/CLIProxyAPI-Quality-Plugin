@@ -10,7 +10,7 @@ colors:
   ink: "#2d2a26"
   muted: "#68625b"
   border: "#e3e1db"
-  border-strong: "#b5afa7"
+  border-strong: "#8e877e"
   accent: "#726d67"
   accent-hover: "#5f5a54"
   on-accent: "#ffffff"
@@ -84,16 +84,36 @@ typography:
     fontSize: "12px"
     fontWeight: 400
     lineHeight: 1.7
+  brand:
+    fontFamily: "system-ui, sans-serif"
+    fontSize: "17px"
+    fontWeight: 650
+    lineHeight: 1.6
+  model-title:
+    fontFamily: "system-ui, sans-serif"
+    fontSize: "15px"
+    fontWeight: 600
+    lineHeight: 1.5
+  diagnostic-meta:
+    fontFamily: "system-ui, sans-serif"
+    fontSize: "11px"
+    fontWeight: 400
+    lineHeight: 1.6
   status:
     fontFamily: "-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif"
-    fontSize: "11px"
+    fontSize: "13px"
     fontWeight: 550
     lineHeight: 1.6
   answer:
+    fontFamily: "-apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif"
+    fontSize: "16px"
+    fontWeight: 400
+    lineHeight: 1.8
+  answer-code:
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
     fontSize: "13px"
     fontWeight: 400
-    lineHeight: 1.8
+    lineHeight: 1.7
   code:
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
     fontSize: "12px"
@@ -170,7 +190,7 @@ components:
     rounded: "{rounded.surface}"
   disclosure:
     textColor: "{colors.ink}"
-    padding: "16px 0"
+    padding: "10px 0"
   dialog:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
@@ -191,16 +211,16 @@ This system inherits the color families of CPA Management Center while independe
 **Key Characteristics:**
 
 - Warm light, white, and warm dark themes with semantic color roles.
-- Compact system sans for interface text, monospace for answers and source.
+- Compact system sans for the interface and readable prose answers; monospace for code and diagnostic source.
 - Fine separators and restrained rounded corners instead of elevated card grids.
-- Persistent navigation, scoped disclosures, and explicit labels for independent states.
+- Direct workspace navigation, scoped feedback, and explicit labels for independent states.
 - Alignment for comparison, with readable single-column reflow on narrow screens.
 
-This records the finished implementation in `plugin/ui/index.html`, `style.css`, `app.js`, and `view.js`. Surface-specific strategy and mode remain in `.impeccable/surfaces/plugin-ui-index-html.md`; product semantics remain in `PRODUCT.md`.
+This records the UI 4.1.0 implementation in `plugin/ui/index.html`, `style.css`, `app.js`, and `view.js`. Surface-specific strategy and mode remain in `.impeccable/surfaces/plugin-ui-index-html.md`; product semantics remain in `PRODUCT.md`.
 
 ## Colors
 
-The palette is warm and low-chroma, with a neutral primary action and restrained semantic green, amber, and red. Frontmatter values are normative. Unprefixed color tokens are the light theme; `white-` and `dark-` entries are exact overrides of the matching base role. Roles without a white override inherit the light value. The UI starts in light and cycles light → dark → white; it does not persist a theme preference.
+The palette is warm and low-chroma, with a neutral primary action and restrained semantic green, amber, and red. Frontmatter values are normative. Unprefixed color tokens are the light theme; `white-` and `dark-` entries are exact overrides of the matching base role. Roles without a white override inherit the light value. The UI starts in light. A native select explicitly lists 浅色, 纯白, and 深色 and shows the current choice; it does not persist a theme preference.
 
 ### Primary
 
@@ -218,7 +238,7 @@ The palette is warm and low-chroma, with a neutral primary action and restrained
 - **Warm Paper** (`page`), **Working Paper** (`surface`), and **Answer White** (`surface-raised`): the page, grouped content, and control/answer fields.
 - **Quiet Inset** (`surface-muted`) and **Hover Wash** (`hover`): contextual grouping and interaction feedback.
 - **Warm Ink** (`ink`) and **Readable Secondary** (`muted`): primary text and supporting text. The final secondary value is the contrast adaptation in the frontmatter, not the earlier design draft.
-- **Fine Divider** (`border`) and **Control Edge** (`border-strong`): content separation and actionable field boundaries.
+- **Fine Divider** (`border`) and **Control Edge** (`border-strong`): content separation and actionable field boundaries. Light and white controls use the strengthened warm-gray edge `#8e877e`; dark retains its separate edge role.
 
 CPA palette provenance is `router-for-me/Cli-Proxy-API-Management-Center`, fixed commit `d0126752201a35ff999bd2a1d4741215542258a8`, `src/styles/themes.scss`. `docs/UI_CN.md` records the source comparison; `plugin/NOTICE.md` retains attribution and the MIT license. Selected shades are adapted for this UI’s contrast. The static local-page comparison supports palette consistency, not a claim about the deployed frontend’s exact commit.
 
@@ -226,38 +246,40 @@ CPA palette provenance is `router-for-me/Cli-Proxy-API-Management-Center`, fixed
 
 **The Contrast Adaptation Rule.** Preserve the contrast-adjusted secondary text and neutral action shades when adapting the CPA palette. Theme substitutions must preserve the foreground/background pair, not merely the hue.
 
-The final contrast artifact checks thirteen body-text pairs with a minimum ratio of (4.83:1); it is evidence for those pairs, not a claim of formal accessibility certification. Sidecar tonal ramps are generated swatch previews only, not additional production theme tokens.
+Contrast and rendering evidence for this revision belongs in `artifacts/polish-4.1.0/verification-final2/`; the 4.0.0 baseline is retained in `artifacts/polish-4.1.0/baseline/`. Consult those reports for the exact colors, states, viewport sizes, and browser actually checked. Earlier contrast samples do not certify this revision or the complete interface. Sidecar tonal ramps are swatch previews only, not additional production theme tokens.
 
 ## Typography
 
-Use the local system sans stack from the frontmatter for interface text, including Chinese fallback faces. No external font is loaded. Use the local monospace stack for source and answers. There is no separate display face or display role.
+Use the local system sans stack from the frontmatter for interface text and natural-language answers, including Chinese fallback faces. No external font is loaded. Code/HTML/SVG answers use the local monospace stack. Rendering classifies presentation only: every answer remains escaped text with original line breaks, and copy/export retain the original content. There is no separate display face or display role.
 
 - **Headline:** the page title; the mobile override reduces its size without changing its weight or tracking.
 - **Title / section:** nested section and dialog headings; model headings use a slightly smaller local size (15px).
 - **Body / label:** default interface text and field labels; labels are medium weight while their control values return to regular.
-- **Supporting / status:** metadata and compact named-state tags. Explanatory paragraphs have a maximum measure (78ch) and line height (1.7).
-- **Answer / code:** wrapped text that preserves original line breaks; arbitrary long strings wrap rather than widening the page.
+- **Supporting / status:** secondary metadata uses 12px; named-state tags use 13px. Execution, quality, and evidence labels identify separate roles. Explanatory paragraphs have a maximum measure (78ch) and line height (1.7).
+- **Answer / answer-code / code:** prose answers use 16px at 1.8 line height; code answers use 13px at 1.7; raw JSON and secondary diagnostic source retain 12px at the base line height. Arbitrary long strings wrap rather than widening the page.
 - **Metric:** compact numerical emphasis with tabular numerals. It remains subordinate to the page title.
 
-**The Reading Hierarchy Rule.** Use the compact heading scale for interface hierarchy. Reserve monospace for answer text, source, and raw evidence; use tabular numerals for metric values and navigation counts.
+**The Reading Hierarchy Rule.** Use the compact heading scale for interface hierarchy. Reserve monospace for code answers, source, and raw evidence. Use tabular numerals for comparable metrics, sample timing, dates, evidence values, and pagination. Missing values remain unknown; a recorded zero remains zero.
 
 ## Layout
 
-The desktop shell has a persistent top navigation (72px minimum height), a slim freshness row (56px minimum), and a centered workspace (1440px maximum width) with side gutters (48px). Page headings, local view navigation, and section boundaries establish the reading order. Spacing uses the extracted frontmatter scale with deliberate larger gaps between tasks; it is not a uniform card grid.
+The desktop shell has a top navigation in document flow (64px minimum height), a slim freshness row (44px minimum), and a centered workspace (1440px maximum width) with side gutters (48px). Page headings, local view navigation, and section boundaries establish the reading order. Spacing uses the extracted frontmatter scale with deliberate larger gaps between tasks; it is not a uniform card grid.
 
-The current console has two primary destinations. Manual evaluation exposes setup, current task, and history as local views. Quality operations exposes attention, rules, and audit; the attention view places owned pauses and credential restrictions before metrics. Rule and global-budget editors replace the operations content in place. These are current component compositions, not mandatory layouts for unrelated future surfaces.
+The current console has two primary destinations. Manual evaluation exposes setup, current task, and history as local views. Quality operations exposes attention, rules, and audit; the attention view places owned pauses and credential restrictions before metrics. Rule and global-budget editors replace the operations content in place. The current-task view uses 回答与证据 as its page title and omits the setup description and duplicate visible result title. Task source/date, explicit actions, progress, and credential context stay available; the task ID lives inside frozen conditions. View changes focus the selected section and return the manual workspace to its start. These are current component compositions, not mandatory layouts for unrelated future surfaces.
 
 Setup uses two columns (1fr / 1.18fr) separated by a fine rule, with a wider gap (48px). Execution parameters use a narrow label column (220px) and a flexible control column. Ordinary field rows fit columns with a minimum width (150px). The inline submit summary keeps scope and the explicit execution action together.
 
-The answer comparison has at most two visible model columns. CSS row subgrid aligns each model header and same-numbered sample block; the application updates the row span for the visible sample count. Individual samples hold named execution/verdict/comparability states, answer text, evidence actions, and a review disclosure. A single selected model fills the width. Frozen conditions remain directly above the comparison in a native disclosure.
+The answer comparison has at most two visible model columns. CSS row subgrid aligns each model header and same-numbered sample block; the application updates the row span for the visible sample count. Individual samples hold named execution/verdict/comparability states, answer text, evidence actions, and a review disclosure. A single selected model fills the width. Frozen conditions remain directly above the comparison in a native disclosure with a 44px minimum target. The comparison column gap is 20px with no shared-row gap. Model headers show the full wrapping ID and a copy-ID action; numbered selector options retain both ends of long identifiers to distinguish models with similar prefixes. A block-flow fallback keeps answers readable where subgrid is unavailable; shared-row alignment is not promised by that fallback.
 
 | Viewport | Implemented adaptation |
 | --- | --- |
-| Above 1100px | Full workspace gutters, unequal setup columns, and a comparison gap (28px). |
+| Above 1100px | Full workspace gutters, unequal setup columns, and a comparison gap (20px). |
 | At or below 1100px | Gutters and header inset become (28px); setup columns become equal with a gap (24px); the execution label column becomes (160px); comparison controls wrap; rule tables retain a minimum width (880px) inside a horizontal scroll region. |
-| At or below 760px | Gutters become (20px); the header wraps and primary navigation remains visible on a full-width row (48px high); setup and editor sections stack. Comparison changes to a single column, model containers become ordinary block flow, and subgrid row sharing stops. Model selectors retain two compact columns above the stacked answers. |
+| At or below 760px | Gutters become (20px); the header wraps and primary navigation remains visible on a full-width row (48px high); setup and editor sections stack. Comparison changes to a single column, model containers become ordinary block flow, and subgrid row sharing stops. Two model selectors share a row with an 88px sample selector above the stacked answers. |
 
-On mobile, the crumb is hidden while freshness and refresh remain visible. Credential and rule tables become stacked entries with each cell’s field name exposed via `data-label`. Metrics become two columns; budget fields also remain two columns. Dialog padding reduces to the inset step and their available height increases. Release confirmation spans the available button-row width. Supporting facts and review fields retain their compact two-column layouts where implemented.
+On mobile, the crumb is hidden while freshness and refresh remain visible. Credential and rule tables become stacked entries with each cell’s field name exposed via `data-label`. Metrics retain two columns; budget fields, evidence facts, and review fields become one column. Inputs, textareas, selects, and the theme control use at least 16px text. Buttons, model chips, and disclosure summaries use a 44px minimum height. The workspace and dialogs include bottom safe-area padding; dialogs use dynamic viewport height. Release confirmation spans the available button-row width.
+
+The sample heading is the only sticky reading context on mobile (`top: 0` within its sample). It repeats a single-line model identifier, sample number, and independent state roles while a long answer scrolls. The complete model ID remains available in the model header and copy action. The main header and comparison toolbar remain in document flow, avoiding stacked fixed bars. On phones, rerun and export are grouped in a native Task actions disclosure with Escape and outside-click dismissal; cancellation remains directly available.
 
 **The Alignment Before Ornament Rule.** Give comparable facts shared columns and boundaries. At the mobile breakpoint, release shared row alignment and preserve each model’s reading order.
 
@@ -277,11 +299,11 @@ Use the frontmatter radius roles: compact tags, gently rounded controls, standar
 
 ### Buttons
 
-Firm, compact, and text-led. The primary variant uses the neutral action pair; the subtle variant uses a surface and stronger border; the danger variant uses an error-colored outline and text; the text variant uses secondary text without a visible border. Standard controls have a minimum height (40px), while compact buttons use (36px) and smaller type (12px). Hover changes fill or border, and active feedback uses the divider tone where the variant cascade permits it. Disabled buttons use reduced opacity (0.48) and a not-allowed cursor; busy buttons use a progress cursor and opacity (0.7).
+Firm, compact, and text-led. The primary variant uses the neutral action pair; the subtle variant uses a surface and stronger border; the danger variant uses an error-colored outline and text; the text variant uses secondary text without a visible border. Standard controls have a minimum height (40px), while compact buttons use (36px) and smaller type (12px). Hover changes fill or border, and active feedback uses the divider tone where the variant cascade permits it. Disabled buttons use reduced opacity (0.48) and a not-allowed cursor; busy buttons use a progress cursor and opacity (0.7). Where an action has a busy label, its measured minimum width is retained while the label changes to 保存中, 读取状态中, 连接中, or 提交中. Mobile controls use the larger target rule above.
 
 ### Inputs / Fields
 
-Native input, select, textarea, and checkbox behavior is retained. Fields use the raised surface, strong border, control radius, and a minimum height (44px). Visible labels precede fields; help text follows or accompanies the label. Hover strengthens the border to secondary ink. Disabled inputs and read-only textareas use the muted surface; textareas resize vertically. Checkboxes remain native (18px) with the neutral accent. Errors appear as readable feedback near the active surface rather than color-only invalid borders.
+Native input, select, textarea, and checkbox behavior is retained. Fields use the raised surface, strong border, control radius, and a minimum height (44px). Visible labels precede fields; help text follows or accompanies the label. Hover strengthens the border to secondary ink. Disabled inputs and read-only textareas use the muted surface; textareas resize vertically. Checkboxes remain native (18px) with the neutral accent. Field validation sets `aria-invalid`, associates a nearby text message through `aria-describedby`, opens the containing disclosure where needed, and directs focus to the field. A form-level failure retains input and focuses readable feedback if no invalid field already supplies the location. Invalid borders and the focus outline use separate roles.
 
 ### Navigation
 
@@ -289,29 +311,37 @@ Both the primary destination navigation and local view navigation use quiet text
 
 ### Chips and named-state tags
 
-Selectable model chips are compact bordered buttons, wrap long model identifiers, and expose selection through `aria-pressed`. Selected chips use a muted fill and stronger edge. Noninteractive state tags are smaller rounded labels using neutral, good, warning, or bad pairs. State labels carry meaning independently of color.
+Selectable model chips are compact bordered buttons, wrap long model identifiers, and expose selection through `aria-pressed`. Selected chips use a muted fill and stronger edge. Noninteractive state tags use 13px text and neutral, good, warning, or bad pairs. In answers, execution completion and confirmed comparability use neutral tags; quality verdicts keep their own semantic tone, and insufficient evidence remains a warning. State labels carry meaning independently of color.
 
 ### Containers and aligned answers
 
-Result containers use a fine border, surface fill, and standard radius with a muted model header. Same-numbered samples are separated by a stronger divider. Answers are raised, bordered monospace fields with a minimum height (150px), a desktop maximum height (420px), and a mobile maximum (360px); explicit expansion removes the maximum. Scroll stays within long answers. The enclosing comparison subgrid aligns whole samples, not every internal line of text.
+Result containers use a fine border, surface fill, and standard radius with a muted model header. Same-numbered samples are separated by a stronger divider. Answers are raised, bordered text fields with no artificial minimum height, a desktop maximum height (420px), and a mobile maximum (360px); explicit expansion removes the maximum. A short answer therefore keeps its nearby metadata and actions close. Long answers use internal scrolling until expanded, with a stable scrollbar gutter. Collapsing brings the action back into view. The enclosing comparison subgrid aligns whole samples, not every internal line of text.
 
-Empty states use a dashed boundary and centered guidance; activity and history use separated rows. Owned-pause rows place the identity/evidence summary beside the decision area until mobile reflow. These containers remain flat.
+Polling reconciles model/sample keys and named parts instead of rebuilding the complete answer area. Unchanged output and stable review nodes retain focus, selection, internal scrolling, disclosures, expansion, and unsaved review values while changed result parts update. Selecting another task resets task-local comparison state; disconnecting, authentication loss, or a new connection clears old task content and selectors. The verification report records the actual stability checks.
+
+Empty states use a dashed boundary and centered guidance; activity and history use separated rows. The operations view uses a compact neutral empty state for no loaded pause actions. Owned-pause rows place the identity/evidence summary beside the decision area until mobile reflow. These containers remain flat.
 
 ### Disclosures and editors
 
-Use native `details` / `summary` for presets, advanced parameters, frozen conditions, human review, statistical definitions, and secondary evidence. Summaries have a minimum target height (44px), with compact rule-condition summaries locally reduced. Keep raw JSON secondary to structured evidence. Rule and budget editing are inline workspace surfaces, with focus moved to the heading and returned to the relevant opener when closed.
+Use native `details` / `summary` for presets, advanced parameters, frozen conditions, human review, statistical definitions, and secondary evidence. Summaries have a minimum target height (44px), with compact rule-condition summaries locally reduced. Evidence opens with the execution/verdict/comparability roles and their explanations, then model path, effective conditions, timing, and usage. Fingerprints and original diagnostic text are inside a diagnostic disclosure; raw JSON remains separately available. Known backend reasons have exact Chinese mappings; unknown reasons remain verbatim.
+
+Rule and budget editing are inline workspace surfaces, with focus moved to the heading and returned to the relevant opener when closed. A visible indicator distinguishes unchanged and unsaved input. Ordinary navigation preserves an open draft. Closing or replacing a dirty editor requires an explicit discard confirmation; leaving the document invokes the browser’s unsaved-change prompt. During a save, the editor fields and close/save controls are disabled. A late budget-read response cannot replace a newer editor.
 
 ### Protected native dialogs
 
-Connection, sample evidence, manual release, and isolated preview use native `dialog` with `showModal()`, readable headings, explicit close actions, native modal keyboard behavior, and scrolling within the viewport. Default width is capped at (560px); evidence, release, and preview caps are (840px), (720px), and (1100px), each with a viewport inset (32px).
+Connection, preset naming, rule deletion, discard confirmation, sample evidence, manual release, and isolated preview use native `dialog` with `showModal()`, readable headings, explicit close actions, native modal keyboard behavior, and scrolling within the viewport. Default width is capped at (560px); evidence, release, and preview caps are (840px), (720px), and (1100px), each with a viewport inset (32px).
 
-The release dialog shows credential identity, ownership, action version, and the consequence that dependent rules stay stopped. Confirmation is disabled while its preview is unavailable, stale, conflicting, or unresolved. A conflicting or uncertain response exposes refresh/reconciliation feedback instead of a repeat-submit promise. The isolated generated-content preview is a noninteractive sandbox; the original escaped output remains available in the answer field.
+Preset naming uses a labeled input; deletion identifies the rule and says that the action cannot be undone. Destructive confirmation starts with focus on Cancel. The shared action dialog blocks duplicate submissions and stays open with its entered value on an API failure. Escape and explicit close follow native modal behavior when no action is committing.
+
+The release dialog shows credential identity, ownership, action version, and the consequence that dependent rules stay stopped. Confirmation is disabled while its preview is unavailable, stale, conflicting, or unresolved. A conflicting or uncertain response exposes refresh/reconciliation feedback instead of a repeat-submit promise. The isolated generated-content preview retains an empty sandbox, `inert`, strict CSP, and blocked scripts, network, forms, and navigation. The original escaped output remains available in the answer field.
 
 **The Visible Focus Rule.** Keep the two-pixel focus outline with its three-pixel offset on keyboard targets, including controls, navigation, and disclosure summaries.
 
 **The Bounded Confirmation Rule.** Keep release identity, ownership, version, consequences, and reconciliation feedback inside the release dialog. An uncertain or conflicting result must remain visibly unresolved until refreshed.
 
-The skip link targets the main workspace. Status feedback uses polite live announcements. Native control semantics, labels, keyboard focus, reduced motion, and the responsive structure are implemented capabilities; no formal accessibility certification is asserted.
+Ordinary success feedback expires after six seconds and is cleared on workspace or local-view changes. Copy and review-save feedback appears on the corresponding button for 2.5 seconds and is also announced through a polite live region. Connection and stale-data state stay in the global freshness area; polling failures belong to the current task; uncertain release feedback stays in the release dialog until reconciled.
+
+Text selection uses ink/page colors, carets use the focus color, scrollbars use strong-border/muted-surface colors, and links use a 3px underline offset. The skip link targets the main workspace. Status feedback uses polite live announcements. Native control semantics, labels, keyboard focus, reduced motion, and the responsive structure are implemented capabilities; no formal accessibility certification is asserted.
 
 ## Do's and Don'ts
 
@@ -332,3 +362,16 @@ The skip link targets the main workspace. Status feedback uses polite live annou
 - Don’t treat a rule editor as a modal; the implemented editing surface stays in the workspace.
 - Don’t give ordinary content cards the dialog shadow.
 - Don’t display model-generated HTML as interactive parent-page content.
+
+UI 4.1.0 preserves 17px brand and mobile-dialog headings, 15px model headings, and 11px footer/task-ID metadata as explicit local roles. Mobile table field names are 13px. Diagnostic metadata is never the sole carrier of a restriction, action, or verdict.
+
+
+## Question testing · UI 4.2.0
+
+The user's sub2api screenshots and explicit request for question testing replace the 4.1 manual configure/evidence composition. Keep the established CPA-inspired themes and operations layout. The manual page is now titled 智商测试, with a compact credential strip, full-width question selector, wide editable prompt and a 260px settings column. Model, reasoning effort and answer count are immediately available; output limits remain in a disclosure. The start action precedes the current-answer/history switch. Results stay below the form, with two independent answers per row on desktop and one on phones. No automatic score, control credential, judge configuration or manual preset panel is shown.
+
+Edited built-ins visibly become custom questions; the original answer is not inherited. The default candy question retains source/version attribution; pelican HTML has an independently written prompt. Actual authentication, source identity and pause semantics remain authoritative. Detailed execution evidence is secondary. The page does not acquire probe or ModelTrace navigation.
+
+In CPA's iframe, hide the redundant product wordmark and reserve desktop space for the host's floating toolbar. On phones, stack connection tools below primary navigation. Input text stays at least 16px on phones; submit copy uses natural height, not a desktop flex basis. Same-task polling retains reading state; entering history refreshes its authoritative task statuses.
+
+Current verification belongs under `artifacts/question-test-4.2.0/`. Earlier 4.1 captures and reports do not validate this layout. UI-only interaction coverage is recorded separately from real native-host mock execution; no production accounts are used.

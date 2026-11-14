@@ -4,7 +4,6 @@ import {
   copyRunConfig,
   credentialBlock,
   date,
-  duration,
   escapeHTML,
   holdsPause,
   items,
@@ -14,13 +13,14 @@ import {
   statusTag,
   tag,
   targetID,
-  verdictTag,
   renderRunEvidence,
   renderSampleEvidence,
   renderRuleRows,
   renderTargetRows,
   renderActionItems,
   renderReleasePreview,
+  sourceLabel,
+  questionTestSelection,
 } from './view.js';
 
 const $ = (id) => document.getElementById(id);
@@ -29,7 +29,6 @@ const state = {
   targetsFresh: false,
   targets: [],
   questions: [],
-  presets: [],
   rules: [],
   actions: [],
   runs: [],
@@ -46,8 +45,9 @@ const state = {
   releaseBlocked: true,
   releaseAction: null,
   compareRun: null,
-  reads: { run: 0, history: 0, operations: 0, refresh: 0, preview: 0 },
+  reads: { run: 0, history: 0, operations: 0, refresh: 0, preview: 0, editor: 0 },
   busy: new Set(),
+  editor: null,
 };
 const value = (id) => $(id).value.trim();
 const number = (id) => Number($(id).value);
@@ -59,7 +59,16 @@ const client = new ManagementClient('/v8/management/plugins/model-quality', () =
 );
 const api = (path, method = 'GET', body) => client.request(path, method, body);
 
+let noticeTimer;
+const feedbackScope = () => `${state.page}:${state.page === 'manual' ? state.manualView : state.opsView}`;
+function clearNotice() {
+  clearTimeout(noticeTimer);
+  $('notice').classList.add('hidden');
+  $('notice').textContent = '';
+}
+
 function notice(message, error = false) {
+  clearNotice();
   $('notice').textContent = message;
   $('notice').classList.remove('hidden');
   $('notice').classList.toggle('error', error);
@@ -73,26 +82,111 @@ function notice(message, error = false) {
       dialog.querySelector('.dialog-heading').after(feedback);
     }
     feedback.textContent = message;
+    feedback.tabIndex = -1;
+    if (!dialog.querySelector('[aria-invalid="true"]')) feedback.focus({ preventScroll: false });
   }
+  if (!error) noticeTimer = setTimeout(clearNotice, 6000);
+}
+
+function localFeedback(button, message) {
+  const original = button.textContent;
+  button.style.minWidth = `${button.getBoundingClientRect().width}px`;
+  button.textContent = message;
+  $('local-feedback').textContent = message;
+  setTimeout(() => {
+    if (button.isConnected && button.textContent === message) { button.textContent = original; button.style.removeProperty('min-width'); }
+  }, 2500);
+}
+
+let actionRequest = null;
+function actionDialog({ title, description, confirm = '确认', input = false, danger = false, submit }) {
+  if ($('action-dialog').open) return;
+  $('action-title').textContent = title;
+  $('action-description').textContent = description;
+  $('action-name-field').hidden = !input;
+  $('action-name').required = input;
+  $('action-name').value = '';
+  $('action-error').classList.add('hidden');
+  $('action-name').removeAttribute('aria-invalid');
+  $('action-confirm').textContent = confirm;
+  $('action-confirm').className = danger ? 'danger' : 'primary';
+  actionRequest = { submit, input, epoch: client.epoch };
+  $('action-dialog').showModal();
+  $(input ? 'action-name' : 'action-cancel').focus();
+}
+
+function editorSnapshot(id) {
+  return JSON.stringify([...$(id).querySelectorAll('input,select,textarea')].map((field) => [field.id, field.type === 'checkbox' ? field.checked : field.value]));
+}
+function editorDirty() { return state.editor && state.editor.snapshot !== editorSnapshot(state.editor.id); }
+function updateEditorDirty() {
+  if (!state.editor) return;
+  $(state.editor.id).querySelector('.editor-dirty').textContent = editorDirty() ? '有未保存更改' : '尚未更改';
+}
+function protectEditor(action) {
+  if (state.editor?.saving) { notice('正在保存当前编辑，请等待结果。'); return; }
+  if (!editorDirty()) { action(); return; }
+  actionDialog({ title: '放弃未保存的更改？', description: '当前编辑尚未保存。放弃后将关闭这些更改，已保存的规则和预算不受影响。', confirm: '放弃更改', danger: true, submit: action });
+}
+
+async function saveEditor(action) {
+  const editor = state.editor;
+  if (!editor || editor.saving) return;
+  editor.saving = true;
+  const controls = [...$(editor.id).querySelectorAll('input,select,textarea,button')].map((node) => [node, node.disabled]);
+  controls.forEach(([node]) => { node.disabled = true; });
+  try { await action(editor); }
+  finally {
+    editor.saving = false;
+    controls.forEach(([node, disabled]) => { node.disabled = disabled; });
+    if (state.editor === editor) $(editor.id).querySelector('[aria-invalid="true"]')?.focus();
+    renderAdmission();
+  }
+}
+
+function fieldError(id, message) {
+  const field = $(id);
+  const errorID = `${id}-error`;
+  let feedback = $(errorID);
+  if (!feedback) {
+    feedback = document.createElement('span');
+    feedback.id = errorID;
+    feedback.className = 'field-error';
+    feedback.setAttribute('role', 'alert');
+    field.after(feedback);
+  }
+  feedback.textContent = message;
+  field.setAttribute('aria-invalid', 'true');
+  field.setAttribute('aria-describedby', [field.getAttribute('aria-describedby'), errorID].filter(Boolean).join(' '));
+  field.closest('details')?.setAttribute('open', '');
+  field.focus();
+  throw new Error(message);
 }
 
 async function safely(action, key = '', button = null) {
   if (key && state.busy.has(key)) return;
   if (key) state.busy.add(key);
+  const scope = feedbackScope();
   if (key) document.querySelectorAll('.dialog-message').forEach((node) => node.remove());
+  const originalContent = button ? [...button.childNodes] : [];
+  const busyLabel = key.includes('save') || key === 'save-rule' ? '保存中…' : key.includes('refresh') ? '读取状态中…' : key === 'connect' ? '连接中…' : key === 'submit-run' ? '提交中…' : '';
   if (button) {
+    button.style.minWidth = `${button.getBoundingClientRect().width}px`;
     button.disabled = true;
     button.setAttribute('aria-busy', 'true');
+    if (busyLabel) button.textContent = busyLabel;
   }
   try {
     return await action();
   } catch (error) {
-    if (!isDiscarded(error)) notice(error.message || '操作失败，请重试。', true);
+    if (!isDiscarded(error) && scope === feedbackScope()) notice(error.message || '操作失败，请重试。', true);
   } finally {
     if (key) state.busy.delete(key);
     if (button) {
       button.removeAttribute('aria-busy');
       button.disabled = false;
+      button.style.removeProperty('min-width');
+      if (busyLabel && button.textContent === busyLabel) button.replaceChildren(...originalContent);
     }
     renderAdmission();
   }
@@ -115,7 +209,6 @@ function disconnect(
   Object.assign(state, {
     targets: [],
     questions: [],
-    presets: [],
     rules: [],
     actions: [],
     runs: [],
@@ -130,8 +223,6 @@ function disconnect(
   for (const id of [
     'models',
     'prompt',
-    'review-standard',
-    'judge-model',
     'rule-models',
     'rule-prompt',
     'rule-review-standard',
@@ -139,27 +230,38 @@ function disconnect(
   ])
     $(id).value !== undefined ? ($(id).value = '') : $(id).replaceChildren();
   $('safe-preview').srcdoc = '';
+  $('rule-form').reset();
+  $('settings-form').reset();
+  $('settings-fields').replaceChildren();
+  for (const id of ['action-title', 'action-description', 'action-error', 'local-feedback']) $(id).textContent = '';
   document.body.classList.remove('connected');
   $('connect-banner').classList.remove('hidden');
   $('connection-state').textContent = '未连接';
   state.releaseBlocked = true;
   state.releaseAction = null;
   state.compareRun = null;
+  state.editor = null;
+  actionRequest = null;
+  $('action-name').value = '';
+  $('run-feedback').classList.add('hidden');
+  for (const id of ['compare-model-a', 'compare-model-b', 'sample-filter']) $(id).replaceChildren();
+  $('run-progress').style.width = '0%';
+  $('run-progress').parentElement.setAttribute('aria-valuenow', '0');
   $('evidence-content').replaceChildren();
   $('release-feedback').replaceChildren();
   $('release-feedback').classList.add('hidden');
   for (const id of ['rule-dialog', 'settings-dialog']) $(id).classList.add('hidden');
   $('operations-main').classList.remove('hidden');
   setManualView('setup');
-  $('data-state').textContent = '管理接口未连接';
+  $('data-state').textContent = failed ? '管理连接失效，请重新连接' : '管理接口未连接';
   $('data-state').classList.add('stale');
   $('run-content').classList.add('hidden');
+  $('task-actions').classList.add('hidden');
   $('run-empty').classList.remove('hidden');
   for (const id of ['run-rerun', 'run-export', 'run-cancel']) $(id).classList.add('hidden');
   for (const id of ['run-frozen-data', 'sample-list', 'run-meta', 'operations-audit', 'operations-history'])
     $(id).replaceChildren();
-  $('run-subtitle').textContent = '固定目标、冻结参数，分别记录执行状态与质量判定。';
-  renderPresets();
+  $('run-subtitle').textContent = '回答会显示在这里，不自动评分。';
   renderSelectors();
   renderHistory();
   renderRules();
@@ -170,10 +272,11 @@ function disconnect(
 }
 
 function setPage(page) {
+  if (page !== state.page) clearNotice();
   state.page = page === 'operations' ? 'operations' : 'manual';
   $('page-manual').classList.toggle('hidden', state.page !== 'manual');
   $('page-operations').classList.toggle('hidden', state.page !== 'operations');
-  $('page-crumb').textContent = state.page === 'manual' ? '手动评测' : '质量运维';
+  $('page-crumb').textContent = state.page === 'manual' ? '智商测试' : '质量运维';
   document.querySelectorAll('[data-page]').forEach((button) => {
     button.classList.toggle('active', button.dataset.page === state.page);
     button.setAttribute('aria-current', button.dataset.page === state.page ? 'page' : 'false');
@@ -182,23 +285,30 @@ function setPage(page) {
 }
 
 function setManualView(view, focus = false) {
+  if (view !== state.manualView) clearNotice();
   state.manualView = ['setup', 'results', 'history'].includes(view) ? view : 'setup';
-  for (const name of ['setup', 'results', 'history']) $( `manual-${name}`).classList.toggle('hidden', name !== state.manualView);
+  const historyView = state.manualView === 'history';
+  $('manual-setup').classList.toggle('hidden', historyView);
+  $('manual-results').classList.toggle('hidden', historyView);
+  $('manual-history').classList.toggle('hidden', !historyView);
   document.querySelectorAll('.view-nav [data-manual-view]').forEach((button) => {
-    const selected = button.dataset.manualView === state.manualView;
+    const selected = button.dataset.manualView === (historyView ? 'history' : 'setup');
     button.classList.toggle('active', selected);
     button.setAttribute('aria-current', selected ? 'page' : 'false');
   });
-  $('new-evaluation').classList.toggle('hidden', state.manualView === 'setup');
+  $('new-evaluation')?.classList.toggle('hidden', !historyView);
+  $('page-manual').dataset.view = state.manualView;
+  $('manual-title').textContent = '智商测试';
   if (focus) {
     const section = $(`manual-${state.manualView}`);
     section.tabIndex = -1;
     section.focus({ preventScroll: true });
-    section.scrollIntoView({ block: 'start' });
+    section.scrollIntoView({ block: 'start', behavior: 'instant' });
   }
 }
 
 function setOpsView(view) {
+  if (view !== state.opsView) clearNotice();
   state.opsView = ['attention', 'rules', 'activity'].includes(view) ? view : 'attention';
   for (const name of ['attention', 'rules', 'activity']) $(`ops-${name}`).classList.toggle('hidden', name !== state.opsView);
   document.querySelectorAll('[data-ops-view]').forEach((button) => {
@@ -209,6 +319,15 @@ function setOpsView(view) {
 }
 
 function openEditor(id) {
+  state.reads.editor++;
+  state.editor = { id, snapshot: editorSnapshot(id), opener: document.activeElement };
+  if (!$(id).querySelector('.editor-dirty')) {
+    const indicator = document.createElement('span');
+    indicator.className = 'editor-dirty';
+    indicator.setAttribute('role', 'status');
+    $(id).querySelector('.editor-footer, .button-row.end').prepend(indicator);
+  }
+  updateEditorDirty();
   $('operations-main').classList.add('hidden');
   for (const name of ['rule-dialog', 'settings-dialog']) $(name).classList.toggle('hidden', name !== id);
   const heading = $(id).querySelector('h2');
@@ -217,24 +336,31 @@ function openEditor(id) {
   $(id).scrollIntoView({ block: 'start' });
 }
 
-function closeSurface(id) {
+function closeSurface(id, saved = false) {
   const node = $(id);
-  if (node.tagName === 'DIALOG') node.close();
+  if (node.tagName === 'DIALOG') { if (id !== 'action-dialog' || !state.busy.has('dialog-action')) node.close(); }
   else {
+    if (!saved && state.editor?.saving) return;
+    if (!saved && editorDirty()) { protectEditor(() => closeSurface(id, true)); return; }
     node.classList.add('hidden');
     $('operations-main').classList.remove('hidden');
-    const opener = id === 'rule-dialog' ? $('rule-new') : $('settings-open');
+    const opener = state.editor?.opener?.isConnected ? state.editor.opener : id === 'rule-dialog' ? $('rule-new') : $('settings-open');
+    state.editor = null;
     opener.focus({ preventScroll: true });
   }
 }
 
 function updatePlan() {
-  const count = parseModels(value('models')).length;
-  const samples = Math.max(1, number('samples'));
-  $('run-plan').textContent = count ? `${count} 个模型 × ${samples} 个样本 · ${count * samples} 次目标调用` : '选择模型后确认执行计划';
-  const mode = { deterministic: '确定性判题', manual: '仅人工评审', llm: '独立模型判题（另计预算）' }[value('judge-mode')];
-  $('judge-summary').textContent = `${mode || '判题方式未知'} · ${value('reasoning') || '默认推理'}`;
-  for (const chip of $('model-chips').querySelectorAll('button')) chip.setAttribute('aria-pressed', String(parseModels(value('models')).includes(chip.textContent)));
+  const samples = number('samples');
+  $('run-plan').textContent = value('models') && Number.isInteger(samples) && samples >= 1 && samples <= 8
+    ? `同一道题 · ${samples} 份独立回答`
+    : '选择模型，填写题目后开始测试';
+  const target = findTarget(value('target'));
+  const model = (target?.models || []).find((entry) => (typeof entry === 'string' ? entry : entry.id || entry.model) === value('models'));
+  const reasoning = typeof model === 'object' ? model.reasoning || model.thinking : target?.reasoning?.[value('models')];
+  if ($('reasoning-note')) $('reasoning-note').textContent = reasoning
+    ? '思考强度由宿主按模型能力处理。'
+    : '该模型的思考强度支持情况未知，默认不指定。';
 }
 
 function targetOptions(includeBlank = true) {
@@ -256,127 +382,96 @@ function questionOptions() {
 }
 
 function renderSelectors() {
-  const customPrompt = value('question') === 'custom' ? $('prompt').value : null;
-  const judgeMode = value('judge-mode');
-  for (const id of [
-    'target',
-    'judge-target',
-    'control-target',
-    'rule-target',
-    'rule-judge-target',
-    'rule-control-target',
-  ]) {
+  const previousQuestion = value('question');
+  const previousPrompt = $('prompt').value;
+  for (const id of ['target', 'rule-target', 'rule-judge-target', 'rule-control-target']) {
     const previous = $(id).value;
     $(id).innerHTML = targetOptions();
     if (findTarget(previous)) $(id).value = previous;
   }
-  for (const id of ['question', 'rule-question']) {
-    const previous = $(id).value;
-    $(id).innerHTML = questionOptions();
-    if ([...$(id).options].some((option) => option.value === previous)) $(id).value = previous;
-  }
+  const curated = ['logic-candy', 'visual-pelican-html', 'custom'];
+  const questions = curated.map((id) => state.questions.find((question) => question.id === id)).filter(Boolean);
+  $('question').innerHTML = questions.length
+    ? questions.map((question) => `<option value="${escapeHTML(question.id)}">${escapeHTML(question.title || question.id)}</option>`).join('')
+    : '<option value="">连接后加载题目</option>';
+  if (questions.some((question) => question.id === previousQuestion)) $('question').value = previousQuestion;
+  const ruleQuestion = value('rule-question');
+  $('rule-question').innerHTML = questionOptions();
+  if ([...$('rule-question').options].some((option) => option.value === ruleQuestion)) $('rule-question').value = ruleQuestion;
   renderTarget();
   renderQuestion();
-  if (customPrompt !== null && value('question') === 'custom') $('prompt').value = customPrompt;
-  if (judgeMode) {
-    $('judge-mode').value = judgeMode;
-    renderJudge();
+  if (previousQuestion && value('question') === previousQuestion) {
+    $('prompt').value = previousPrompt;
+    updateQuestionNote();
   }
 }
 
-function renderPresets() {
-  const previous = value('preset');
-  $('preset').innerHTML =
-    '<option value="">选择预设，不执行</option>' +
-    state.presets
-      .map((preset) => `<option value="${escapeHTML(preset.id)}">${escapeHTML(preset.name)}</option>`)
-      .join('');
-  if (state.presets.some((preset) => preset.id === previous)) $('preset').value = previous;
-}
-
-function applyPreset(config) {
-  if (!findTarget(config.auth_id))
-    throw new Error('该预设的凭证当前不可发现；请核对宿主状态，不自动替换目标。');
-  $('target').value = config.auth_id;
-  $('models').value = (config.models || []).join('\n');
-  $('question').value = config.question_id;
-  renderTarget();
-  renderQuestion();
-  if (config.question_id === 'custom') $('prompt').value = config.prompt || '';
-  $('review-standard').value = config.review_standard || '';
-  $('samples').value = config.samples || 1;
-  $('max-tokens').value = config.parameters?.max_tokens || 2048;
-  $('temperature').value = config.parameters?.temperature ?? 0;
-  $('reasoning').value = config.parameters?.reasoning_effort || '';
-  $('judge-mode').value = config.judge?.mode || 'manual';
-  $('judge-target').value = config.judge?.auth_id || '';
-  $('judge-model').value = config.judge?.model || '';
-  $('control-target').value = config.control_auth_id || '';
-  renderJudge();
-  renderAdmission();
-}
-
-function renderTarget() {
+function renderTarget(selectModel = false) {
   const target = findTarget(value('target'));
-  $('model-chips').replaceChildren();
+  $('model-options').replaceChildren();
   if (!target) {
-    $('target-summary').textContent = '仅展示脱敏信息，使用真实 auth_id 固定执行。';
+    $('target-summary').textContent = state.targets.length ? '选择要测试的凭证。' : '尚无可用凭证，请先在 CPA 中添加凭证。';
     renderAdmission();
     return;
   }
-  $('target-summary').innerHTML =
-    `<strong>auth_id</strong> ${escapeHTML(targetID(target))}<br><strong>auth_index</strong> ${escapeHTML(target.auth_index || '未知')} · ${escapeHTML(target.type || '类型未知')}<br>${escapeHTML(target.unsupported_reason || (target.quality_paused ? '该凭证已暂停，所有检测均已停止。仅管理员手动解除后才可再次检测。' : '模型 reasoning 能力以宿主返回为准，缺失显示未知。'))}`;
-  for (const entry of target.models || []) {
-    const id = typeof entry === 'string' ? entry : entry.id || entry.model;
-    if (!id) continue;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'chip';
-    button.textContent = id;
-    const reasoning = typeof entry === 'object' ? entry.reasoning || entry.thinking : target.reasoning?.[id];
-    button.title = reasoning ? `Reasoning: ${JSON.stringify(reasoning)}` : 'Reasoning 能力未知';
-    button.addEventListener('click', () => {
-      const selected = parseModels(value('models'));
-      $('models').value = (selected.includes(id) ? selected.filter((model) => model !== id) : [...selected, id]).join('\n');
-      updatePlan();
-    });
-    $('model-chips').append(button);
-  }
+  const models = (target.models || []).map((entry) => typeof entry === 'string' ? entry : entry.id || entry.model).filter(Boolean);
+  $('model-options').innerHTML = models.map((model) => `<option value="${escapeHTML(model)}"></option>`).join('');
+  if (selectModel && !models.includes(value('models'))) $('models').value = models[0] || '';
+  const reason = credentialBlock({ auth_id: targetID(target) }, state.targets);
+  $('target-summary').innerHTML = `<span>${escapeHTML(target.provider || 'provider 未知')} · ${escapeHTML(target.type || '类型未知')}${reason ? ` · ${escapeHTML(reason)}` : ' · 选择题目并开始测试，比较模型回答。'}</span><details><summary>凭证标识</summary><span>auth_id：${escapeHTML(targetID(target))}<br>auth_index：${escapeHTML(target.auth_index || '未知')}</span></details>`;
   renderAdmission();
+}
+
+function updateQuestionNote() {
+  const question = state.questions.find((entry) => entry.id === value('question'));
+  const selected = questionTestSelection(question, $('prompt').value);
+  const changed = question?.id !== 'custom' && selected.question_id === 'custom';
+  $('question-version').textContent = changed ? '已修改 · 自定义题目' : question?.id === 'custom' ? '自定义题目' : question ? `版本 ${question.version || '未知'}` : '';
+  $('prompt-note').textContent = changed
+    ? '已修改题面。本次按自定义题目保存，不沿用内置答案。'
+    : '同一题面发送给每份独立回答；不自动评分。';
 }
 
 function renderQuestion() {
   const question = state.questions.find((entry) => entry.id === value('question'));
-  const custom = value('question') === 'custom' || question?.kind === 'custom';
-  $('prompt').readOnly = !custom;
-  $('review-standard-field').classList.toggle('hidden', !custom);
+  $('prompt').readOnly = false;
   $('prompt').value = question?.prompt || '';
-  $('question-version').textContent = custom ? '自定义题面' : `版本 ${question?.version || '未知'}`;
-  $('prompt-note').textContent = custom
-    ? '自定义题目不能沿用内置题答案。可选择人工或独立模型判题。'
-    : '内置题面与答案绑定版本；修改题面请新建自定义题目。';
-  if (custom || ['html', 'svg', 'visual'].includes(question?.kind)) $('judge-mode').value = 'manual';
-  renderJudge();
-  $('control-fields').classList.toggle('hidden', value('question') !== 'random-linear');
-}
-
-function renderJudge() {
-  $('judge-fields').classList.toggle('hidden', value('judge-mode') !== 'llm');
+  updateQuestionNote();
   renderAdmission();
 }
 
+function manualRunConfig() {
+  const target = findTarget(value('target'));
+  if (!target) fieldError('target', '请选择要测试的凭证。');
+  const models = parseModels(value('models'));
+  if (models.length !== 1) fieldError('models', '每次测试请选择一个模型。');
+  const samples = number('samples');
+  if (!Number.isInteger(samples) || samples < 1 || samples > 8) fieldError('samples', '回答数量须为 1–8 的整数。');
+  if (!$('prompt').value.trim()) fieldError('prompt', '请填写测试题目。');
+  const question = state.questions.find((entry) => entry.id === value('question'));
+  const config = {
+    auth_id: targetID(target), provider: target.provider, models, samples,
+    ...questionTestSelection(question, $('prompt').value),
+    parameters: { temperature: number('temperature'), max_tokens: number('max-tokens'), stream: true },
+    judge: { mode: 'manual' },
+  };
+  if (value('reasoning')) config.parameters.reasoning_effort = value('reasoning');
+  return config;
+}
+
 function runConfig(prefix = '') {
+  if (!prefix) return manualRunConfig();
   const get = (name) => value(`${prefix}${name}`);
   const target = findTarget(get('target'));
-  if (!target) throw new Error('请选择目标凭证。');
+  if (!target) fieldError(`${prefix}target`, '请选择目标凭证。');
   const models = parseModels(get('models'));
-  if (!models.length || models.length > 8) throw new Error('请指定 1–8 个模型。');
+  if (!models.length || models.length > 8) fieldError(`${prefix}models`, '请指定 1–8 个模型。');
   const judge = { mode: get('judge-mode') };
   if (judge.mode === 'llm') {
     const selected = findTarget(get('judge-target'));
     if (!selected || targetID(selected) === targetID(target))
-      throw new Error('判题需要独立于被测凭证的另一凭证。');
-    if (!get('judge-model')) throw new Error('请输入判题模型。');
+      fieldError(`${prefix}judge-target`, '判题需要独立于被测凭证的另一凭证。');
+    if (!get('judge-model')) fieldError(`${prefix}judge-model`, '请输入判题模型。');
     Object.assign(judge, {
       auth_id: targetID(selected),
       provider: selected.provider,
@@ -399,7 +494,7 @@ function runConfig(prefix = '') {
   if (config.question_id === 'random-linear' && get('control-target')) {
     const control = findTarget(get('control-target'));
     if (!control || targetID(control) === targetID(target))
-      throw new Error('随机题通过对照必须选择另一个凭证。');
+      fieldError(`${prefix}control-target`, '随机题通过对照必须选择另一个凭证。');
     config.control_auth_id = targetID(control);
     config.control_provider = control.provider;
   }
@@ -407,7 +502,7 @@ function runConfig(prefix = '') {
   if (config.question_id === 'custom') {
     config.review_standard = get('review-standard');
     config.prompt = get('prompt');
-    if (!config.prompt) throw new Error('自定义题面不能为空。');
+    if (!config.prompt) fieldError(`${prefix}prompt`, '自定义题面不能为空。');
   }
   return config;
 }
@@ -421,27 +516,23 @@ function blockedConfig(config) {
 function renderAdmission() {
   const config = {
     auth_id: value('target'),
-    control_auth_id: value('question') === 'random-linear' ? value('control-target') : '',
-    judge: { mode: value('judge-mode'), auth_id: value('judge-target') },
+    judge: { mode: 'manual' },
   };
   const blocked = blockedConfig(config);
   $('run-submit').disabled = !config.auth_id || !!blocked || state.busy.has('submit-run');
   $('run-submit').title = blocked;
-  $('run-admission').textContent = blocked || '仅在凭证未被暂停时执行。暂停后不再复测，也不会自动解除。';
+  $('run-admission').textContent = blocked || '手动测试不会暂停凭证。';
   $('run-admission').classList.toggle('error-note', !!blocked && state.connected);
   $('release-confirm').disabled = state.releaseBlocked || state.busy.has('release') || !state.connected;
   updatePlan();
   for (const id of [
     'rule-new',
     'settings-open',
-    'preset-apply',
-    'preset-save',
-    'preset-delete',
     'run-export',
     'run-cancel',
     'refresh',
   ])
-    $(id).disabled = !state.connected;
+    $(id).disabled = !state.connected || $(id).getAttribute('aria-busy') === 'true';
   if (state.run) {
     const reason = blockedConfig(state.run.config || {});
     $('run-rerun').disabled = !!reason || state.busy.has('submit-run');
@@ -471,7 +562,7 @@ async function loadRun(id, show = true) {
   state.run = run.run || run;
   state.pollFailures = 0;
   renderRun();
-  if (show) setManualView('results', true);
+  if (show) { clearNotice(); setManualView('results', true); }
   schedulePoll();
 }
 
@@ -488,7 +579,7 @@ function schedulePoll() {
       const reply = await api(`/runs/detail?id=${encodeURIComponent(id)}`);
       if (sequence !== state.reads.run) return;
       state.run = reply.run || reply;
-      if (state.pollFailures) notice('任务进度查询已恢复，以下为最新状态。');
+      $('run-feedback').classList.add('hidden');
       state.pollFailures = 0;
       renderRun();
       if (active(state.run)) schedulePoll();
@@ -496,10 +587,63 @@ function schedulePoll() {
     } catch (error) {
       if (isDiscarded(error) || epoch !== client.epoch || sequence !== state.reads.run) return;
       state.pollFailures = Math.min(state.pollFailures + 1, 4);
-      notice(`进度查询失败：${error.message}。会自动重试查询，不会重新提交模型任务。`, true);
+      $('run-feedback').textContent = `进度查询失败：${error.message}。会自动重试查询，不会重新提交模型任务。`;
+      $('run-feedback').classList.remove('hidden');
       schedulePoll();
     }
   }, delay);
+}
+
+// Reconcile trusted view templates without replacing stable reading and editing nodes.
+function patchView(target, html) {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  const key = (node) => node.nodeType === 1 ? node.dataset.key || node.dataset.part ||
+    (node.matches('input,select') && node.closest('.sample-review') ? node.localName : node.id) || '' : '';
+  function patchChildren(parent, incoming) {
+    const existing = [...parent.childNodes];
+    const used = new Set();
+    let cursor = parent.firstChild;
+    const nextNodes = [...incoming.childNodes];
+    if (parent.nodeType === 1 && parent.matches('.comparison-grid')) {
+      nextNodes.sort((a, b) => {
+        const position = (node) => { const index = existing.findIndex((old) => key(old) === key(node)); return index < 0 ? existing.length : index; };
+        return position(a) - position(b);
+      });
+    }
+    for (const next of nextNodes) {
+      const nextKey = key(next);
+      const current = existing.find((node) => !used.has(node) && node.nodeType === next.nodeType &&
+        (nextKey ? key(node) === nextKey : !key(node) && node.nodeName === next.nodeName));
+      if (!current) { parent.insertBefore(next.cloneNode(true), cursor); continue; }
+      used.add(current);
+      if (current !== cursor) parent.insertBefore(current, cursor);
+      cursor = current.nextSibling;
+      if (current.nodeType === 3) {
+        if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+        continue;
+      }
+      if (current.nodeType !== 1) continue;
+      const field = current.matches('input,select,textarea');
+      const fieldValue = field ? current.value : null;
+      const preservedClasses = ['expanded', ...(current.matches('.model-result,.sample') ? ['hidden'] : [])].filter((name) => current.classList.contains(name));
+      for (const attribute of [...current.attributes]) {
+        if (['open', 'style', 'aria-busy'].includes(attribute.name)) continue;
+        if (!next.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+      }
+      for (const attribute of [...next.attributes]) {
+        if (attribute.name === 'open') continue;
+        if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
+      }
+      current.classList.add(...preservedClasses);
+      const expandedButton = current.matches('[data-expand-sample]') && current.closest('.sample')?.querySelector('.answer-text.expanded');
+      if (expandedButton) current.setAttribute('aria-expanded', 'true');
+      else patchChildren(current, next);
+      if (field) current.value = fieldValue;
+    }
+    existing.filter((node) => !used.has(node)).forEach((node) => node.remove());
+  }
+  patchChildren(target, template.content);
 }
 
 function renderRun() {
@@ -507,37 +651,35 @@ function renderRun() {
   if (!run) return;
   $('run-empty').classList.add('hidden');
   $('run-content').classList.remove('hidden');
-  $('run-rerun').classList.toggle('hidden', active(run));
+  $('task-actions').classList.remove('hidden');
+  const repeatable = run.source === 'manual_test' && run.config?.models?.length === 1 && run.config?.judge?.mode === 'manual' && !run.config?.control_auth_id;
+  $('run-rerun').classList.toggle('hidden', active(run) || !repeatable);
   $('run-export').classList.remove('hidden');
   $('run-cancel').classList.toggle('hidden', !active(run));
   const rendered = renderRunEvidence(run);
-  $('run-subtitle').textContent = `${run.source === 'manual_test' ? '手动评测 · 不触发自动处置' : '规则检测 · 依据规则许可处置'} · ${date(run.created_at)}`;
-  $('run-meta').innerHTML = rendered.metaHTML + `<div class="run-identifier">任务 ${escapeHTML(run.id || run.run_id)}</div>`;
-  $('run-frozen-data').innerHTML = rendered.conditionsHTML;
+  $('run-subtitle').textContent = `${run.source === 'manual_test' ? '题目测试 · 不自动评分' : run.source === 'scheduled_probe' ? '规则检测 · 依据规则许可处置' : sourceLabel(run.source)} · ${date(run.created_at)}`;
+  patchView($('run-meta'), rendered.metaHTML);
+  patchView($('run-frozen-data'), `<div class="run-identifier">任务 ${escapeHTML(run.id || run.run_id)}</div>${rendered.conditionsHTML}`);
   const progress = Math.min(100, Math.round(rendered.completed / Math.max(1, rendered.planned) * 100));
   $('run-progress').style.width = `${progress}%`;
   $('run-progress').parentElement.setAttribute('aria-valuenow', String(progress));
   $('task-indicator').textContent = active(run) ? '执行中' : '已结束';
   const id = run.id || run.run_id;
   const sameRun = state.compareRun === id;
-  const drafts = sameRun ? [...$('sample-list').querySelectorAll('.review-disclosure')].map((node) => ({ id: node.querySelector('select')?.id, open: node.open, verdict: node.querySelector('select')?.value, note: node.querySelector('input')?.value })) : [];
-  $('sample-list').innerHTML = rendered.samplesHTML;
-  for (const draft of drafts) {
-    const select = $(draft.id);
-    if (!select) continue;
-    select.value = draft.verdict;
-    const details = select.closest('details');
-    details.open = draft.open;
-    details.querySelector('input').value = draft.note;
-  }
+  if (sameRun) patchView($('sample-list'), rendered.samplesHTML);
+  else $('sample-list').innerHTML = rendered.samplesHTML;
   if (!sameRun) {
     const models = [...new Set([...(run.config?.models || []), ...(run.samples || []).map((sample) => sample.model || sample.request_model || '模型未知')])];
-    const options = models.map((model) => `<option value="${escapeHTML(model)}">${escapeHTML(model)}</option>`).join('');
+    const options = models.map((model, index) => `<option value="${escapeHTML(model)}">${index + 1} · ${escapeHTML(model.length > 48 ? `${model.slice(0,18)}…${model.slice(-24)}` : model)}</option>`).join('');
     $('compare-model-a').innerHTML = options;
     $('compare-model-b').innerHTML = '<option value="">不对比</option>' + options;
     $('compare-model-b').value = models[1] || '';
     $('sample-filter').innerHTML = '<option value="all">全部样本</option>' + Array.from({length: run.config?.samples || 1}, (_, index) => `<option value="${index}">样本 ${index + 1}</option>`).join('');
+    document.querySelector('.model-selectors').classList.toggle('hidden', models.length < 2);
+    document.querySelector('.comparison-toolbar').classList.toggle('hidden', models.length < 2 && (run.config?.samples || 1) < 2);
     state.compareRun = id;
+    $('run-frozen').open = false;
+    $('run-feedback').classList.add('hidden');
   }
   applyComparison();
   renderAdmission();
@@ -548,9 +690,10 @@ function applyComparison() {
   const filter = value('sample-filter');
   const grid = $('sample-list').querySelector('.comparison-grid');
   if (!grid) return;
-  for (const model of selected) {
+  const order = [...selected, ...[...grid.children].map((group) => group.dataset.model).filter((model) => !selected.includes(model))];
+  for (const [index, model] of order.entries()) {
     const group = [...grid.children].find((node) => node.dataset.model === model);
-    if (group) grid.append(group);
+    if (group && grid.children[index] !== group) grid.insertBefore(group, grid.children[index]);
   }
   let visible = 0;
   for (const group of grid.children) {
@@ -571,7 +714,7 @@ function renderHistory() {
     ? state.runs
         .map(
           (run) =>
-            `<div class="history-row" role="button" tabindex="0" data-run="${escapeHTML(run.id || run.run_id)}"><div><div class="history-title">${escapeHTML(run.config?.models?.join(' / ') || run.rule_id || '模型评测')}</div><div class="history-time">${escapeHTML(date(run.created_at))} · ${escapeHTML(run.source || 'unknown')} · ${escapeHTML(run.config?.auth_id || '')}</div></div>${statusTag(run.status)}</div>`,
+            `<div class="history-row" role="button" tabindex="0" data-run="${escapeHTML(run.id || run.run_id)}"><div><div class="history-title">${escapeHTML(run.config?.models?.join(' / ') || run.rule_id || '智商测试')}</div><div class="history-time">${escapeHTML(date(run.created_at))} · ${escapeHTML(sourceLabel(run.source))} · ${escapeHTML(run.config?.auth_id || '')}</div></div>${statusTag(run.status)}</div>`,
         )
         .join('')
     : '<p class="empty-line">暂无测试记录。首次执行后在这里查看。</p>';
@@ -582,7 +725,7 @@ function renderHistory() {
 
 async function loadHistory() {
   const sequence = ++state.reads.history;
-  const result = await api(`/runs?offset=${state.historyOffset}&limit=10`);
+  const result = await api(`/runs?source=manual_test&offset=${state.historyOffset}&limit=10`);
   if (sequence !== state.reads.history) return;
   state.runs = items(result);
   state.historyTotal = result.total ?? state.runs.length;
@@ -601,7 +744,7 @@ function renderTargets() {
 }
 
 function renderMetrics(metrics) {
-  const percentage = (number) =>
+    const percentage = (number) =>
     number == null ? '—' : `${(number <= 1 ? number * 100 : number).toFixed(1)}%`;
   const stats = [
     [
@@ -620,7 +763,7 @@ function renderMetrics(metrics) {
       (metrics.known_tokens ?? metrics.total_tokens) == null
         ? '—'
         : Number(metrics.known_tokens ?? metrics.total_tokens).toLocaleString(),
-      `usage 未知 ${metrics.unknown_usage ?? '—'} · 丢事件 ${metrics.dropped_usage_events ?? metrics.dropped_events ?? 0}`,
+      `usage 未知 ${metrics.unknown_usage ?? '—'} · 丢事件 ${metrics.dropped_usage_events ?? metrics.dropped_events ?? '—'}`,
     ],
   ];
   $('metrics-detail').textContent = `执行错误：${
@@ -672,7 +815,7 @@ async function loadOperations() {
           )
           .join('')
       : results[4].status === 'fulfilled' && items(results[4].value).length === 0
-        ? '<p class="empty-line">暂无运营记录。自动处置不会使用手动测试结果。</p>'
+        ? '<p class="empty-line">暂无运营记录。自动处置不会使用手动智商测试结果。</p>'
         : '';
   }
   if (results[4].status === 'fulfilled') {
@@ -697,17 +840,11 @@ async function loadOperations() {
 async function refresh() {
   const sequence = ++state.reads.refresh;
   try {
-    const [targets, questions, presets] = await Promise.all([
-      api('/targets?limit=100'),
-      api('/questions'),
-      api('/presets?limit=100'),
-    ]);
+    const [targets, questions] = await Promise.all([api('/targets?limit=100'), api('/questions')]);
     if (sequence !== state.reads.refresh) return;
     state.targetsFresh = true;
     state.targets = items(targets);
     state.questions = items(questions);
-    state.presets = items(presets);
-    renderPresets();
     renderSelectors();
     renderTargets();
     await Promise.all([loadHistory(), loadOperations()]);
@@ -785,8 +922,8 @@ async function saveRule() {
   };
   if (value('rule-id')) Object.assign(body, { id: value('rule-id'), revision: number('rule-revision') });
   await api('/rules', body.id ? 'PUT' : 'POST', body);
-  closeSurface('rule-dialog');
-  notice('规则已保存，尚未启动模型调用。');
+  closeSurface('rule-dialog', true);
+  if (state.page === 'operations') notice(`规则“${body.name}”已保存，不会启动模型调用。`);
   await loadOperations();
 }
 
@@ -874,7 +1011,11 @@ const budgetFields = [
 ];
 
 async function openSettings() {
-  state.settings = await api('/settings');
+  const sequence = ++state.reads.editor;
+  const editor = state.editor;
+  const settings = await api('/settings');
+  if (sequence !== state.reads.editor || editor !== state.editor || state.page !== 'operations') return;
+  state.settings = settings;
   $('settings-scheduling').checked = !!state.settings.scheduling_enabled;
   $('settings-auto-pause').checked = !!state.settings.automatic_pause;
   $('settings-fields').innerHTML =
@@ -908,7 +1049,11 @@ async function dispatchClick(event) {
     if (button.dataset.close === 'preview-dialog') $('safe-preview').srcdoc = '';
     return;
   }
-  if (button.dataset.manualView) { setManualView(button.dataset.manualView, true); return; }
+  if (button.dataset.manualView) {
+    setManualView(button.dataset.manualView, true);
+    if (button.dataset.manualView === 'history' && state.connected) await loadHistory();
+    return;
+  }
   if (button.dataset.opsView) { setOpsView(button.dataset.opsView); return; }
   if (button.dataset.page) {
     setPage(button.dataset.page);
@@ -924,18 +1069,25 @@ async function dispatchClick(event) {
     const expanded = output.classList.toggle('expanded');
     button.textContent = expanded ? '收起长回答' : '展开完整回答';
     button.setAttribute('aria-expanded', String(expanded));
+    if (!expanded) button.scrollIntoView({ block: 'nearest' });
     return;
   }
   if (button.dataset.copySample != null) {
     await navigator.clipboard.writeText(state.run.samples[Number(button.dataset.copySample)]?.output || '');
-    notice('原始回答已复制。');
+    localFeedback(button, '已复制原文');
+    return;
+  }
+  if (button.dataset.copyModel != null) {
+    await navigator.clipboard.writeText(button.dataset.copyModel);
+    localFeedback(button, '已复制 ID');
     return;
   }
   if (button.dataset.previewSample != null) {
-    $('safe-preview').srcdoc = safePreview(
+    const preview = safePreview(
       state.run.samples[Number(button.dataset.previewSample)]?.output || '',
     );
     $('preview-dialog').showModal();
+    $('safe-preview').srcdoc = preview;
     return;
   }
   if (button.dataset.evidenceSample != null) {
@@ -952,12 +1104,12 @@ async function dispatchClick(event) {
       verdict: value(`review-${index}`),
       note: value(`review-note-${index}`),
     });
-    notice('人工评审已保存；不会触发自动暂停或解除。');
     await loadRun(state.run.id, false);
+    localFeedback(button, '评审已保存');
     return;
   }
   if (button.dataset.ruleEdit) {
-    editRule(state.rules.find((rule) => rule.id === button.dataset.ruleEdit));
+    protectEditor(() => editRule(state.rules.find((rule) => rule.id === button.dataset.ruleEdit)));
     return;
   }
   if (button.dataset.ruleRun) {
@@ -972,20 +1124,22 @@ async function dispatchClick(event) {
     return;
   }
   if (button.dataset.rulePause) {
+    const scope = feedbackScope();
     const rule = state.rules.find((entry) => entry.id === button.dataset.rulePause);
     if (!state.connected || !state.targetsFresh) throw new Error('凭证状态尚未确认，请刷新后再操作检测规则。');
     if (ruleHeld(rule)) throw new Error('凭证仍被暂停，不能恢复检测规则。');
     await api('/rules/pause', 'POST', { id: rule.id, revision: rule.revision, paused: rule.enabled });
-    notice(rule.enabled ? '检测规则已暂停。已有凭证暂停仍然生效。' : '检测规则已恢复。');
+    if (scope === feedbackScope()) notice(rule.enabled ? '检测规则已暂停。已有凭证暂停仍然生效。' : '检测规则已恢复。');
     await loadOperations();
     return;
   }
   if (button.dataset.ruleDelete) {
     const rule = state.rules.find((entry) => entry.id === button.dataset.ruleDelete);
-    if (!confirm(`删除规则“${rule.name || rule.id}”？持有暂停的规则会被宿主拒绝删除，请先处理归属。`)) return;
-    await api('/rules', 'DELETE', { id: rule.id, revision: rule.revision });
-    notice('规则已删除。');
-    await loadOperations();
+    actionDialog({ title: '删除检测规则', description: `删除“${rule.name || rule.id}”后无法撤销。已有运行记录保留；持有暂停的规则须先处理暂停归属。`, confirm: '删除规则', danger: true, submit: async () => {
+      await api('/rules', 'DELETE', { id: rule.id, revision: rule.revision });
+      await loadOperations();
+      if (state.page === 'operations') notice(`规则“${rule.name || rule.id}”已删除。`);
+    } });
     return;
   }
   if (button.dataset.actionPreview != null) await previewAction(Number(button.dataset.actionPreview));
@@ -1001,42 +1155,17 @@ document.addEventListener('click', (event) => {
 document.addEventListener('keydown', (event) => {
   if (['Enter', ' '].includes(event.key) && event.target.matches('[data-run]')) { event.preventDefault(); event.target.click(); }
 });
-$('preset-apply').addEventListener('click', () =>
-  safely(async () => {
-    const preset = state.presets.find((entry) => entry.id === value('preset'));
-    if (!preset) throw new Error('请选择预设。');
-    applyPreset(preset.config);
-    notice('预设已载入；点击开始测试才会调用模型。');
-  }),
-);
-$('preset-save').addEventListener('click', () =>
-  safely(async () => {
-    const config = runConfig();
-    const name = prompt('预设名称（保存不会调用模型）');
-    if (!name?.trim()) return;
-    await api('/presets', 'POST', { name: name.trim(), config });
-    state.presets = items(await api('/presets?limit=100'));
-    renderPresets();
-    notice('预设已保存，不会创建规则或模型任务。');
-  }, 'preset-save', $('preset-save')),
-);
-$('preset-delete').addEventListener('click', () =>
-  safely(async () => {
-    const id = value('preset');
-    if (!id) throw new Error('请选择预设。');
-    await api('/presets', 'DELETE', { id });
-    state.presets = items(await api('/presets?limit=100'));
-    renderPresets();
-    notice('预设已删除。已有规则与运行记录不受影响。');
-  }, 'preset-delete', $('preset-delete')),
-);
 $('connection-top').addEventListener('click', () => $('connection-dialog').showModal());
 $('connection-open').addEventListener('click', () => $('connection-dialog').showModal());
 $('connection-form').addEventListener('submit', (event) => {
   event.preventDefault();
   safely(
     async () => {
-      client.open(value('management-key'));
+      const key = value('management-key');
+      disconnect('');
+      clearNotice();
+      client.open(key);
+      $('data-state').textContent = '正在连接管理接口…';
       $('management-key').value = '';
       state.connected = false;
       state.targetsFresh = false;
@@ -1048,7 +1177,6 @@ $('connection-form').addEventListener('submit', (event) => {
         document.body.classList.add('connected');
         $('connect-banner').classList.add('hidden');
         $('connection-dialog').close();
-        notice('已连接。加载数据和保存配置不会调用模型。');
         renderAdmission();
         renderRules();
         schedulePoll();
@@ -1062,22 +1190,26 @@ $('connection-form').addEventListener('submit', (event) => {
 });
 $('disconnect').addEventListener('click', () => disconnect());
 $('refresh').addEventListener('click', () => safely(refresh, 'refresh', $('refresh')));
-$('target').addEventListener('change', renderTarget);
+$('target').addEventListener('change', () => renderTarget(true));
 $('question').addEventListener('change', renderQuestion);
-for (const id of ['control-target', 'judge-target']) $(id).addEventListener('change', renderAdmission);
+$('prompt').addEventListener('input', updateQuestionNote);
 $('rule-question').addEventListener('change', () =>
   $('rule-control-fields').classList.toggle('hidden', value('rule-question') !== 'random-linear'),
 );
-$('judge-mode').addEventListener('change', renderJudge);
 $('run-form').addEventListener('submit', (event) => {
   event.preventDefault();
   safely(() => submitRun(runConfig()), 'submit-run', $('run-submit'));
 });
 $('run-cancel').addEventListener('click', () =>
   safely(async () => {
-    await api('/runs/cancel', 'POST', { id: state.run.id || state.run.run_id });
-    notice('已请求取消；后台会关闭对应模型操作。');
-    await loadRun(state.run.id || state.run.run_id, false);
+    const id = state.run.id || state.run.run_id;
+    const scope = feedbackScope();
+    await api('/runs/cancel', 'POST', { id });
+    if (id === (state.run?.id || state.run?.run_id)) {
+      if (scope === feedbackScope()) notice('已请求取消；后台会关闭对应模型操作。');
+      await loadRun(id, false);
+    }
+    await loadHistory();
   }, 'cancel-run', $('run-cancel')),
 );
 $('run-rerun').addEventListener('click', () =>
@@ -1102,10 +1234,10 @@ $('history-next').addEventListener('click', () =>
     await loadHistory();
   }),
 );
-$('rule-new').addEventListener('click', () => editRule());
+$('rule-new').addEventListener('click', () => protectEditor(() => editRule()));
 $('rule-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  safely(saveRule, 'save-rule', event.submitter);
+  safely(() => saveEditor(saveRule), 'save-rule', event.submitter);
 });
 $('release-confirm').addEventListener('click', () =>
   safely(async () => {
@@ -1133,11 +1265,11 @@ $('release-confirm').addEventListener('click', () =>
   }, 'release', $('release-confirm')),
 );
 $('release-refresh').addEventListener('click', () => safely(reconcileRelease, 'release-refresh', $('release-refresh')));
-$('settings-open').addEventListener('click', () => safely(openSettings));
+$('settings-open').addEventListener('click', () => protectEditor(() => safely(openSettings, 'settings-read', $('settings-open'))));
 $('settings-form').addEventListener('submit', (event) => {
   event.preventDefault();
   safely(
-    async () => {
+    () => saveEditor(async () => {
       const settings = {
         ...state.settings,
         scheduling_enabled: checked('settings-scheduling'),
@@ -1146,30 +1278,71 @@ $('settings-form').addEventListener('submit', (event) => {
       delete settings.automatic_recovery;
       for (const [field] of budgetFields) settings[field] = number(`setting-${field}`);
       await api('/settings', 'PUT', settings);
-      closeSurface('settings-dialog');
-      notice('全局开关与预算已保存。');
-    },
+      closeSurface('settings-dialog', true);
+      if (state.page === 'operations') notice('全局开关与预算已保存。');
+    }),
     'settings-save',
     event.submitter,
   );
 });
-window.addEventListener('beforeunload', () => {
-  client.clear();
-  clearTimeout(state.poll);
+window.addEventListener('beforeunload', (event) => {
+  if (editorDirty()) { event.preventDefault(); event.returnValue = ''; }
 });
+window.addEventListener('pagehide', () => { client.clear(); clearTimeout(state.poll); });
+document.body.classList.toggle('embedded', window.self !== window.top);
 setPage(location.hash.slice(1));
 setManualView('setup');
 setOpsView('attention');
-$('theme-toggle').addEventListener('click', () => {
-  const themes = ['light', 'dark', 'white'];
-  const current = themes.indexOf(document.documentElement.dataset.theme);
-  const theme = themes[(current + 1) % themes.length];
-  document.documentElement.dataset.theme = theme;
-  const names = { light: '浅色', dark: '深色', white: '纯白' };
-  $('theme-toggle').textContent = names[theme];
-  $('theme-toggle').title = `当前${names[theme]}主题；点击切换`;
+$('theme-toggle').addEventListener('change', () => { document.documentElement.dataset.theme = value('theme-toggle'); });
+$('action-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const request = actionRequest;
+  if (!request || state.busy.has('dialog-action')) return;
+  if (request.input && !value('action-name')) {
+    $('action-error').textContent = '请输入预设名称。';
+    $('action-error').classList.remove('hidden');
+    $('action-name').setAttribute('aria-invalid', 'true');
+    $('action-name').focus();
+    return;
+  }
+  state.busy.add('dialog-action');
+  const button = $('action-confirm');
+  const label = button.textContent;
+  button.style.minWidth = `${button.getBoundingClientRect().width}px`;
+  button.textContent = request.input ? '保存中…' : '处理中…';
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  try {
+    await request.submit(value('action-name'));
+    if (actionRequest === request && request.epoch === client.epoch) $('action-dialog').close();
+  } catch (error) {
+    if (!isDiscarded(error) && actionRequest === request && request.epoch === client.epoch) {
+      $('action-error').textContent = error.message || '操作失败，请重试。';
+      $('action-error').classList.remove('hidden');
+      $('action-error').focus();
+    }
+  } finally {
+    state.busy.delete('dialog-action');
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    button.style.removeProperty('min-width');
+    button.textContent = label;
+  }
 });
-for (const id of ['models', 'samples', 'reasoning', 'judge-mode']) $(id).addEventListener('input', updatePlan);
+$('action-dialog').addEventListener('cancel', (event) => { if (state.busy.has('dialog-action')) event.preventDefault(); });
+$('action-dialog').addEventListener('close', () => { actionRequest = null; $('action-name').value = ''; });
+document.addEventListener('input', (event) => {
+  const field = event.target;
+  if (field.id && field.hasAttribute('aria-invalid')) {
+    field.removeAttribute('aria-invalid');
+    const errorID = `${field.id}-error`;
+    $(errorID)?.remove();
+    field.setAttribute('aria-describedby', (field.getAttribute('aria-describedby') || '').split(' ').filter((id) => id !== errorID).join(' '));
+  }
+  if (field.closest('.inline-editor')) updateEditorDirty();
+});
+document.addEventListener('change', (event) => { if (event.target.closest('.inline-editor')) updateEditorDirty(); });
+for (const id of ['models', 'samples', 'reasoning']) $(id).addEventListener('input', updatePlan);
 for (const id of ['compare-model-a', 'compare-model-b', 'sample-filter']) $(id).addEventListener('change', () => {
   if (value('compare-model-a') === value('compare-model-b')) $('compare-model-b').value = '';
   applyComparison();
@@ -1181,3 +1354,17 @@ renderMetrics({});
 renderRules();
 renderTargets();
 renderAdmission();
+
+const phoneLayout = matchMedia('(max-width: 760px)');
+const adaptTaskActions = () => { $('task-actions').open = !phoneLayout.matches; };
+phoneLayout.addEventListener('change', adaptTaskActions);
+adaptTaskActions();
+$('task-actions').addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && phoneLayout.matches) {
+    $('task-actions').open = false;
+    $('task-actions').querySelector('summary').focus();
+  }
+});
+document.addEventListener('click', (event) => {
+  if (phoneLayout.matches && !event.target.closest('#task-actions')) $('task-actions').open = false;
+});

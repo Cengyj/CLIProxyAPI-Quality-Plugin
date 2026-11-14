@@ -8,7 +8,8 @@ const { chromium } = require(
     '/Users/ceng/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright',
 );
 const root = path.resolve(__dirname, '..');
-const out = path.join(root, 'artifacts/verification');
+const out = process.env.UI_VERIFY_OUTPUT || path.join(root, 'artifacts/verification');
+const demoDir = process.env.MQ_DEMO_DIR || path.join(root, 'artifacts/native-ui-demo');
 const python = process.env.PYTHON_BIN || 'python3';
 const demoScript = path.join(root, 'scripts/demo.py');
 const checks = [];
@@ -16,7 +17,7 @@ let browser;
 let demo;
 
 function demoCommand(command) {
-  const result = spawnSync(python, [demoScript, command], { cwd: root, encoding: 'utf8', timeout: 75000 });
+  const result = spawnSync(python, [demoScript, command], { cwd: root, encoding: 'utf8', timeout: 75000, env: { ...process.env, MQ_DEMO_DIR: demoDir } });
   if (result.status !== 0) throw new Error(`${command}: ${result.stderr || result.stdout || result.error}`);
   return JSON.parse(result.stdout);
 }
@@ -58,6 +59,18 @@ async function finish(id) {
   const unauthorized = await fetch(`${demo.host_url}/v8/management/plugins/model-quality/targets`);
   assert.equal(unauthorized.status, 401);
   checks.push('actual v8 management rejects unauthenticated targets');
+  const resourceHashes = {};
+  for (const name of ['index.html', 'app.js', 'client.js', 'view.js', 'style.css']) {
+    const response = await fetch(new URL(name, demo.page_url));
+    assert.equal(response.status, 200);
+    const returned = Buffer.from(await response.arrayBuffer());
+    const source = fs.readFileSync(path.join(root, 'plugin/ui', name));
+    const packaged = fs.readFileSync(path.join(root, 'artifacts/ui', name));
+    assert.deepEqual(returned, source, `Native host resource ${name} must match source bytes`);
+    assert.deepEqual(returned, packaged, `Native host resource ${name} must match static build bytes`);
+    resourceHashes[name] = require('node:crypto').createHash('sha256').update(returned).digest('hex');
+  }
+  checks.push('all five native-host resources are byte-identical to UI source and static build');
   const targetReply = await api('/targets');
   const target = targetReply.items.find((entry) => entry.models.includes('mq-reasoner'));
   assert(target, `mock target missing: ${JSON.stringify(targetReply)}`);
@@ -65,6 +78,7 @@ async function finish(id) {
   const initialCalls = (await stats()).calls.length;
   browser = await chromium.launch({
     headless: true,
+    args: ['--disable-gpu'],
     executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   });
   const page = await browser.newPage({
@@ -264,15 +278,20 @@ async function finish(id) {
   assert.deepEqual(errors, []);
   const report = {
     result: 'passed',
+    verified_at: new Date().toISOString(),
+    source_sha256: Object.fromEntries(['index.html', 'app.js', 'client.js', 'view.js', 'style.css'].map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root, 'plugin/ui', name))).digest('hex')])),
+    binary_sha256: Object.fromEntries(['cli-proxy-api-quality', process.platform === 'darwin' ? 'model-quality.dylib' : 'model-quality.so'].map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root, 'artifacts', name))).digest('hex')])),
     platform: `${process.platform}/${process.arch}`,
     browser: await browser.version(),
     host_binary: 'artifacts/cli-proxy-api-quality',
     library: process.platform === 'darwin' ? 'artifacts/model-quality.dylib' : 'artifacts/model-quality.so',
     session_dir: demo.session_dir,
+    resource_sha256: resourceHashes,
     checks,
     upstream_calls: (await stats()).calls.length,
     cleanup: 'demo stopped by finally handler',
     screenshots: ['native-manual-page.png', 'native-operations-page.png', 'native-release-preview.png'],
+    screenshot_sha256: Object.fromEntries(['native-manual-page.png', 'native-operations-page.png', 'native-release-preview.png'].map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(out, name))).digest('hex')])),
   };
   if (fs.existsSync(path.join(out, 'native-ui-failure.txt')))
     fs.unlinkSync(path.join(out, 'native-ui-failure.txt'));

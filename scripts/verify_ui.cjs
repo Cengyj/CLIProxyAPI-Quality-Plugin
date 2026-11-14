@@ -8,7 +8,10 @@ const { chromium } = require(
     '/Users/ceng/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright',
 );
 const root = path.resolve(__dirname, '..');
-const output = path.join(root, 'artifacts/verification');
+const output = process.env.UI_VERIFY_OUTPUT || path.join(root, 'artifacts/verification');
+const uiSource = process.env.UI_SOURCE_DIR || path.join(root, 'plugin/ui');
+const sourceHashes = () => Object.fromEntries(['index.html', 'app.js', 'client.js', 'view.js', 'style.css'].map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(uiSource, name))).digest('hex')]));
+const initialSourceHashes = sourceHashes();
 fs.mkdirSync(output, { recursive: true });
 const calls = [];
 const robustnessChecks = [];
@@ -125,7 +128,7 @@ const server = http.createServer(async (req, res) => {
       'Content-Type',
       asset.endsWith('.js') ? 'text/javascript' : asset.endsWith('.css') ? 'text/css' : 'text/html',
     );
-    res.end(fs.readFileSync(path.join(root, 'plugin/ui', asset)));
+    res.end(fs.readFileSync(path.join(uiSource, asset)));
     return;
   }
   let body = '';
@@ -274,6 +277,10 @@ const server = http.createServer(async (req, res) => {
       );
       result = rules[0];
       break;
+    case 'DELETE /rules':
+      rules = rules.filter((rule) => rule.id !== parsed.id);
+      result = { ok: true };
+      break;
     case 'POST /rules/pause': {
       const rule = rules.find((entry) => entry.id === parsed.id);
       rule.enabled = !parsed.paused;
@@ -313,6 +320,7 @@ const server = http.createServer(async (req, res) => {
   const base = `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch({
     headless: true,
+    args: ['--disable-gpu'],
     executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   });
   const page = await browser.newPage({
@@ -321,6 +329,44 @@ const server = http.createServer(async (req, res) => {
     timezoneId: 'Asia/Shanghai',
   });
   const errors = [];
+  const viewportEvidence = [];
+  const dialogGeometry = [];
+  const verifyDialogPadding = async (id) => {
+    const previousViewport = page.viewportSize();
+    const previousScroll = await page.locator(`#${id}`).evaluate((node) => node.scrollTop);
+    for (const width of [360, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const geometry = await page.locator(`#${id}`).evaluate(async (node) => {
+        await document.fonts.ready;
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        node.scrollTop = node.scrollHeight;
+        const rect = node.getBoundingClientRect();
+        const last = node.lastElementChild.getBoundingClientRect();
+        return { paddingBottom: parseFloat(getComputedStyle(node).paddingBottom), bottomInset: rect.bottom - last.bottom, dialogBottom: rect.bottom, lastContentBottom: last.bottom };
+      });
+      assert(geometry.paddingBottom >= 20, `${id} has at least 20px computed bottom padding at ${width}px`);
+      assert(geometry.bottomInset >= 19.9, `${id} visible content remains inset from its bottom edge at ${width}px`);
+      dialogGeometry.push({ id, width, height: 844, ...geometry });
+      await page.screenshot({ path: path.join(output, `dialog-padding-${id}-${width}.png`), animations: 'disabled' });
+    }
+    await page.setViewportSize(previousViewport);
+    await page.locator(`#${id}`).evaluate((node, top) => { node.scrollTop = top; }, previousScroll);
+  };
+  const pairedCapture = async (name, width = 1440, height = 900, theme = 'light') => {
+    const previousViewport = page.viewportSize();
+    const previousTheme = await page.locator('html').getAttribute('data-theme');
+    await page.setViewportSize({ width, height });
+    await page.evaluate(async (value) => {
+      document.documentElement.dataset.theme = value;
+      scrollTo(0, 0);
+      await document.fonts.ready;
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }, theme);
+    await page.screenshot({ path: path.join(output, `paired-${name}.png`), animations: 'disabled' });
+    viewportEvidence.push({ name, width, height, theme, ...(await page.evaluate(() => { const answer = [...document.querySelectorAll('.answer-text')].find((node) => node.getClientRects().length); return { pageOverflow: document.documentElement.scrollWidth > innerWidth, firstAnswerTop: answer?.getBoundingClientRect().top ?? null }; })) });
+    await page.setViewportSize(previousViewport);
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value || 'light'; }, previousTheme);
+  };
   const setup = () => page.locator('#page-manual > .view-nav [data-manual-view=setup]').click();
   const history = () => page.locator('#page-manual > .view-nav [data-manual-view=history]').click();
   const operations = async (view = 'attention') => {
@@ -352,8 +398,40 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await page.locator('#theme-toggle').evaluate((node) => getComputedStyle(node).transitionDuration), '0s');
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     robustnessChecks.push('keyboard skip link, visible focus and reduced-motion preference work');
+    const contrastEvidence = [];
+    for (const theme of ['light', 'white', 'dark']) {
+      await page.locator('#theme-toggle').selectOption(theme);
+      assert.equal(await page.locator('html').getAttribute('data-theme'), theme, 'Theme selection exposes the requested theme directly');
+      const computed = await page.evaluate(() => {
+        const styles = getComputedStyle(document.documentElement);
+        const names = ['page', 'surface', 'surface-raised', 'surface-muted', 'hover', 'ink', 'muted', 'good', 'good-bg', 'warn', 'warn-bg', 'bad', 'bad-bg', 'accent', 'accent-hover', 'on-accent', 'border-strong', 'focus'];
+        return { colors: Object.fromEntries(names.map((name) => [name, styles.getPropertyValue(`--${name}`).trim()])), placeholder: getComputedStyle(document.getElementById('models'), '::placeholder').color };
+      });
+      const luminance = (hex) => {
+        const channels = hex.replace('#', '').match(/../g).map((part) => parseInt(part, 16) / 255).map((n) => n <= .04045 ? n / 12.92 : ((n + .055) / 1.055) ** 2.4);
+        return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
+      };
+      const pairs = [];
+      for (const foreground of ['ink', 'muted']) for (const background of ['page', 'surface', 'surface-raised', 'surface-muted', 'hover']) pairs.push([foreground, background, 4.5]);
+      for (const foreground of ['good', 'warn', 'bad']) pairs.push([foreground, `${foreground}-bg`, 4.5]);
+      pairs.push(['on-accent', 'accent', 4.5], ['on-accent', 'accent-hover', 4.5]);
+      for (const background of ['page', 'surface', 'surface-raised']) pairs.push(['border-strong', background, 3], ['focus', background, 3]);
+      const checks = pairs.map(([foreground, background, threshold]) => {
+        const a = luminance(computed.colors[foreground]), b = luminance(computed.colors[background]);
+        const ratio = (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+        assert(ratio >= threshold, `${theme} ${foreground}/${background} ${ratio.toFixed(2)} must meet ${threshold}:1`);
+        return { foreground, background, foreground_hex: computed.colors[foreground], background_hex: computed.colors[background], ratio, threshold, result: 'passed' };
+      });
+      const placeholderHex = '#' + computed.placeholder.match(/\d+/g).slice(0, 3).map((n) => Number(n).toString(16).padStart(2, '0')).join('');
+      assert.equal(placeholderHex, computed.colors.muted, 'Placeholder uses the tested secondary text token');
+      contrastEvidence.push({ theme, placeholder: computed.placeholder, checks });
+    }
+    await page.locator('#theme-toggle').selectOption('light');
+    fs.writeFileSync(path.join(output, 'contrast-results.json'), JSON.stringify({ result: 'passed', verified_at: new Date().toISOString(), browser: await browser.version(), source_sha256: initialSourceHashes, scope: 'Computed theme color pairs and placeholder text; not an accessibility certification', themes: contrastEvidence }, null, 2) + '\n');
+    robustnessChecks.push('explicit theme selection, computed text contrast and control/focus contrast pass in light, white and dark; placeholders use tested muted colors');
     assert.equal(calls.length, 0, 'Public shell must not call management or models');
     await page.locator('#connection-open').click();
+    await verifyDialogPadding('connection-dialog');
     await page.locator('#management-key').fill('offline-test-key');
     await page.locator('#connection-form button[type=submit]').click();
     await page.waitForFunction(() => document.getElementById('connection-state').textContent === '已连接');
@@ -366,21 +444,56 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
     assert.equal(await page.locator('#management-key').inputValue(), '');
     await capture('connected-empty-page.png');
+    await pairedCapture('setup-desktop');
+    await pairedCapture('setup-mobile', 390, 844);
     await page.locator('#question').selectOption('logic');
     await page.locator('#target').selectOption('mock-credential-a');
     await page.locator('#model-chips button').first().click();
     const beforePreset = calls.filter((call) => call.method === 'POST' && call.path.endsWith('/runs')).length;
     await page.locator('#preset-tools summary').click();
-    page.once('dialog', (dialog) => dialog.accept('离线逻辑预设'));
     await page.locator('#preset-save').click();
+    await page.locator('#action-dialog').waitFor({ state: 'visible' });
+    await verifyDialogPadding('action-dialog');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#action-dialog').isVisible(), false);
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'preset-save');
+    await page.locator('#preset-save').click();
+    await page.locator('#action-dialog').waitFor({ state: 'visible' });
+    await page.locator('#action-name').fill('离线逻辑预设');
+    await page.locator('#action-confirm').click();
     await page.waitForFunction(() => document.getElementById('preset').options.length === 2);
     await page.locator('#preset').selectOption('preset-1');
     await page.locator('#preset-apply').click();
+    await page.waitForFunction(() => document.getElementById('notice').textContent.includes('预设已载入'));
+    await page.locator('[data-manual-view=results]').click();
+    assert.equal(await page.locator('#notice').isVisible(), false, 'Preset feedback must not appear as task state');
+    await setup();
     assert.equal(
       calls.filter((call) => call.method === 'POST' && call.path.endsWith('/runs')).length,
       beforePreset,
       'Saving or loading preset must not call a model',
     );
+    robustnessChecks.push('preset naming uses an accessible product dialog with Escape and opener focus return');
+    const presetDeleteEntered = deferred();
+    const presetDeleteGate = deferred();
+    const presetDeletesBefore = calls.filter((call) => call.method === 'DELETE' && call.path.endsWith('/presets')).length;
+    await page.route('**/presets', async (route) => {
+      if (route.request().method() !== 'DELETE') return route.continue();
+      presetDeleteEntered.resolve();
+      await presetDeleteGate.promise;
+      await route.continue();
+    });
+    await page.locator('#preset-delete').click();
+    await presetDeleteEntered.promise;
+    await history();
+    presetDeleteGate.resolve();
+    await page.waitForFunction(() => !document.getElementById('preset-delete').hasAttribute('aria-busy'));
+    assert.equal(await page.locator('#notice').isVisible(), false, 'A delayed preset deletion cannot report success in the newly selected history view');
+    assert.equal(presets.length, 0);
+    assert.equal(calls.filter((call) => call.method === 'DELETE' && call.path.endsWith('/presets')).length, presetDeletesBefore + 1);
+    await page.unroute('**/presets');
+    await setup();
+    robustnessChecks.push('a delayed preset deletion completes exactly once without leaking feedback into another view');
     await page.locator('#run-submit').click();
     await page.locator('.sample pre').filter({ hasText: '20' }).waitFor();
     const firstRun = calls.find((call) => call.method === 'POST' && call.path.endsWith('/runs'));
@@ -392,6 +505,7 @@ const server = http.createServer(async (req, res) => {
     await page.locator('[data-evidence-sample]').first().click();
     await page.locator('#evidence-dialog').waitFor({ state: 'visible' });
     assert.match(await page.locator('#evidence-content').textContent(), /mock-upstream-model/);
+    await verifyDialogPadding('evidence-dialog');
     await capture('evidence-detail-page.png');
     await page.locator('[data-close=evidence-dialog]').click();
     robustnessChecks.push('sample evidence exposes requested and resolved models with structured conditions');
@@ -400,10 +514,10 @@ const server = http.createServer(async (req, res) => {
     await page.locator('#review-note-0').fill('离线测试：严格整数回答');
     await page.locator('[data-review-sample]').click();
     await page.waitForFunction(() =>
-      document.getElementById('notice').textContent.includes('人工评审已保存'),
+      document.getElementById('local-feedback').textContent.includes('评审已保存'),
     );
     await page.locator('#run-rerun').click();
-    await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('run-2'));
+    await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('run-2'));
     const rerun = calls.filter((call) => call.method === 'POST' && call.path.endsWith('/runs')).at(-1);
     assert(!('fingerprint' in rerun.body), 'Frozen evidence fields must not be reposted to strict API');
     assert.notEqual(firstRun.body.idempotency_key, rerun.body.idempotency_key);
@@ -421,6 +535,8 @@ const server = http.createServer(async (req, res) => {
       fullPage: true,
     });
     await setup();
+    assert.equal(await page.locator('#notice').isVisible(), false, 'Local review feedback must not survive navigation to configuration');
+    robustnessChecks.push('local operation feedback clears when switching workspace views');
     await page.locator('#question').selectOption('random-linear');
     await page.locator('#control-target').selectOption('mock-credential-a');
     await page.locator('#run-submit').click();
@@ -429,7 +545,7 @@ const server = http.createServer(async (req, res) => {
     );
     await page.locator('#control-target').selectOption('mock-credential-b');
     await page.locator('#run-submit').click();
-    await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('run-3'));
+    await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('run-3'));
     const controlledRun = calls
       .filter((call) => call.method === 'POST' && call.path.endsWith('/runs'))
       .at(-1);
@@ -462,11 +578,43 @@ const server = http.createServer(async (req, res) => {
     await page.locator('#rule-target').selectOption('mock-credential-a');
     await page.locator('#rule-models').fill('mock-reasoner\nmock-visual');
     await capture('rule-editor-page.png');
+    const invalidModels = Array.from({ length: 9 }, (_, index) => `offline-model-${index + 1}`).join('\n');
+    const writesBeforeInvalidRule = calls.filter((call) => call.method !== 'GET').length;
+    await page.locator('#rule-models').fill(invalidModels);
+    await page.locator('#rule-form button[type=submit]').click();
+    await page.waitForFunction(() => {
+      const field = document.getElementById('rule-models');
+      return field.getAttribute('aria-invalid') === 'true' && !field.disabled;
+    });
+    assert.equal(await page.locator('#rule-models').inputValue(), invalidModels, 'Client validation preserves the invalid rule draft');
+    assert.equal(await page.locator('#rule-name').inputValue(), '核心模型巡检');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'rule-models', 'Client validation focuses the invalid field after the save lock is released');
+    assert.match(await page.locator('#rule-models-error').textContent(), /1–8/);
+    assert.equal(calls.filter((call) => call.method !== 'GET').length, writesBeforeInvalidRule, 'Invalid rule validation makes no API writes or model calls');
+    await page.locator('#rule-models').fill('mock-reasoner\nmock-visual');
+    assert.equal(await page.locator('#rule-models').getAttribute('aria-invalid'), null);
+    robustnessChecks.push('client-side rule validation preserves the draft, focuses its invalid field after unlocking, and makes no API writes');
     const callCountBeforeSave = calls.filter(
       (call) => call.method === 'POST' && call.path.endsWith('/runs'),
     ).length;
+    const ruleSaveEntered = deferred();
+    const ruleSaveGate = deferred();
+    await page.route('**/rules', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      ruleSaveEntered.resolve();
+      await ruleSaveGate.promise;
+      await route.continue();
+    });
     await page.locator('#rule-form button[type=submit]').click();
+    await ruleSaveEntered.promise;
+    assert.equal(await page.locator('#rule-name').isEnabled(), false, 'Saving locks the submitted draft against edits');
+    assert.equal(await page.locator('[data-close=rule-dialog]').first().isEnabled(), false, 'Saving locks editor close until its result is known');
+    await page.locator('#settings-open').click();
+    assert.equal(await page.locator('#settings-dialog').isVisible(), false, 'Saving cannot be replaced by another editor');
+    ruleSaveGate.resolve();
     await page.locator('#rules-list strong').filter({ hasText: '核心模型巡检' }).waitFor();
+    await page.unroute('**/rules');
+    robustnessChecks.push('an in-flight rule save locks draft fields and close controls and cannot be replaced by a different editor');
     await capture('rules-page.png');
     assert.equal(
       calls.filter((call) => call.method === 'POST' && call.path.endsWith('/runs')).length,
@@ -480,9 +628,64 @@ const server = http.createServer(async (req, res) => {
     assert(!('retest_seconds' in rules[0]));
     assert.equal(await page.locator('#rule-auto-recovery,#rule-pass,#rule-retest').count(), 0);
     assert.equal(rules[0].scheduling_enabled, false);
+    rules.push({ ...rules[0], id: 'delete-rule', name: '待删除的离线规则' });
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => !document.getElementById('refresh').hasAttribute('aria-busy'));
+    const deletesBefore = calls.filter((call) => call.method === 'DELETE' && call.path.endsWith('/rules')).length;
+    await page.locator('[data-rule-delete="delete-rule"]').click();
+    assert.match(await page.locator('#action-dialog').textContent(), /待删除的离线规则/);
+    await page.locator('#action-cancel').click();
+    assert.equal(calls.filter((call) => call.method === 'DELETE' && call.path.endsWith('/rules')).length, deletesBefore);
+    await page.locator('[data-rule-delete="delete-rule"]').click();
+    await page.locator('#action-confirm').click();
+    await page.locator('[data-rule-delete="delete-rule"]').waitFor({ state: 'detached' });
+    assert.equal(rules.length, 1);
+    assert.equal(calls.filter((call) => call.method === 'DELETE' && call.path.endsWith('/rules')).length, deletesBefore + 1);
+    robustnessChecks.push('rule deletion names the object, supports cancellation and submits exactly one explicit delete');
+    const rulePauseEntered = deferred();
+    const rulePauseGate = deferred();
+    const rulePausesBefore = calls.filter((call) => call.method === 'POST' && call.path.endsWith('/rules/pause')).length;
+    await page.route('**/rules/pause', async (route) => {
+      rulePauseEntered.resolve();
+      await rulePauseGate.promise;
+      await route.continue();
+    });
     await page.locator('[data-rule-pause]').click();
+    await rulePauseEntered.promise;
+    await page.locator('[data-page=manual]').click();
+    await setup();
+    rulePauseGate.resolve();
+    await page.waitForFunction(() => document.getElementById('rules-list').textContent.includes('恢复检测规则'));
+    assert.equal(await page.locator('#notice').isVisible(), false, 'A delayed rule pause cannot report success in the manual workspace');
+    assert.equal(calls.filter((call) => call.method === 'POST' && call.path.endsWith('/rules/pause')).length, rulePausesBefore + 1);
+    await page.unroute('**/rules/pause');
+    await operations('rules');
     await page.locator('[data-rule-pause]').filter({ hasText: '恢复检测规则' }).waitFor();
     assert.equal(rules[0].enabled, false);
+    robustnessChecks.push('a delayed rule pause completes exactly once without leaking feedback into the manual workspace');
+
+    const settingsReadEntered = deferred();
+    const settingsReadGate = deferred();
+    await page.route('**/settings', async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      settingsReadEntered.resolve();
+      await settingsReadGate.promise;
+      await route.continue();
+    });
+    await page.locator('#settings-open').click();
+    await settingsReadEntered.promise;
+    await page.locator('#rule-new').click();
+    await page.locator('#rule-name').fill('保留后打开的草稿');
+    settingsReadGate.resolve();
+    await page.waitForFunction(() => !document.getElementById('settings-open').hasAttribute('aria-busy'));
+    assert.equal(await page.locator('#rule-dialog').isVisible(), true);
+    assert.equal(await page.locator('#settings-dialog').isVisible(), false);
+    assert.equal(await page.locator('#rule-name').inputValue(), '保留后打开的草稿');
+    await page.unroute('**/settings');
+    await page.locator('[data-close=rule-dialog]').first().click();
+    await page.locator('#action-confirm').click();
+    await page.locator('#action-dialog').waitFor({ state: 'hidden' });
+    robustnessChecks.push('a delayed budget read cannot replace a rule editor opened after the read began');
 
     await page.locator('#settings-open').click();
     await page.locator('#setting-daily_calls').fill('120');
@@ -501,6 +704,13 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await page.locator('#settings-dialog').isVisible(), true);
     assert.equal(await page.locator('#setting-daily_calls').inputValue(), '120');
     await page.unroute('**/settings');
+    await page.locator('[data-close=settings-dialog]').first().click();
+    await page.locator('#action-dialog').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#action-dialog').textContent(), /放弃|未保存/);
+    await page.locator('#action-cancel').click();
+    assert.equal(await page.locator('#settings-dialog').isVisible(), true);
+    assert.equal(await page.locator('#setting-daily_calls').inputValue(), '120');
+    robustnessChecks.push('unsaved budget edits require explicit discard and cancellation preserves the draft');
     robustnessChecks.push('failed mutation keeps form values and exposes its error inside the inline editor');
     await page.locator('#settings-form button[type=submit]').click();
     await page.waitForFunction(() =>
@@ -566,8 +776,12 @@ const server = http.createServer(async (req, res) => {
       path: path.join(output, 'operations-page.png'),
       fullPage: true,
     });
+    await pairedCapture('operations-paused-desktop');
+    await pairedCapture('operations-paused-mobile', 390, 844);
     await page.locator('[data-action-preview]').click();
     await page.locator('#release-dialog').waitFor({ state: 'visible' });
+    await page.waitForFunction(() => !document.getElementById('release-confirm').disabled);
+    await verifyDialogPadding('release-dialog');
     assert.equal(
       await page.locator('#release-pause-rule').count(),
       0,
@@ -727,6 +941,7 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await page.locator('#safe-preview').getAttribute('inert'), '');
     assert.equal(await page.locator('body').getAttribute('data-compromised'), null);
     assert.deepEqual(external, []);
+    await verifyDialogPadding('preview-dialog');
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({
       animations: 'disabled',
@@ -755,7 +970,7 @@ const server = http.createServer(async (req, res) => {
     await page.waitForFunction(() => !document.getElementById('refresh').hasAttribute('aria-busy'));
     await history();
     await page.locator('[data-run=comparison-run]').click();
-    await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('comparison-run'));
+    await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('comparison-run'));
     assert.equal(await page.locator('.model-result:visible').count(), 2);
     assert.equal(await page.locator('.sample:visible').count(), 4);
     await page.locator('#sample-filter').selectOption('1');
@@ -769,10 +984,13 @@ const server = http.createServer(async (req, res) => {
     await expand.click();
     assert.equal(await expand.getAttribute('aria-expanded'), 'false');
     await capture('comparison-page.png');
-    await page.locator('#theme-toggle').click();
+    await pairedCapture('comparison-desktop-light');
+    await pairedCapture('comparison-desktop-dark', 1440, 900, 'dark');
+    await pairedCapture('comparison-desktop-white', 1440, 900, 'white');
+    await pairedCapture('comparison-mobile-light', 390, 844);
+    await page.locator('#theme-toggle').selectOption('dark');
     await capture('comparison-dark-page.png');
-    await page.locator('#theme-toggle').click();
-    await page.locator('#theme-toggle').click();
+    await page.locator('#theme-toggle').selectOption('light');
     await page.locator('#compare-model-b').selectOption('');
     assert.equal(await page.locator('.sample:visible').count(), 1);
     await page.locator('#compare-model-a').selectOption('mock-reasoner');
@@ -780,24 +998,50 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await page.locator('.model-result:visible').count(), 2);
     assert.equal(await page.locator('.model-result:visible').first().getAttribute('data-model'), 'mock-reasoner', 'Primary selected model leads the reading order');
     await page.setViewportSize({ width: 390, height: 844 });
+    const taskMenu = page.locator('#task-actions');
+    await page.waitForFunction(() => !document.getElementById('task-actions').open);
+    assert.equal(await taskMenu.getAttribute('open'), null, 'Phone task actions start collapsed');
+    await taskMenu.locator('summary').click();
+    assert.equal(await page.locator('#run-export').isVisible(), true);
+    await page.locator('#run-export').focus();
+    await page.keyboard.press('Escape');
+    assert.equal(await taskMenu.getAttribute('open'), null);
+    assert.equal(await taskMenu.locator('summary').evaluate((node) => document.activeElement === node), true, 'Escape returns focus to the action disclosure');
+    await taskMenu.locator('summary').click();
+    await page.locator('#manual-title').click();
+    assert.equal(await taskMenu.getAttribute('open'), null, 'Clicking outside closes phone task actions');
+    robustnessChecks.push('phone task actions open explicitly, close on Escape or outside click and return keyboard focus to their disclosure');
     await capture('mobile-comparison-page.png');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Long models and long code cannot overflow the page');
     await page.setViewportSize({ width: 1440, height: 1080 });
     robustnessChecks.push('model comparison and sample filtering preserve original review indices and contain long output on mobile');
+    for (const width of [360, 390, 768, 1024, 1280, 1440]) {
+      await page.setViewportSize({ width, height: width < 768 ? 844 : 900 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `Comparison must fit ${width}px`);
+      if (width < 768) {
+        const smallInputs = await page.locator('input:visible,select:visible,textarea:visible').evaluateAll((nodes) => nodes.filter((node) => !['checkbox', 'radio'].includes(node.type) && parseFloat(getComputedStyle(node).fontSize) < 16).map((node) => node.id));
+        assert.deepEqual(smallInputs, [], 'Phone fields use at least 16px text');
+      }
+    }
+    assert.equal(await page.evaluate(() => CSS.supports('grid-template-rows', 'subgrid')), true, 'Verified Chromium supports comparison subgrid');
+    await page.setViewportSize({ width: 720, height: 450 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, '200% zoom equivalent viewport reflows without horizontal page overflow');
+    await page.setViewportSize({ width: 1440, height: 1080 });
+    robustnessChecks.push('comparison reflows at 360/390/768/1024/1280/1440px and a 720×450 CSS viewport representing 200% zoom; Chromium subgrid verified');
     await operations('activity');
     assert.equal(await page.locator('#operations-history .empty-line').count(), 0, 'Audit history must not display an empty operational-history state');
     robustnessChecks.push('audit-only operational history does not show an empty state');
     await operations();
-    await page.locator('#theme-toggle').click();
+    await page.locator('#theme-toggle').selectOption('dark');
     assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
     await page.screenshot({
       animations: 'disabled',
       path: path.join(output, 'operations-dark-page.png'),
       fullPage: true,
     });
-    await page.locator('#theme-toggle').click();
+    await page.locator('#theme-toggle').selectOption('white');
     assert.equal(await page.locator('html').getAttribute('data-theme'), 'white');
-    await page.locator('#theme-toggle').click();
+    await page.locator('#theme-toggle').selectOption('light');
     assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
     await page.evaluate(() => {
       location.hash = '#manual';
@@ -852,7 +1096,7 @@ const server = http.createServer(async (req, res) => {
     });
     assert.equal(await page.locator('#run-submit').isDisabled(), true);
     submitGate.resolve();
-    await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('run-4'));
+    await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('run-4'));
     await page.unroute('**/model-quality/runs');
     assert.equal(
       calls.filter((call) => call.method === 'POST' && call.path.endsWith('/runs')).length,
@@ -877,15 +1121,69 @@ const server = http.createServer(async (req, res) => {
     await staleRequested.promise;
     await history();
     await page.locator('[data-run=visual-run]').first().click();
-    await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('visual-run'));
+    await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('visual-run'));
     staleGate.resolve();
     await staleFinished.promise;
     await page.unroute('**/runs/detail?id=stale-run');
     await page.evaluate(
       () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
     );
-    assert((await page.locator('#run-meta').textContent()).includes('visual-run'));
+    assert((await page.locator('#run-frozen-data').textContent()).includes('visual-run'));
     robustnessChecks.push('late task details cannot replace the newly selected task');
+
+    {
+      await page.clock.install();
+      const reading = { id: 'reading-run', status: 'running', source: 'manual_test', created_at: created, config: { ...config, models: [longModel, 'mock-reasoner'], samples: 2 }, samples: structuredClone(comparisonSamples), action_status: 'not_applicable' };
+      reading.samples[1].reason = '';
+      runs.unshift(reading);
+      let readingPolls = 0;
+      await page.route('**/runs/detail?id=reading-run', async (route) => { readingPolls++; await route.continue(); });
+      await page.locator('#refresh').click();
+      await page.waitForFunction(() => !document.getElementById('refresh').hasAttribute('aria-busy'));
+      await history();
+      await page.locator('[data-run=reading-run]').first().click();
+      await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('reading-run'));
+      await page.locator('#sample-filter').selectOption('1');
+      await page.locator('.sample:visible .review-disclosure summary').first().click();
+      await page.locator('#review-note-1').fill('未保存的轮询评审草稿');
+      await page.locator('[data-expand-sample="1"]').click();
+      await page.locator('.sample:visible .answer-text').last().evaluate((node) => { node.scrollTop = 120; });
+      await page.locator('#review-note-1').focus();
+      await page.locator('#review-note-1').evaluate((node) => node.setSelectionRange(2, 6));
+      const probeState = () => page.evaluate(() => ({ active: document.activeElement.id, note: document.getElementById('review-note-1').value, selection: [document.getElementById('review-note-1').selectionStart, document.getElementById('review-note-1').selectionEnd], reviewOpen: document.getElementById('review-note-1').closest('details').open, expanded: document.querySelector('[data-expand-sample="1"]').getAttribute('aria-expanded'), scroll: [...document.querySelectorAll('.sample .answer-text')].at(-1).scrollTop, filter: document.getElementById('sample-filter').value }));
+      const before = await probeState();
+      reading.samples[0].output = 'Unrelated sample completed during polling';
+      reading.samples[1].reason = 'exact answer';
+      await page.clock.runFor(1200);
+      await page.waitForFunction(() => [...document.querySelectorAll('.sample pre')].some((node) => node.textContent === 'Unrelated sample completed during polling'));
+      const after = await probeState();
+      fs.writeFileSync(path.join(output, 'polling-probe.json'), JSON.stringify({ before, after, readingPolls }, null, 2) + '\n');
+      assert.deepEqual(after, before, 'Polling preserves focused review selection, draft, disclosure, expanded answer, internal scroll and filter');
+      assert.equal(await page.locator('.sample:visible .sample-reason').first().isVisible(), true);
+      assert.equal(await page.locator('.sample:visible .sample-reason').first().textContent(), '答案与冻结参考答案一致');
+      robustnessChecks.push('a previously empty sample reason becomes visible when polling supplies a known explanation');
+      robustnessChecks.push('controlled polling preserves focused review selection, unsaved note, disclosure, expanded output, internal scroll and comparison filter');
+      await page.locator('.sample:visible .answer-text').first().evaluate((node) => {
+        const range = document.createRange(); range.setStart(node.firstChild, 4); range.setEnd(node.firstChild, 24);
+        const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      });
+      const selectedOutput = await page.evaluate(() => getSelection().toString());
+      assert(selectedOutput.length > 0);
+      reading.status = 'completed';
+      await page.clock.runFor(1200);
+      await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('已完成'));
+      assert.equal(await page.evaluate(() => getSelection().toString()), selectedOutput, 'Finishing a run preserves output text selection');
+      robustnessChecks.push('output text selection survives a background task finishing');
+      await page.unroute('**/runs/detail?id=reading-run');
+      await history();
+      await page.locator('[data-run=visual-run]').first().click();
+      await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('visual-run'));
+      assert.equal(await page.locator('#sample-filter').inputValue(), 'all');
+      assert.equal(await page.locator('.answer-text.expanded').count(), 0);
+      assert.equal(await page.locator('#review-note-0').inputValue(), '');
+      robustnessChecks.push('per-task review and comparison state resets when selecting another run');
+      await page.clock.resume();
+    }
 
     await page.clock.install();
     const polling = { ...pending, id: 'polling-run', status: 'running' };
@@ -905,17 +1203,17 @@ const server = http.createServer(async (req, res) => {
     await page.waitForFunction(() => !document.getElementById('refresh').hasAttribute('aria-busy'));
     await history();
     await page.locator('[data-run=polling-run]').first().click();
-    await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('polling-run'));
+    await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('polling-run'));
     const postsBeforePoll = calls.filter(
       (call) => call.method === 'POST' && call.path.endsWith('/runs'),
     ).length;
     await page.clock.runFor(1200);
-    await page.waitForFunction(() => document.getElementById('notice').textContent.includes('自动重试查询'));
+    await page.waitForFunction(() => document.getElementById('run-feedback').textContent.includes('自动重试查询'));
     polling.status = 'completed';
     await page.clock.runFor(2400);
     await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('已完成'));
     assert.equal(pollReads, 3);
-    assert.equal(await page.locator('#notice').evaluate((node) => node.classList.contains('error') && !node.classList.contains('hidden')), false, 'Recovered progress clears the stale query error');
+    assert.equal(await page.locator('#run-feedback').isVisible(), false, 'Recovered progress clears the stale query error');
     assert.equal(
       calls.filter((call) => call.method === 'POST' && call.path.endsWith('/runs')).length,
       postsBeforePoll,
@@ -926,6 +1224,71 @@ const server = http.createServer(async (req, res) => {
       'poll failures retry with backoff using a controlled clock and never resubmit runs',
     );
 
+    const stressModels = Array.from({ length: 8 }, (_, index) => `offline-same-prefix-deployment-model-${'long-name-'.repeat(10)}variant-${index + 1}`);
+    const stressOutput = ('Readable offline evidence with a bounded response.\n').repeat(6000).slice(0, 262144);
+    const stressRun = { id: 'stress-run', status: 'completed', source: 'manual_test', created_at: created, config: { ...config, models: stressModels, samples: 4 }, samples: stressModels.flatMap((model) => Array.from({ length: 4 }, (_, index) => ({ model, index, output: stressOutput, execution_status: 'completed', quality_verdict: 'unknown', comparable: false, total_ms: 0, usage: null }))), action_status: 'not_applicable' };
+    runs.unshift(stressRun);
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => !document.getElementById('refresh').hasAttribute('aria-busy'));
+    await history();
+    const stressStarted = performance.now();
+    await page.locator('[data-run=stress-run]').first().click();
+    await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('stress-run'));
+    assert.equal(await page.locator('.sample').count(), 32);
+    assert.equal(await page.locator('.model-result:visible').count(), 2);
+    assert.equal(await page.locator('.sample:visible').count(), 8);
+    await page.locator('#compare-model-b').selectOption(stressModels[7]);
+    await page.locator('#sample-filter').selectOption('3');
+    assert.equal(await page.locator('.sample:visible').count(), 2);
+    assert.equal(await page.locator('.sample:visible .answer-text').first().textContent(), stressOutput);
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    const copied = page.locator('.sample:visible [data-copy-sample]').first();
+    await copied.click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-copy-sample]')].some((node) => node.textContent.includes('已复制')));
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), stressOutput);
+    assert.equal(await page.locator('#notice').isVisible(), false, 'Copy feedback stays by its action');
+    await page.locator('.model-result:visible [data-copy-model]').last().click();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), stressModels[7]);
+    const stressEvidence = { models: 8, samples: 32, bytes_per_output: Buffer.byteLength(stressOutput), total_output_bytes: Buffer.byteLength(stressOutput) * 32, load_and_interact_ms: Math.round(performance.now() - stressStarted), output_preserved: true };
+    fs.writeFileSync(path.join(output, 'stress-results.json'), JSON.stringify(stressEvidence, null, 2) + '\n');
+    robustnessChecks.push('maximum 8 models and 32 samples with 256KiB outputs remain filterable, readable and losslessly copyable; full model IDs remain distinct');
+    await page.setViewportSize({ width: 360, height: 800 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Maximum content fits 360px');
+    await capture('stress-mobile-page.png');
+    const mobileSample = page.locator('.sample:visible').first();
+    await mobileSample.locator('[data-expand-sample]').click();
+    await mobileSample.locator('.answer-text').evaluate((node) => scrollTo(0, node.getBoundingClientRect().top + scrollY + 400));
+    const mobileContext = await mobileSample.locator('.sample-heading').evaluate((node) => ({ top: node.getBoundingClientRect().top, model: node.querySelector('.sample-model-label')?.textContent, position: getComputedStyle(node).position }));
+    assert.equal(mobileContext.position, 'sticky');
+    assert(Math.abs(mobileContext.top) <= 1, 'Reading a long expanded answer keeps sample context at the top');
+    assert.equal(mobileContext.model, stressModels[0]);
+    await page.screenshot({ path: path.join(output, 'mobile-reading-context.png'), animations: 'disabled' });
+    robustnessChecks.push('mobile long-answer scrolling retains the model and sample identity in the single local sticky heading');
+    await mobileSample.locator('[data-expand-sample]').click();
+    const eightSamples = { ...stressRun, id: 'eight-samples-run', config: { ...stressRun.config, models: [stressModels[0]], samples: 8 }, samples: Array.from({ length: 8 }, (_, index) => ({ ...stressRun.samples[0], index })) };
+    runs.unshift(eightSamples);
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => !document.getElementById('refresh').hasAttribute('aria-busy'));
+    await history();
+    await page.locator('[data-run=eight-samples-run]').first().click();
+    await page.waitForFunction(() => document.getElementById('run-frozen-data').textContent.includes('eight-samples-run'));
+    assert.equal(await page.locator('.sample:visible').count(), 8);
+    await page.locator('#sample-filter').selectOption('7');
+    assert.equal(await page.locator('.sample:visible').count(), 1);
+    assert.equal(await page.locator('.sample:visible').getAttribute('data-sample'), '7');
+    robustnessChecks.push('the maximum eight samples per model render and filter to sample eight without index drift');
+    runs.push(...Array.from({ length: 25 }, (_, index) => ({ ...pending, id: `page-run-${index}`, status: 'completed' })));
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => !document.getElementById('refresh').hasAttribute('aria-busy'));
+    await history();
+    const firstHistory = await page.locator('#history-list').textContent();
+    await page.locator('#history-next').click();
+    await page.waitForFunction((previous) => document.getElementById('history-list').textContent !== previous, firstHistory);
+    assert.equal(await page.locator('[data-run]').count(), 10);
+    await page.locator('#history-prev').click();
+    await page.waitForFunction((previous) => document.getElementById('history-list').textContent === previous, firstHistory);
+    robustnessChecks.push('history pagination advances and returns without mixing task records');
+    await page.locator('[data-run=polling-run]').first().click();
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({
@@ -965,6 +1328,7 @@ const server = http.createServer(async (req, res) => {
     await page.unroute('**/targets?limit=100');
     await page.waitForFunction(() => document.getElementById('connection-state').textContent === '未连接');
     assert.equal(await page.locator('#target option').count(), 1);
+    assert.equal(await page.locator('#compare-model-a option,#compare-model-b option,#sample-filter option').count(), 0);
     assert.equal(await page.locator('.sample').count(), 0);
     assert.equal(await page.locator('#run-submit').isDisabled(), true);
     assert(!(await page.locator('body').textContent()).includes('mock-credential-a'));
@@ -987,8 +1351,14 @@ const server = http.createServer(async (req, res) => {
     robustnessChecks.push('401 invalidates the whole management session without stale data');
     assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
     assert.deepEqual(errors, [], 'No browser JavaScript errors');
+    assert.deepEqual(sourceHashes(), initialSourceHashes, 'UI source must remain unchanged while browser validation is running');
+    fs.writeFileSync(path.join(output, 'dialog-layout-results.json'), JSON.stringify({ result: 'passed', source_sha256: initialSourceHashes, browser: await browser.version(), scope: 'Real computed dialog bottom padding and scrolled content inset at 360/390px; safe-area inset is zero in desktop emulation', checks: dialogGeometry }, null, 2) + '\n');
+    robustnessChecks.push('all five product dialogs retain at least 20px computed bottom padding and visible content inset at 360px and 390px');
     const report = {
       result: 'passed',
+      verified_at: new Date().toISOString(),
+      source_sha256: initialSourceHashes,
+      viewport_evidence: viewportEvidence,
       browser: await browser.version(),
       platform: process.platform,
       architecture: process.arch,
@@ -1023,32 +1393,15 @@ const server = http.createServer(async (req, res) => {
         ...robustnessChecks,
       ],
       api_calls: calls.length,
-      screenshots: [
-        'manual-page.png',
-        'operations-page.png',
-        'sandbox-preview.png',
-        'mobile-page.png',
-        'operations-dark-page.png',
-        'disconnected-page.png',
-        'connected-empty-page.png',
-        'management-error-page.png',
-        'evidence-detail-page.png',
-        'comparison-page.png',
-        'comparison-dark-page.png',
-        'rule-editor-page.png',
-        'rules-page.png',
-        'mobile-comparison-page.png',
-        'running-page.png',
-        'insufficient-evidence-page.png',
-        'mobile-setup-page.png',
-        'tablet-page.png',
-        'release-conflict-page.png',
-        'release-uncertain-page.png',
-        'released-still-restricted-page.png',
-      ],
+      screenshots: fs.readdirSync(output).filter((name) => name.endsWith('.png')).sort(),
+      screenshot_sha256: Object.fromEntries(fs.readdirSync(output).filter((name) => name.endsWith('.png')).sort().map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(output, name))).digest('hex')])),
     };
     fs.writeFileSync(path.join(output, 'ui-results.json'), JSON.stringify(report, null, 2) + '\n');
     console.log(JSON.stringify(report, null, 2));
+  } catch (error) {
+    await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }).catch(() => {});
+    fs.writeFileSync(path.join(output, 'failure.json'), JSON.stringify({ error: error.stack, browserErrors: errors, lastCalls: calls.slice(-6), text: await page.locator('body').innerText() }, null, 2));
+    throw error;
   } finally {
     await browser.close();
     await new Promise((resolve) => server.close(resolve));

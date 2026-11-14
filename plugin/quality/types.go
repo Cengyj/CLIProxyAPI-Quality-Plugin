@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const Version = "0.3.0"
+const Version = "0.3.1"
 
 type Config struct {
 	DataDir           string `json:"data_dir" yaml:"data_dir"`

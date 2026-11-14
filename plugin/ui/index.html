@@ -9,49 +9,50 @@
 <a class="skip-link" href="#main">跳到工作区</a>
 <header class="app-header">
   <a class="brand" href="#manual" aria-label="Model Quality 首页"><svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 20V8l6 7 4-5 4 5 6-7v12M4 24h20"/></svg><span>Model Quality</span></a>
-  <nav class="primary-nav" aria-label="主导航"><button data-page="manual" class="active">手动评测</button><button data-page="operations">质量运维</button></nav>
-  <div class="header-actions"><button id="theme-toggle" class="subtle" aria-label="切换主题" title="切换深色主题">浅色</button><button id="connection-top" class="connection-button"><span class="connection-dot" aria-hidden="true"></span><span id="connection-state">未连接</span><span class="connection-label">管理连接</span></button></div>
+  <nav class="primary-nav" aria-label="主导航"><button data-page="manual" class="active">智商测试</button><button data-page="operations">质量运维</button></nav>
+  <div class="header-actions"><select id="theme-toggle" aria-label="界面主题"><option value="light">浅色</option><option value="white">纯白</option><option value="dark">深色</option></select><button id="connection-top" class="connection-button"><span class="connection-dot" aria-hidden="true"></span><span id="connection-state">未连接</span><span class="connection-label">管理连接</span></button></div>
 </header>
 <main id="main" class="workspace" tabindex="-1">
-  <div class="workspace-meta"><span>模型质量控制台 <span class="meta-divider">/</span> <span id="page-crumb">手动评测</span></span><div><span id="data-state" class="stale">管理接口未连接</span><button class="text-button" id="refresh">刷新数据</button></div></div>
+  <div class="workspace-meta"><span>模型质量控制台 <span class="meta-divider">/</span> <span id="page-crumb">智商测试</span></span><div><span id="data-state" class="stale">管理接口未连接</span><button class="text-button" id="refresh">刷新数据</button></div></div>
   <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
-  <section id="connect-banner" class="connect-banner"><div><h2>连接 CPA，开始审阅模型质量</h2><p>使用管理密钥读取凭证与任务。连接和保存配置不会调用模型。</p></div><button id="connection-open" class="primary">连接管理接口</button></section>
+  <section id="connect-banner" class="connect-banner"><div><h2>连接 CPA</h2><p>连接后选择凭证与题目，点击开始才会调用模型。</p></div><button id="connection-open" class="primary">连接管理接口</button></section>
   <section id="page-manual" aria-labelledby="manual-title">
-    <div class="page-heading"><div><h1 id="manual-title">手动评测</h1><p>固定条件，比较回答。评测与人工评审不会自动暂停或解除凭证。</p></div><button id="new-evaluation" class="subtle hidden" data-manual-view="setup">新建评测</button></div>
-    <nav class="view-nav" aria-label="评测工作区"><button data-manual-view="setup" class="active">配置评测</button><button data-manual-view="results">当前任务 <span id="task-indicator"></span></button><button data-manual-view="history">任务历史 <span id="history-count"></span></button></nav>
-    <section id="manual-setup" class="setup-card" aria-label="配置评测">
-      <details id="preset-tools" class="preset-tools"><summary>使用或保存预设 <span>复用条件，不执行模型</span></summary><div class="preset-row"><label>已保存预设<select id="preset"><option value="">选择预设，不执行</option></select></label><div class="button-row"><button type="button" class="subtle" id="preset-apply">载入预设</button><button type="button" class="text-button" id="preset-save">保存当前配置</button><button type="button" class="text-button" id="preset-delete">删除预设</button></div></div></details>
+    <div class="page-heading question-heading"><div><h1 id="manual-title">智商测试</h1><p>选一道题，比较模型的回答。</p></div><span class="scoring-note">不自动评分</span><button id="new-evaluation" class="subtle hidden" data-manual-view="setup">新建测试</button></div>
+    <section id="manual-setup" aria-label="题目测试">
       <form id="run-form">
-        <div class="configuration-grid">
-          <section class="form-section"><div class="section-heading"><h2>目标与模型</h2><p>一份凭证，多个模型。每个样本独立执行。</p></div>
-            <label>目标凭证<select id="target" required><option value="">连接后选择凭证</option></select></label>
-            <div id="target-summary" class="target-summary">仅显示脱敏标识；选定凭证后加载可用模型。</div>
-            <label>检测模型 <small>每行一个，最多 8 个</small><textarea id="models" rows="3" required maxlength="1600" placeholder="选择下方模型，或输入模型 ID"></textarea></label>
-            <div id="model-chips" class="chips" aria-label="可选模型"></div>
-          </section>
-          <section class="form-section"><div class="section-heading"><h2>题目与标准</h2><p>内置题保留版本，自定义题同时冻结参考标准。</p></div>
-            <label>题目<select id="question"><option value="">连接后加载题库</option></select></label>
-            <label>题面 <small id="question-version">版本未知</small><textarea id="prompt" rows="5" maxlength="16000" readonly placeholder="选择题目后显示内容"></textarea></label>
-            <p id="prompt-note" class="field-note">内置题面不可编辑；选择自定义题目可输入新题。</p>
-            <label id="review-standard-field" class="hidden">参考标准 / 参考答案 <small>不发给被测模型</small><textarea id="review-standard" rows="3" maxlength="4096" placeholder="记录用于人工评审或独立判题的依据"></textarea></label>
-            <div id="control-fields" class="hidden"><label>通过对照凭证（可选）<select id="control-target"><option value="">不选择：仅观察</option></select></label><p class="field-note">随机题的自动判定需要另一凭证同批、同条件明确通过。对照另计调用预算。</p></div>
-          </section>
+        <div class="credential-strip">
+          <svg class="test-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9 3h6M10 3v6l-6 9a2 2 0 0 0 1.7 3h12.6A2 2 0 0 0 20 18l-6-9V3M7 15h10"/><path d="m9 18 2-1 2 1 2-1"/></svg>
+          <label>测试凭证<select id="target" required><option value="">连接后选择凭证</option></select></label>
+          <div id="target-summary" class="target-summary">先选择用于本次测试的凭证。</div>
         </div>
-        <section class="execution-section"><div class="section-heading"><h2>执行参数</h2><p>按需调整采样与判题。</p></div><div class="execution-fields"><div class="field-row"><label>每模型样本数<input id="samples" type="number" min="1" max="8" value="1" required></label><label>输出上限（token）<input id="max-tokens" type="number" min="64" max="32768" value="2048" required></label></div>
-          <details class="advanced"><summary>推理与判题设置 <span id="judge-summary">确定性判题 · 默认推理</span></summary><div class="field-row"><label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="0"></label><label>推理强度<select id="reasoning"><option value="">默认 / 未指定</option><option>none</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option></select></label><label>判题方式<select id="judge-mode"><option value="deterministic">题型专用确定性判题</option><option value="manual">仅人工评审</option><option value="llm">独立模型判题</option></select></label></div><div id="judge-fields" class="hidden"><div class="field-row"><label>判题凭证<select id="judge-target"><option value="">选择独立凭证</option></select></label><label>判题模型<input id="judge-model" maxlength="200"></label></div><p class="field-note">须与被测凭证不同；独立判题另计预算，失败记为无法判断。</p></div></details>
-        </div></section>
-        <div class="submit-bar"><div><strong id="run-plan">选择模型后确认执行计划</strong><p id="run-admission" class="field-note">请先连接管理接口。</p></div><button class="primary" type="submit" id="run-submit" disabled>开始评测</button></div>
+        <label class="question-picker">题目<select id="question"><option value="">连接后加载题目</option></select></label>
+        <div class="question-layout">
+          <div class="question-paper">
+            <label>题目内容 <small id="question-version">版本未知</small><textarea id="prompt" rows="10" maxlength="16000" required placeholder="选择题目，或输入你想测试的问题"></textarea></label>
+            <p id="prompt-note" class="field-note">同一题目会发送给本次测试的每个样本。</p>
+          </div>
+          <aside class="question-options" aria-label="测试选项">
+            <label>模型<input id="models" list="model-options" maxlength="200" required placeholder="选择或输入模型 ID" autocomplete="off"><datalist id="model-options"></datalist></label>
+            <label>思考强度<select id="reasoning"><option value="">默认</option><option value="none">不使用推理</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option></select></label>
+            <p id="reasoning-note" class="field-note">支持情况以所选模型为准。</p>
+            <label>回答数量<input id="samples" type="number" min="1" max="8" value="1" required></label>
+            <p class="field-note">1–8 份回答，每份使用独立会话。</p>
+            <details class="output-options"><summary>输出设置</summary><label>输出上限（token）<input id="max-tokens" type="number" min="64" max="32768" value="2048" required></label><label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="0"></label></details>
+          </aside>
+        </div>
+        <div class="submit-bar question-submit"><div><strong id="run-plan">选择模型后开始测试</strong><p id="run-admission" class="field-note">请先连接管理接口。</p></div><button class="primary" type="submit" id="run-submit" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 3 11 7-11 7Z"/></svg>开始测试</button></div>
       </form>
     </section>
-    <section id="manual-results" class="hidden" aria-label="当前任务">
-      <div class="result-heading"><div><h2>回答与证据</h2><p id="run-subtitle">执行、判定与处置分别记录。</p></div><div class="button-row"><button id="run-rerun" class="subtle small hidden">同配置重跑</button><button id="run-export" class="subtle small hidden">脱敏导出</button><button id="run-cancel" class="danger small hidden">取消任务</button></div></div>
-      <div id="run-empty" class="empty-state"><h3>选择一项任务，开始审阅</h3><p>新建评测收集回答，或从任务历史打开已有证据。</p><div class="button-row"><button class="primary" data-manual-view="setup">配置新评测</button><button class="subtle" data-manual-view="history">查看历史</button></div></div>
-      <div id="run-content" class="hidden"><div id="run-meta" class="run-meta" role="status" aria-live="polite"></div><div class="progress-track" role="progressbar" aria-label="已结束样本进度" aria-valuemin="0" aria-valuemax="100"><div id="run-progress"></div></div>
-        <details id="run-frozen" class="frozen-details"><summary>本轮冻结条件 <span>题目、模型、参数与判据</span></summary><div id="run-frozen-data"></div></details>
-        <div class="comparison-toolbar"><div class="model-selectors"><label>查看模型<select id="compare-model-a"></select></label><label>对比模型<select id="compare-model-b"></select></label></div><label>样本<select id="sample-filter"><option value="all">全部样本</option></select></label><span class="field-note">执行完成 ≠ 回答正确</span></div><div id="sample-list" class="sample-list"></div>
+    <nav class="view-nav question-result-nav" aria-label="测试结果"><button data-manual-view="setup" class="active">本次测试 <span id="task-indicator"></span></button><button data-manual-view="history">测试记录 <span id="history-count"></span></button></nav>
+    <section id="manual-results" aria-label="本次测试结果">
+      <div class="result-heading"><div><h2 class="sr-only">任务信息</h2><p id="run-subtitle">每份回答单独展示，不自动评分。</p></div><div class="button-row result-actions"><button id="run-cancel" class="danger small hidden">停止测试</button><details id="task-actions" class="task-actions hidden" open><summary>任务操作</summary><div class="button-row"><button id="run-rerun" class="subtle small hidden">同配置再测试</button><button id="run-export" class="subtle small hidden">下载结果</button></div></details></div></div>
+      <div id="run-empty" class="empty-state question-empty"><p>选好题目后点击“开始测试”，模型回答会显示在这里。</p></div>
+      <div id="run-feedback" class="notice hidden" role="status" aria-live="polite"></div><div id="run-content" class="hidden"><div id="run-meta" class="run-meta" role="status" aria-live="polite"></div><div class="progress-track" role="progressbar" aria-label="已结束样本进度" aria-valuemin="0" aria-valuemax="100"><div id="run-progress"></div></div>
+        <details id="run-frozen" class="frozen-details"><summary>本次测试详情 <span>题目与执行条件</span></summary><div id="run-frozen-data"></div></details>
+        <div class="comparison-toolbar"><div class="model-selectors"><label>查看模型<select id="compare-model-a"></select></label><label>对比模型<select id="compare-model-b"></select></label></div><label>样本<select id="sample-filter"><option value="all">全部样本</option></select></label></div><div id="sample-list" class="sample-list"></div>
       </div>
     </section>
-    <section id="manual-history" class="hidden" aria-label="任务历史"><div class="section-heading heading-row"><div><h2>任务历史</h2><p>打开记录可查看冻结条件、回答和评审。</p></div><span id="history-total">0 个任务</span></div><div id="history-list" class="history-list"><p class="empty-line">连接管理接口后查看历史。</p></div><div class="pagination"><button class="subtle small" id="history-prev" disabled>上一页</button><span id="history-page">第 1 页</span><button class="subtle small" id="history-next" disabled>下一页</button></div></section>
+    <section id="manual-history" class="hidden" aria-label="测试记录"><div class="section-heading heading-row"><div><h2>测试记录</h2><p>查看之前的题目和模型回答。</p></div><span id="history-total">0 个任务</span></div><div id="history-list" class="history-list"><p class="empty-line">连接管理接口后查看历史。</p></div><div class="pagination"><button class="subtle small" id="history-prev" disabled>上一页</button><span id="history-page">第 1 页</span><button class="subtle small" id="history-next" disabled>下一页</button></div></section>
   </section>
   <section id="page-operations" class="hidden" aria-labelledby="operations-title">
     <div class="page-heading"><div><h1 id="operations-title">质量运维</h1><p>模型结果提供证据。质量暂停限制整个凭证所有模型的新业务执行。</p></div><button class="subtle" id="settings-open">全局开关与预算</button></div>
@@ -75,6 +76,7 @@
           <label
             >检测模型<textarea
               id="rule-models"
+              maxlength="1600"
               required
               rows="2"
               placeholder="每行一个模型"
@@ -238,6 +240,13 @@
         </div>
       </form>
     </dialog>
+<div id="local-feedback" class="sr-only" role="status" aria-live="polite"></div>
+<dialog id="action-dialog" aria-labelledby="action-title" aria-describedby="action-description"><form id="action-form">
+  <div class="dialog-heading"><h2 id="action-title"></h2><button type="button" class="subtle" data-close="action-dialog">关闭</button></div>
+  <p id="action-description"></p><label id="action-name-field" hidden>预设名称<input id="action-name" maxlength="100" aria-describedby="action-error" autocomplete="off"></label>
+  <p id="action-error" class="field-error hidden" role="alert" tabindex="-1"></p>
+  <div class="button-row end"><button type="button" id="action-cancel" class="subtle" data-close="action-dialog">取消</button><button type="submit" id="action-confirm" class="primary">确认</button></div>
+</form></dialog>
 <dialog aria-labelledby="evidence-title" id="evidence-dialog" class="wide-dialog"><div class="dialog-heading"><h2 id="evidence-title">样本条件与证据</h2><button class="subtle" data-close="evidence-dialog">关闭</button></div><div id="evidence-content"></div></dialog>
 <dialog aria-labelledby="release-title" id="release-dialog" class="release-dialog"><div class="dialog-heading"><h2 id="release-title">人工解除质量暂停</h2><button class="subtle" data-close="release-dialog">关闭</button></div><p>只释放身份、归属与动作版本匹配的暂停。</p><div id="release-feedback" class="notice hidden" role="status" aria-live="polite"></div><div id="release-preview"></div><div class="release-consequence"><strong>解除后，相关规则继续停止</strong><p>旧失败计数清零。人工禁用、原生冷却和其他归属的限制继续生效；需另行显式恢复检测规则。</p></div><div class="button-row end"><button class="subtle" data-close="release-dialog">取消</button><button id="release-refresh" class="subtle hidden">刷新并核对状态</button><button id="release-confirm" class="danger">确认解除，保持检测停止</button></div></dialog>
 <dialog aria-labelledby="preview-title" id="preview-dialog" class="preview-dialog">
@@ -255,5 +264,5 @@
         referrerpolicy="no-referrer"
       ></iframe>
     </dialog>
-<script type="application/json" id="build-info">{"application":"model-quality","ui_version":"4.0.0"}</script>
+<script type="application/json" id="build-info">{"application":"model-quality","ui_version":"4.2.0"}</script>
 </body></html>

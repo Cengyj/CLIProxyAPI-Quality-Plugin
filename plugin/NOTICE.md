@@ -2,7 +2,11 @@
 
 The native C ABI scaffolding is adapted from the CLIProxyAPI host-model-callback example in the supplied 8.0.67 source archive. CLIProxyAPI is MIT licensed; its notice is retained in CPA_LICENSE. The public /v8 SDK is a separate dependency.
 
-sub2api (https://github.com/ranxi2001/sub2api) commit ccf997c73868083d96c0bec56e71c1a34d26c98a was studied as an architectural reference. Its root LICENSE is LGPL-3.0. No sub2api source code, question text, artwork, or UI assets were copied into this plugin. The bounded constraint question and implementation are original. A generic pelican-on-bicycle drawing prompt is independently written.
+sub2api (https://github.com/ranxi2001/sub2api) commit ccf997c73868083d96c0bec56e71c1a34d26c98a was studied as an architectural reference. Its root LICENSE is LGPL-3.0. The candy question text in `quality/questiondata/candy-sub2api.txt` is copied verbatim from `CANDY_PROMPT` in `frontend/src/utils/intelligenceTest.ts` at that commit and remains under LGPL-3.0; it is not relicensed under this plugin's MIT license. No original copyright notice was present in that source file. The upstream license and the incorporated GPL-3.0 terms are retained in `licenses/sub2api-LGPL-3.0.txt` and `licenses/GPL-3.0.txt`. The copied text is supplied with the plugin source and embedded into the dynamic library; rebuilding the supplied module regenerates the embedded question.
+
+The candy question ID is `logic-candy`, version `sub2api-ccf997c7-v1`. The frozen prompt adds the upstream integer-only delivery contract, and the reference answer 21 applies only to this exact version. Editing the question requires a custom question with its own review standard. The local solver test independently checks the minimum by enumerating the shape and flavor counts. Manual question tests do not grade automatically by default.
+
+No sub2api Vue components, Go implementation, artwork, or UI assets were copied. The bounded constraint questions, their implementations, and both pelican-on-bicycle prompts are independently written. Legacy question IDs retain their existing prompts and versions for saved rules and history.
 
 This plugin has no published GitHub repository. Its required metadata source field is explicitly local-workspace:CLIProxyAPI-Quality-Plugin; the delivered source and checksummed host baseline are authoritative for this build.
 
