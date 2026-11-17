@@ -59,6 +59,10 @@ func New(c Config, h Host) (*Engine, error) {
 		cancel()
 		return nil, errors.Join(e, s.Close())
 	}
+	if !en.Capabilities().QualityPause {
+		// Keep saved settings and pause ownership intact; only the effective capability changes.
+		en.cfg.AutomaticPause = false
+	}
 	for i := 0; i < c.Workers; i++ {
 		en.wg.Add(1)
 		go en.worker()
@@ -178,7 +182,15 @@ func (en *Engine) Close() error {
 	close(en.closeDone)
 	return en.closeErr
 }
-func (en *Engine) Config() Config { en.mu.Lock(); defer en.mu.Unlock(); return en.cfg }
+func (en *Engine) Config() Config {
+	en.mu.Lock()
+	defer en.mu.Unlock()
+	c := en.cfg
+	if !en.Capabilities().QualityPause {
+		c.AutomaticPause = false
+	}
+	return c
+}
 func (en *Engine) UpdateConfig(c Config) error {
 	if e := c.Validate(); e != nil {
 		return e
@@ -187,6 +199,9 @@ func (en *Engine) UpdateConfig(c Config) error {
 	defer en.mu.Unlock()
 	if err := en.mutableLocked(); err != nil {
 		return err
+	}
+	if c.AutomaticPause && !en.Capabilities().QualityPause {
+		return unsupportedQuality()
 	}
 	if c.DataDir != en.cfg.DataDir || c.Workers != en.cfg.Workers || c.Queue != en.cfg.Queue {
 		return fmt.Errorf("data_dir/workers/queue require host reconfiguration")

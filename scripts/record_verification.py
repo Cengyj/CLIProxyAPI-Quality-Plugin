@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--name', required=True)
-    parser.add_argument('--scope', choices=('host', 'plugin', 'ui', 'native', 'all'), required=True)
+    parser.add_argument('--scope', choices=('host', 'plugin', 'ui', 'native', 'runtime', 'all'), required=True)
     parser.add_argument('--cwd', default='.')
     parser.add_argument('--artifact', action='append', default=[], help='Built output to hash after a successful command, relative to workspace')
     parser.add_argument('command', nargs=argparse.REMAINDER)
@@ -35,14 +35,16 @@ def main():
         result = subprocess.run(command, cwd=cwd, stdout=log, stderr=subprocess.STDOUT)
     final = snapshot(args.scope)
     changed = sorted(k for k in inputs.keys() | final.keys() if inputs.get(k) != final.get(k))
+    missing_outputs = [rel for rel in args.artifact if not (ROOT / rel).is_file()]
     record = {
-        'result': 'passed' if result.returncode == 0 and not changed else 'failed',
+        'result': 'passed' if result.returncode == 0 and not changed and not missing_outputs else 'failed',
         'started_at': started, 'finished_at': datetime.now(timezone.utc).isoformat(),
         'command': command, 'cwd': str(cwd.relative_to(ROOT)), 'scope': args.scope,
         'exit_code': result.returncode, 'changed_during_validation': changed,
+        'missing_outputs': missing_outputs,
         'input_sha256': inputs, 'log': str(log_path.relative_to(ROOT)),
         'log_sha256': digest(log_path),
-        'output_sha256': {rel: digest(ROOT / rel) for rel in args.artifact},
+        'output_sha256': {rel: digest(ROOT / rel) for rel in args.artifact if rel not in missing_outputs},
     }
     report_path.write_text(json.dumps(record, indent=2) + '\n')
     print(json.dumps({'name': args.name, 'result': record['result'], 'report': str(report_path), 'changed': changed}))

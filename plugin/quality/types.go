@@ -7,7 +7,35 @@ import (
 	"time"
 )
 
-const Version = "0.3.1"
+const Version = "0.15.0"
+
+type HostCapabilities struct {
+	Mode                 string `json:"mode"`
+	QualityPause         bool   `json:"quality_pause"`
+	ManualRelease        bool   `json:"manual_release"`
+	VerifiedEvidence     bool   `json:"verified_evidence"`
+	ModelOperationCancel bool   `json:"model_operation_cancel"`
+	StreamClose          bool   `json:"stream_close"`
+}
+
+func officialCapabilities() HostCapabilities {
+	return HostCapabilities{Mode: "official_observation", StreamClose: true}
+}
+
+func unsupportedQuality() error {
+	return fmt.Errorf("unsupported: official CPA does not provide independent quality pause or release")
+}
+
+func (en *Engine) Capabilities() HostCapabilities {
+	if host, ok := en.host.(interface{ Capabilities() HostCapabilities }); ok {
+		return host.Capabilities()
+	}
+	return officialCapabilities()
+}
+
+func (en *Engine) unsupportedRule(r *Rule) bool {
+	return !en.Capabilities().QualityPause && (r.Action == "pause_credential" || r.AutomaticPause)
+}
 
 type Config struct {
 	DataDir           string `json:"data_dir" yaml:"data_dir"`
@@ -179,6 +207,7 @@ type Target struct {
 	UnsupportedReason    string   `json:"unsupported_reason,omitempty"`
 }
 type Action struct {
+	Status          string    `json:"status,omitempty"`
 	AuthID          string    `json:"auth_id"`
 	OwnerPlugin     string    `json:"owner_plugin"`
 	RuleID          string    `json:"rule_id"`

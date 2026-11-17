@@ -1,6 +1,6 @@
 package quality
 
-// ManagementRoute is the native wire declaration of an exact authenticated v8 route.
+// ManagementRoute is the native wire declaration of an exact authenticated plugin route.
 type ManagementRoute struct {
 	Method string
 	Path   string

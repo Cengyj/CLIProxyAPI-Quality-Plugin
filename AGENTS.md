@@ -2,6 +2,43 @@
 
 This workspace is for a standalone CLIProxyAPI native plugin with manual model evaluation and credential quality operations.
 
+## Current official-host compatibility decision
+
+The user approved the official-host compatibility plan on 2026-11-17. Keep CPA
+unmodified and distribute one installable native plugin. Use the official
+authenticated `/v0/management/plugins/model-quality/` extension channel; this
+explicit approval supersedes the earlier v8-only requirement below. Login,
+account storage, inspection and the embedded Go/Sobek helper belong to the
+plugin. Use only public SDK callbacks. Model tests and observation remain;
+independent quality pause/release and automatic pause are unavailable on the
+official host and must be rejected rather than emulated with operator disable.
+Never silently clear historical pause ownership. The unchanged test checkout is
+`workspaces/CLIProxyAPI-official/`; verify it against the source baseline without
+editing or formatting it. The older patched checkout and patches are historical
+artifacts, not requirements for this release.
+
+On 2026-11-17 the user additionally requested one-action account login: a new
+account-list 2FA login authorizes successful credential upload and enablement,
+without another candidate confirmation or page navigation. Scheduled repair uses
+its existing explicit global/account permissions, never reactivates a credential
+that became disabled, and rechecks policy before saving. Historical pending jobs
+are not automatically replayed. Identity conflicts, retained quality pauses and
+uncertain writes still block; official callbacks still have no atomic CAS.
+
+The user explicitly approved upgrading the existing local CPA on port 8317 while
+preserving its two accounts on 2026-11-17. This includes a stopped-instance backup,
+verified conversion of the one legacy account binding into plugin-owned storage,
+and moving the old login runtime out of the credential scan directory. This is a
+local deployment operation, not a real-account test. Do not start a real login,
+call a model, or change existing credential contents as part of verification.
+
+On 2026-11-17 the user requested reference-aligned reset-2FA and logout-all
+account actions. These are explicit manual actions only. Preserve confirmed new
+seeds before any subsequent logout/OAuth; unknown mutations stay quarantined and
+must never be replayed on retries, restart, inspection, or local completion.
+Deployment and routine verification do not authorize executing these operations
+against real accounts. Keep the official host unchanged.
+
 ## Task specification
 
 Read `PROMPT_CN.md` for the complete implementation task and `docs/RESEARCH_CN.md` for verified source findings. The latest direct user instruction takes precedence over these files.

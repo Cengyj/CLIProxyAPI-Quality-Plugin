@@ -1,0 +1,16 @@
+{
+  "name": "model-quality-login-runtime",
+  "version": "1.2.2",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "playwright-core": "1.62.1"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "self-test": "node worker.mjs --self-test"
+  }
+}

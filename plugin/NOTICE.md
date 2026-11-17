@@ -11,19 +11,34 @@ No sub2api Vue components, Go implementation, artwork, or UI assets were copied.
 This plugin has no published GitHub repository. Its required metadata source field is explicitly local-workspace:CLIProxyAPI-Quality-Plugin; the delivered source and checksummed host baseline are authoritative for this build.
 
 
-## CPA management UI color reference
+## CPA management UI component reference
 
-The native browser UI adapts the semantic color roles from
-https://github.com/router-for-me/Cli-Proxy-API-Management-Center at commit
-`d0126752201a35ff999bd2a1d4741215542258a8`, specifically
-`src/styles/themes.scss`. The warm-gray light, white, and warm-black dark
-palettes inform the plugin's own page, surface, text, border, action, focus,
-and status tokens. Selected shades are adjusted within those color families
-for text and control contrast.
+The native browser UI follows the plugin-management page and shared component
+language of https://github.com/router-for-me/Cli-Proxy-API-Management-Center
+at fixed commit `d0126752201a35ff999bd2a1d4741215542258a8`. The local reference
+is `workspaces/cpa-management-reference/`; its HEAD was rechecked for UI 4.3.0.
+The sources studied and adapted are:
 
-The plugin's information architecture, navigation, page composition, and
-components are independently implemented in plain HTML, CSS, and JavaScript
-ES modules. It does not copy the host's business menus or use React.
+- `src/styles/themes.scss`, `variables.scss`, `components.scss`, and `layout.scss`.
+- Shared Button, Input, Select, Card, ToggleSwitch, Table, Modal, Sheet, and
+  EmptyState components under `src/components/ui/`.
+- `src/features/plugins/PluginsPage.module.scss` and PluginResourcePage.
+- ProviderTabs and SectionCard styles under the authFiles and config features.
+- The public applied-theme behavior in `src/stores/useThemeStore.ts`.
+
+Warm light, white and warm dark colors retain separate page, card, field,
+floating, hover, text, border, action, focus and status roles. Selected shades
+are adjusted within those color families for text and control contrast;
+mobile targets are enlarged for touch input. Buttons, fields, cards,
+underlined navigation, switches, table density and dialog structure follow
+the host reference. The implementation remains native HTML, CSS and
+JavaScript ES modules with Go embed, without React or a runtime component
+library. Host business menus and global navigation are not duplicated.
+
+UI 4.3.0 supersedes the earlier color-only reference policy. Theme following
+reads only the recognizable same-origin parent's public applied `data-theme`
+attribute. It neither reads authentication stores nor establishes plugin
+management authorization.
 
 A read-only unauthenticated static fetch of the local deployed management
 page on 2026-11-14 confirmed its title and seven palette values against the
@@ -53,3 +68,16 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Plugin-owned account and login service
+
+The account persistence, login jobs, inspection and OAuth integration now live in
+`plugin/login/` and use the unchanged public CPA callbacks. The bounded Codex
+PKCE and token exchange client is adapted from the supplied MIT-licensed CPA
+8.0.67 sources; CPA_LICENSE remains included. No CPA internal package is imported.
+
+The native Go/Sobek executable is embedded in the platform-specific plugin, with
+its own NOTICE, source inventories and dependency licenses preserved inside the
+embedded archive. See `login-runtime-go/NOTICE.md`: the user-supplied toSub2-go-port
+checkout has no root project license, so this notice does not infer a whole-project
+MIT license for that engine.

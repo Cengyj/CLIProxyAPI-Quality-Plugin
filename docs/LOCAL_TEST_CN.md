@@ -2,7 +2,7 @@
 
 > 此文记录的 mock 演示已停止。当前用于自行测试的完整 CPA 部署位于固定端口 8317，请阅读 [LOCAL_CPA_CN.md](LOCAL_CPA_CN.md)。以下地址与进程信息仅保留为历史演示记录。
 
-部署日期：2026-11-14。当前运行 model-quality 0.3.0 与 quality capability v2 补丁宿主，macOS arm64。2FA 登录仍为待实施方案，本实例没有登录工作台。
+部署日期：2026-11-14。当前运行 model-quality 0.3.0 与 quality capability v2 补丁宿主，macOS arm64。该记录属于历史测试实例；当前 8317 已部署 0.4.0 / UI 5.1.0 的 OpenAI 登录工作台，见 [LOCAL_CPA_CN.md](LOCAL_CPA_CN.md)。
 
 ## 访问
 

@@ -15,6 +15,10 @@ type semanticsHost struct {
 	releaseErr                                           error
 }
 
+func (h *semanticsHost) Capabilities() HostCapabilities {
+	return HostCapabilities{Mode: "offline_verified_fixture", QualityPause: true, ManualRelease: true, VerifiedEvidence: true, ModelOperationCancel: true, StreamClose: true}
+}
+
 func (h *semanticsHost) Targets(context.Context) ([]Target, error) { return h.targets, nil }
 func (h *semanticsHost) Actions(context.Context) ([]Action, error) {
 	return append([]Action(nil), h.actions...), nil

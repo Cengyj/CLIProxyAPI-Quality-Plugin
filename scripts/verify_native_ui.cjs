@@ -60,7 +60,7 @@ async function finish(id) {
   assert.equal(unauthorized.status, 401);
   checks.push('actual v8 management rejects unauthenticated targets');
   const resourceHashes = {};
-  for (const name of ['index.html', 'app.js', 'client.js', 'view.js', 'style.css']) {
+  for (const name of ['index.html', 'app.js', 'client.js', 'view.js', 'login.js', 'style.css']) {
     const response = await fetch(new URL(name, demo.page_url));
     assert.equal(response.status, 200);
     const returned = Buffer.from(await response.arrayBuffer());
@@ -70,7 +70,7 @@ async function finish(id) {
     assert.deepEqual(returned, packaged, `Native host resource ${name} must match static build bytes`);
     resourceHashes[name] = require('node:crypto').createHash('sha256').update(returned).digest('hex');
   }
-  checks.push('all five native-host resources are byte-identical to UI source and static build');
+  checks.push('all six native-host resources are byte-identical to UI source and static build');
   const targetReply = await api('/targets');
   const target = targetReply.items.find((entry) => entry.models.includes('mq-reasoner'));
   assert(target, `mock target missing: ${JSON.stringify(targetReply)}`);
@@ -91,34 +91,46 @@ async function finish(id) {
   await page.goto(demo.page_url);
   await page.locator('#run-form').waitFor();
   assert.equal((await stats()).calls.length, initialCalls);
-  await page.locator('#connection-top').click();
+  await page.locator('#connection-open').click();
   await page.locator('#management-key').fill(demo.admin_key);
   await page.locator('#connection-form button[type=submit]').click();
   await page.waitForFunction(() => document.getElementById('connection-state').textContent === '已连接');
   assert.equal((await stats()).calls.length, initialCalls);
-  assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
+  assert.deepEqual(await page.evaluate(() => ({ local: Object.fromEntries(Object.entries(localStorage)), session: Object.fromEntries(Object.entries(sessionStorage)) })), { local: { 'model-quality:management-key:/v8/management/plugins/model-quality': demo.admin_key }, session: {} }, 'Only the authenticated management key is saved in browser storage');
   checks.push('actual public shell and authenticated connection make no model calls');
   await page.locator('#target').selectOption(target.auth_id);
-  await page.locator('#models').fill('mq-reasoner');
-  await page.locator('#question').selectOption('logic-boxes');
-  await page.locator('#samples').fill('2');
-  await page.locator('.setup-card .advanced summary').click();
+  assert.equal(await page.locator('#models').evaluate(node => node.tagName), 'SELECT');
+  assert.deepEqual(await page.locator('#models option').evaluateAll(nodes => nodes.filter(node => node.value && !node.disabled).map(node => node.value)), target.models, 'The native UI exposes the selected credential registry aliases');
+  await page.locator('#models').selectOption('mq-reasoner');
+  assert.deepEqual(await page.locator('#reasoning option').evaluateAll(nodes => nodes.map(node => node.value)), ['', ...target.reasoning['mq-reasoner'].Levels], 'Native PascalCase reasoning capabilities reach the selector');
+  await page.locator('#refresh').click();
+  await page.locator('#refresh:not([aria-busy])').waitFor();
+  assert.equal(await page.locator('#models').inputValue(), 'mq-reasoner');
+  assert.equal((await stats()).calls.length, initialCalls, 'Credential, model and refresh choices do not call the native upstream');
+  checks.push('native credential models and PascalCase reasoning capabilities populate selectors without typed IDs or model calls');
+  await page.locator('#question').selectOption('logic-candy');
+  await page.locator('#samples').selectOption('2');
   await page.locator('#reasoning').selectOption('medium');
+  assert.equal(await page.locator('#run-form').locator('#max-tokens, #temperature, .output-options').count(), 0);
   const runReply = page.waitForResponse(
     (response) => response.url().endsWith('/runs') && response.request().method() === 'POST',
   );
   await page.locator('#run-submit').click();
-  const created = await (await runReply).json();
+  const runResponse = await runReply;
+  assert.deepEqual(runResponse.request().postDataJSON().parameters, { stream: true, reasoning_effort: 'medium' });
+  const created = await runResponse.json();
   assert(created.run_id, JSON.stringify(created));
   const run = await finish(created.run_id);
   assert.equal(run.status, 'completed', JSON.stringify(run));
+  assert.deepEqual(run.config.parameters, { max_tokens: 2048, stream: true, reasoning_effort: 'medium' });
+  checks.push('manual form sends no output cap or temperature; backend freezes a bounded output budget without a temperature override');
   assert.equal(run.samples.length, 2);
   for (const secret of [demo.admin_key, demo.business_key, 'mq-fake-upstream-a', 'mq-fake-upstream-b'])
     assert(!JSON.stringify(run).includes(secret), 'Run export must exclude secret values');
   for (const sample of run.samples) {
     assert.equal(sample.execution_status, 'completed', JSON.stringify(sample));
-    assert.equal(sample.output, '4', JSON.stringify(sample));
-    assert.equal(sample.quality_verdict, 'correct', JSON.stringify(sample));
+    assert.equal(sample.output, '21', JSON.stringify(sample));
+    assert.equal(sample.quality_verdict, 'unknown', JSON.stringify(sample));
     assert.equal(sample.comparable, true, JSON.stringify(sample));
   }
   assert(
@@ -138,7 +150,95 @@ async function finish(id) {
     fullPage: true,
   });
   fs.writeFileSync(path.join(out, 'native-manual-run.json'), JSON.stringify(run, null, 2) + '\n');
-  checks.push('native C ABI streaming multi-sample fixed-auth alias reasoning run');
+  checks.push('native C ABI streaming candy question: two independent fixed-auth, alias-mapped, ungraded answers with explicit reasoning');
+  assert.equal(run.config.judge.mode, 'manual');
+  assert.equal((await api('/actions')).items.length, 0);
+  const manualChecksStart = (await stats()).calls.length;
+  const submitAndFinish = async () => {
+    const response = page.waitForResponse(r => r.url().endsWith('/runs') && r.request().method() === 'POST');
+    await page.locator('#run-submit').click();
+    const reply = await (await response).json();
+    const current = await finish(reply.run_id);
+    await page.waitForFunction(id => document.getElementById('run-frozen-data').textContent.includes(id), reply.run_id);
+    return current;
+  };
+  const setup = async () => {
+    if (await page.locator('#reading-toggle').getAttribute('aria-pressed') === 'true') await page.locator('#reading-toggle').click();
+    await page.locator('#page-manual .view-nav [data-manual-view=results]').click();
+    assert.equal(await page.locator('#manual-setup').isVisible(), true, 'Current answers retain the visible configuration');
+  };
+  await setup();
+  const repeatReply = page.waitForResponse(response => response.url().endsWith('/runs') && response.request().method() === 'POST');
+  await page.locator('#run-rerun').click();
+  const repeatedResponse = await repeatReply;
+  assert.deepEqual(repeatedResponse.request().postDataJSON().parameters, run.config.parameters);
+  const repeated = await repeatedResponse.json();
+  assert.deepEqual((await finish(repeated.run_id)).config.parameters, run.config.parameters);
+  await page.waitForFunction(id => document.getElementById('run-frozen-data').textContent.includes(id), repeated.run_id);
+  checks.push('explicit same-configuration rerun reuses the frozen parameters');
+  const originalPrompt = await page.locator('#prompt').inputValue();
+  const changedPrompt = originalPrompt + '\n补充条件：解释你的推理。';
+  await page.locator('#prompt').fill(changedPrompt);
+  await page.locator('#samples').selectOption('1');
+  assert.match(await page.locator('#prompt-note').textContent(), /自定义/);
+  const initialSettings = await api('/settings');
+  await api('/settings', 'PUT', { ...initialSettings, max_output_tokens: 512 });
+  const edited = await submitAndFinish();
+  assert.equal(edited.status, 'completed');
+  assert.deepEqual(edited.config.parameters, { max_tokens: 512, stream: true, reasoning_effort: 'medium' });
+  await api('/settings', 'PUT', initialSettings);
+  checks.push('manual submission works with a lower global output cap and freezes that cap');
+  assert.equal(edited.config.question.id, 'custom');
+  assert.equal(edited.config.question.prompt, changedPrompt);
+  assert(!edited.config.question.answer);
+  await setup();
+  await page.locator('#question').selectOption('custom');
+  await page.locator('#prompt').fill('离线自定义题：请给出一个整数。');
+  const custom = await submitAndFinish();
+  assert.equal(custom.config.question.id, 'custom');
+  assert.equal(custom.samples[0].quality_verdict, 'unknown');
+  checks.push('editing a built-in becomes a frozen custom question without an inherited answer; explicit custom questions work');
+  await setup();
+  await page.locator('#question').selectOption('visual-pelican-html');
+  await page.locator('#models').selectOption('mq-visual');
+  const visualReasoning = target.reasoning['mq-visual'];
+  const visualLevels = visualReasoning?.Levels || [];
+  assert.equal(await page.locator('#reasoning').inputValue(), visualLevels.includes('medium') ? 'medium' : '', 'A compatible reasoning choice is retained, otherwise it returns to default');
+  if (await page.locator('#reasoning').isEnabled()) await page.locator('#reasoning').selectOption('');
+  else assert.equal(await page.locator('#reasoning').inputValue(), '', 'A model without selectable reasoning stays on the host default');
+  const visual = await submitAndFinish();
+  assert.match(visual.samples[0].output, /<!doctype html>/i);
+  await page.waitForFunction(() => document.querySelector('[data-preview-sample]'));
+  assert.equal(await page.locator('.sample pre').textContent(), visual.samples[0].output);
+  await page.locator('[data-preview-sample]').click();
+  await page.frameLocator('#safe-preview').locator('svg').waitFor();
+  assert.equal(await page.locator('#safe-preview').getAttribute('sandbox'), '');
+  assert.equal(await page.locator('#safe-preview').getAttribute('inert'), '');
+  await page.screenshot({ path: path.join(out, 'native-html-preview.png'), animations: 'disabled' });
+  await page.keyboard.press('Escape');
+  await page.locator('#preview-dialog').waitFor({state: 'hidden'});
+  checks.push('native HTML output remains exact escaped source and opens only in an inert empty-sandbox preview');
+  await setup();
+  await page.locator('#question').selectOption('logic-candy');
+  await page.locator('#models').selectOption('mq-reasoner');
+  await mode('hold');
+  const cancelReply = page.waitForResponse(r => r.url().endsWith('/runs') && r.request().method() === 'POST');
+  await page.locator('#run-submit').click();
+  const cancelCreated = await (await cancelReply).json();
+  await page.locator('#run-cancel').waitFor({state: 'visible'});
+  for (let attempt=0; attempt<100 && !(await stats()).calls.some(call=>call.mode==='hold'); attempt++) await new Promise(resolve=>setTimeout(resolve,50));
+  assert((await stats()).calls.some(call=>call.mode==='hold'),'Cancellation begins after the fake upstream receives the held request');
+  await page.locator('#run-cancel').click();
+  await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('已取消'));
+  assert.equal((await finish(cancelCreated.run_id)).status, 'cancelled');
+  await mode('correct');
+  await page.locator('[data-manual-view=history]').click();
+  await page.locator('[data-run="' + cancelCreated.run_id + '"]').waitFor();
+  assert.equal((await api('/actions')).items.length, 0);
+  checks.push('first-byte cancellation propagates through the native host and immediately appears in history without quality actions');
+  const manualChecksCalls = (await stats()).calls.length - manualChecksStart;
+  assert.equal(manualChecksCalls, run.samples.length + 4);
+  await setup();
 
   const settings = await api('/settings');
   await api('/settings', 'PUT', { ...settings, automatic_pause: true, scheduling_enabled: false });
@@ -271,7 +371,7 @@ async function finish(id) {
   assert.equal((await api('/actions')).items.length, 0);
   assert.equal(
     (await stats()).calls.length,
-    initialCalls + 6,
+    initialCalls + 6 + manualChecksCalls,
     'Only explicit manual and active rule runs may reach the upstream',
   );
   checks.push('only explicit administrator resume permits a fresh detection after release');
@@ -279,7 +379,7 @@ async function finish(id) {
   const report = {
     result: 'passed',
     verified_at: new Date().toISOString(),
-    source_sha256: Object.fromEntries(['index.html', 'app.js', 'client.js', 'view.js', 'style.css'].map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root, 'plugin/ui', name))).digest('hex')])),
+    source_sha256: Object.fromEntries(['index.html', 'app.js', 'client.js', 'view.js', 'login.js', 'style.css'].map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root, 'plugin/ui', name))).digest('hex')])),
     binary_sha256: Object.fromEntries(['cli-proxy-api-quality', process.platform === 'darwin' ? 'model-quality.dylib' : 'model-quality.so'].map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root, 'artifacts', name))).digest('hex')])),
     platform: `${process.platform}/${process.arch}`,
     browser: await browser.version(),
@@ -290,8 +390,8 @@ async function finish(id) {
     checks,
     upstream_calls: (await stats()).calls.length,
     cleanup: 'demo stopped by finally handler',
-    screenshots: ['native-manual-page.png', 'native-operations-page.png', 'native-release-preview.png'],
-    screenshot_sha256: Object.fromEntries(['native-manual-page.png', 'native-operations-page.png', 'native-release-preview.png'].map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(out, name))).digest('hex')])),
+    screenshots: ['native-manual-page.png', 'native-operations-page.png', 'native-release-preview.png', 'native-html-preview.png'],
+    screenshot_sha256: Object.fromEntries(['native-manual-page.png', 'native-operations-page.png', 'native-release-preview.png', 'native-html-preview.png'].map((name) => [name, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(out, name))).digest('hex')])),
   };
   if (fs.existsSync(path.join(out, 'native-ui-failure.txt')))
     fs.unlinkSync(path.join(out, 'native-ui-failure.txt'));

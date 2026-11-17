@@ -185,6 +185,9 @@ func (en *Engine) takeDueRulesLocked(now time.Time) ([]scheduledRule, error) {
 	due := []scheduledRule{}
 	c := changes()
 	for _, r := range en.rules {
+		if en.unsupportedRule(r) {
+			continue
+		}
 		if r.Enabled && ruleStatus(r) == "detecting" && r.SchedulingEnabled && !r.NextRun.IsZero() && !r.NextRun.After(now) {
 			n := cloneRule(r)
 			n.NextRun = nextRun(*r, now)

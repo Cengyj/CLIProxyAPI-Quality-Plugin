@@ -13,18 +13,20 @@ import tempfile
 import threading
 import time
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import ProxyHandler, Request, build_opener
 
 from release_support import UI_NAMES, digest
 
 
 def request(url, body=None, key=None, method=None, raw=False, expected=200):
+    assert urlparse(url).hostname == '127.0.0.1', 'Candidate smoke permits only loopback HTTP'
     headers = {'Content-Type': 'application/json'}
     if key:
         headers['Authorization'] = 'Bearer ' + key
     req = Request(url, json.dumps(body).encode() if body is not None else None, headers, method=method)
     try:
-        response = urlopen(req, timeout=5)
+        response = build_opener(ProxyHandler({})).open(req, timeout=5)
     except HTTPError as error:
         if error.code != expected:
             raise
@@ -65,6 +67,17 @@ def main():
             report.update(ui_version=manifest['ui_version'], plugin_version=manifest['version'],
                           build_id=manifest['build_id'], payload_files=len(manifest['files']))
             checks.append('every unpacked payload file matches the release manifest')
+            build_env = {**os.environ, 'GOPROXY': 'off', 'GOSUMDB': 'off', 'GOTOOLCHAIN': 'local'}
+            rebuilt_library = dest / 'rebuilt-model-quality.dylib'
+            build_command = ['go', 'build', '-mod=readonly', '-buildmode=c-shared', '-o', str(rebuilt_library), './cmd/model-quality']
+            rebuilt = subprocess.run(build_command, cwd=install / 'plugin', env=build_env,
+                                     capture_output=True, text=True, timeout=180)
+            if rebuilt.returncode:
+                raise RuntimeError('unpacked offline source build failed: ' + rebuilt.stdout + rebuilt.stderr)
+            assert rebuilt_library.is_file()
+            report['unpacked_source_build'] = {'result': 'passed', 'network': 'GOPROXY=off; GOSUMDB=off; GOTOOLCHAIN=local', 'dependencies': 'existing local Go module cache; dependencies are not vendored',
+                                                'library_sha256': digest(rebuilt_library), 'exit_code': rebuilt.returncode}
+            checks.append('unpacked source module builds a native shared library with cached dependencies and network downloads disabled, including embedded question text and complete licenses')
             demo_script = install / 'scripts/demo.py'
             env = os.environ.copy()
             env['MQ_DEMO_DIR'] = str(dest / 'isolated-runtime')
@@ -91,7 +104,7 @@ def main():
                     assert data == expected == (install / 'artifacts/ui' / name).read_bytes(), name
                     served[name] = hashlib.sha256(data).hexdigest()
                 report['served_sha256'] = served
-                checks.append('loaded package library serves all five UI assets byte-identical to source and static distribution')
+                checks.append('loaded package library serves all six UI assets byte-identical to source and static distribution')
                 request(base + '/v8/management/plugins/model-quality/targets', expected=401)
                 targets = api('/targets')['items']
                 target = next(item for item in targets if 'mq-reasoner' in item['models'])
@@ -114,13 +127,29 @@ def main():
                 assert run['samples'][0]['quality_verdict'] == 'correct' and run['samples'][0]['comparable']
                 assert api('/actions')['items'] == []
                 checks.append('package native C ABI completes fixed-credential streaming evaluation without a quality action')
+                candy_config = {**config, 'question_id': 'logic-candy', 'samples': 2, 'judge': {'mode': 'manual'}}
+                candy_run = finish(api('/runs', {**candy_config, 'idempotency_key': 'package-candy'}, expected=202)['run_id'])
+                assert candy_run['status'] == 'completed' and len(candy_run['samples']) == 2
+                assert all(sample['output'] == '21' and sample['quality_verdict'] == 'unknown' for sample in candy_run['samples'])
+                question = next(item for item in api('/questions')['items'] if item['id'] == 'logic-candy')
+                edited_prompt = question['prompt'] + '\nPackage smoke custom condition.'
+                custom_run = finish(api('/runs', {**candy_config, 'samples': 1, 'question_id': 'custom',
+                                                  'prompt': edited_prompt, 'idempotency_key': 'package-custom'}, expected=202)['run_id'])
+                assert custom_run['config']['question']['id'] == 'custom'
+                assert custom_run['config']['question']['prompt'] == edited_prompt
+                assert not custom_run['config']['question'].get('answer')
+                html_run = finish(api('/runs', {**candy_config, 'samples': 1, 'question_id': 'visual-pelican-html',
+                                                'models': ['mq-visual'], 'idempotency_key': 'package-html'}, expected=202)['run_id'])
+                assert html_run['samples'][0]['output'].lower().startswith('<!doctype html>')
+                assert html_run['samples'][0]['quality_verdict'] == 'unknown' and api('/actions')['items'] == []
+                checks.append('package current question flow returns two ungraded candy answers, preserves a custom edit without inherited answer, and returns complete HTML source')
                 api('/presets', {'name': 'Package smoke preset', 'config': config})
                 settings = api('/settings')
                 api('/settings', {**settings, 'automatic_pause': True, 'scheduling_enabled': False}, 'PUT')
                 rule = api('/rules', {**config, 'name': 'Package smoke guard', 'action': 'pause_credential',
                                      'enabled': True, 'scheduling_enabled': False, 'automatic_pause': True,
                                      'fail_threshold': 3})
-                assert len(stats()['calls']) == 1
+                assert len(stats()['calls']) == 5
                 checks.append('saving a preset, settings and a rule makes no model calls')
                 mode('incorrect')
                 for _ in range(3):
@@ -131,7 +160,7 @@ def main():
                 calls_before = len(stats()['calls'])
                 api('/runs', {**config, 'idempotency_key': 'package-blocked'}, expected=409)
                 api('/rules/run', {'id': rule['id']}, expected=409)
-                assert len(stats()['calls']) == calls_before == 4
+                assert len(stats()['calls']) == calls_before == 8
                 checks.append('three complete incorrect rounds pause the credential and block new manual/rule evaluation without upstream calls')
                 binding = {'rule_id': rule['id'], 'action_id': action['action_id'], 'action_revision': action['action_revision']}
                 api('/actions/preview', binding)

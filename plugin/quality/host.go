@@ -31,59 +31,90 @@ func (h *NativeHost) call(ctx context.Context, method string, request, response 
 }
 
 func (h *NativeHost) Check() error {
-	var c struct {
-		Version           int  `json:"version"`
-		ManualReleaseOnly bool `json:"manual_release_only"`
-		ManagementV8      bool `json:"management_v8"`
-		ModelOperations   bool `json:"model_operations"`
-		QualityPause      bool `json:"quality_pause"`
-		QualityRetest     bool `json:"quality_retest"`
-		AutomaticRecovery bool `json:"automatic_recovery"`
+	var response struct {
+		Files []pluginapi.HostAuthFileEntry `json:"files"`
 	}
-	if e := h.call(context.Background(), "host.quality.capabilities", struct{}{}, &c); e != nil {
-		return fmt.Errorf("model-quality requires the bundled quality host patch: %w", e)
-	}
-	if c.Version < 2 || !c.ManualReleaseOnly || !c.ManagementV8 || !c.ModelOperations || !c.QualityPause || c.QualityRetest || c.AutomaticRecovery {
-		return fmt.Errorf("incompatible host quality capability")
-	}
-	return nil
+	return h.call(context.Background(), "host.auth.list", struct{}{}, &response)
 }
+
+func (h *NativeHost) Capabilities() HostCapabilities { return officialCapabilities() }
+
 func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
-	var r struct {
-		Targets []Target `json:"targets"`
+	var listed struct {
+		Files []pluginapi.HostAuthFileEntry `json:"files"`
 	}
-	e := h.call(ctx, "host.quality.targets", struct{}{}, &r)
-	return r.Targets, e
+	if err := h.call(ctx, "host.auth.list", struct{}{}, &listed); err != nil {
+		return nil, err
+	}
+	var catalog pluginapi.HostAuthModelsResponse
+	if err := h.call(ctx, "host.auth.models", pluginapi.HostAuthModelsRequest{}, &catalog); err != nil {
+		return nil, err
+	}
+	models := make(map[string][]string, len(catalog.Credentials))
+	for _, item := range catalog.Credentials {
+		models[item.ID] = append([]string{}, item.Models...)
+	}
+	out := make([]Target, 0, len(listed.Files))
+	seen := make(map[string]bool)
+	for _, item := range listed.Files {
+		if item.ID == "" || item.AuthIndex == "" || seen[item.ID] {
+			continue
+		}
+		seen[item.ID] = true
+		var current pluginapi.HostAuthGetRuntimeResponse
+		err := h.call(ctx, "host.auth.get_runtime", pluginapi.HostAuthGetRequest{AuthIndex: item.AuthIndex}, &current)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		verified := err == nil && current.Auth.ID == item.ID && current.Auth.AuthIndex == item.AuthIndex
+		if verified {
+			item = current.Auth
+		}
+		provider := item.Provider
+		if provider == "" {
+			provider = item.Type
+		}
+		reasons := []string{}
+		disabled := item.Disabled || item.Status == "disabled"
+		if disabled {
+			reasons = append(reasons, "operator_disabled")
+		}
+		if item.Unavailable {
+			reasons = append(reasons, "native_unavailable")
+		}
+		if !verified {
+			reasons = append(reasons, "runtime_status_unavailable")
+		}
+		out = append(out, Target{
+			AuthID: item.ID, AuthIndex: item.AuthIndex, Provider: provider, Type: item.Type,
+			Models: append([]string{}, models[item.ID]...), Reasoning: map[string]any{},
+			ManualDisabled: disabled, EffectiveAvailable: verified && !disabled && !item.Unavailable,
+			Reasons: reasons, UnsupportedReason: "official_host_quality_pause_unavailable",
+		})
+	}
+	return out, nil
 }
 func (h *NativeHost) Actions(ctx context.Context) ([]Action, error) {
-	var r struct {
-		Actions []Action `json:"actions"`
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	e := h.call(ctx, "host.quality.actions", struct{}{}, &r)
-	return r.Actions, e
+	return nil, unsupportedQuality()
 }
-func (h *NativeHost) Pause(ctx context.Context, a Action) (Action, error) {
-	var r struct {
-		Action Action `json:"action"`
+func (h *NativeHost) Pause(ctx context.Context, _ Action) (Action, error) {
+	if err := ctx.Err(); err != nil {
+		return Action{}, err
 	}
-	e := h.call(ctx, "host.quality.pause", a, &r)
-	return r.Action, e
+	return Action{}, unsupportedQuality()
 }
-func (h *NativeHost) Release(ctx context.Context, a Action) error {
-	var r any
-	id, _ := ctx.Value(managementCallbackKey{}).(string)
-	if id == "" {
-		return fmt.Errorf("blocked: manual release requires active authenticated management request")
+func (h *NativeHost) Release(ctx context.Context, _ Action) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	request := struct {
-		Action
-		HostCallbackID string `json:"host_callback_id"`
-	}{a, id}
-	return h.call(ctx, "host.quality.release", request, &r)
+	return unsupportedQuality()
 }
 func (h *NativeHost) Execute(ctx context.Context, e Execution) (s Sample) {
 	start := time.Now()
-	s = Sample{Model: e.Model, ExecutionStatus: "failed", QualityVerdict: "unknown"}
+	s = Sample{Model: e.Model, ExecutionStatus: "failed", QualityVerdict: "unknown", Evidence: Evidence{Reason: "official_host_evidence_unavailable"}}
 	defer func() {
 		s.TotalMS = time.Since(start).Milliseconds()
 		if ctx.Err() != nil {
@@ -92,28 +123,10 @@ func (h *NativeHost) Execute(ctx context.Context, e Execution) (s Sample) {
 		}
 	}()
 
-	var op struct {
-		ID string `json:"operation_id"`
-	}
-	if err := h.call(ctx, "host.model.operation_open", struct{}{}, &op); err != nil {
-		s.Error = scrubError(fmt.Errorf("open model operation: %w", err))
+	if err := ctx.Err(); err != nil {
 		return s
 	}
-	if op.ID == "" {
-		s.Error = "host returned empty operation"
-		return s
-	}
-	var once sync.Once
-	cancel := func() {
-		once.Do(func() {
-			var ignored any
-			if err := h.call(context.Background(), "host.model.cancel", map[string]string{"operation_id": op.ID}, &ignored); err != nil {
-				log.WithField("operation", "cancel").Warn("model-quality: host operation cleanup failed")
-			}
-		})
-	}
-	stop := context.AfterFunc(ctx, cancel)
-	defer func() { stop(); cancel() }()
+
 	doc := ojson.NewDocString(`{}`)
 	messages := []map[string]string{}
 	if e.System != "" {
@@ -133,7 +146,7 @@ func (h *NativeHost) Execute(ctx context.Context, e Execution) (s Sample) {
 			return s
 		}
 	}
-	req := pluginapi.HostModelExecutionRequest{EntryProtocol: "openai", ExitProtocol: "openai", Model: e.Model, Stream: e.Parameters.Stream, Body: doc.Bytes(), AuthID: e.AuthID, ForcedProvider: e.Provider, OperationID: op.ID, TrafficSource: e.Source}
+	req := pluginapi.HostModelExecutionRequest{EntryProtocol: "openai", ExitProtocol: "openai", Model: e.Model, Stream: e.Parameters.Stream, Body: doc.Bytes(), AuthID: e.AuthID, ForcedProvider: e.Provider}
 
 	limit := e.ResponseLimit
 	if limit == 0 {
@@ -147,14 +160,18 @@ func (h *NativeHost) Execute(ctx context.Context, e Execution) (s Sample) {
 	if req.Stream {
 		var opened pluginapi.HostModelStreamResponse
 		err = h.call(ctx, "host.model.execute_stream", req, &opened)
-		s.Evidence = Evidence(opened.Evidence)
 		if opened.StreamID != "" {
-			defer func() {
-				var ignored any
-				if err := h.call(context.Background(), "host.model.stream_close", pluginapi.HostModelStreamCloseRequest{StreamID: opened.StreamID}, &ignored); err != nil {
-					log.WithField("operation", "stream_close").Warn("model-quality: host operation cleanup failed")
-				}
-			}()
+			var once sync.Once
+			closeStream := func() {
+				once.Do(func() {
+					var ignored any
+					if closeErr := h.call(context.Background(), "host.model.stream_close", pluginapi.HostModelStreamCloseRequest{StreamID: opened.StreamID}, &ignored); closeErr != nil {
+						log.Warn("model-quality: host stream cleanup failed")
+					}
+				})
+			}
+			stop := context.AfterFunc(ctx, closeStream)
+			defer func() { stop(); closeStream() }()
 		}
 		if err == nil && (opened.StatusCode < 200 || opened.StatusCode >= 300) {
 			err = fmt.Errorf("upstream HTTP %d", opened.StatusCode)
@@ -171,9 +188,6 @@ func (h *NativeHost) Execute(ctx context.Context, e Execution) (s Sample) {
 				var chunk pluginapi.HostModelStreamReadResponse
 				if err = h.call(ctx, "host.model.stream_read", pluginapi.HostModelStreamReadRequest{StreamID: opened.StreamID}, &chunk); err != nil {
 					break
-				}
-				if chunk.Evidence != nil {
-					s.Evidence = Evidence(*chunk.Evidence)
 				}
 				if len(chunk.Payload) > limit {
 					err = fmt.Errorf("fragment exceeds response limit")
@@ -193,7 +207,8 @@ func (h *NativeHost) Execute(ctx context.Context, e Execution) (s Sample) {
 					}
 				}
 				if chunk.Done {
-					if collector.rawEvents && chunk.UpstreamComplete {
+					// Official callbacks report stream EOF but do not prove upstream final conditions.
+					if collector.rawEvents && collector.finish != "" {
 						collector.done = true
 					}
 					err = collector.End()
@@ -204,7 +219,6 @@ func (h *NativeHost) Execute(ctx context.Context, e Execution) (s Sample) {
 	} else {
 		var response pluginapi.HostModelExecutionResponse
 		err = h.call(ctx, "host.model.execute", req, &response)
-		s.Evidence = Evidence(response.Evidence)
 		if err == nil {
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
 				err = fmt.Errorf("upstream HTTP %d", response.StatusCode)

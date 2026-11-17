@@ -1,4 +1,4 @@
-// Management credentials and cancellation stay inside one page-local session.
+// Requests use a page-local session; the app manages explicit credential persistence.
 export class DiscardedRequest extends Error {
   constructor() {
     super('The request belongs to an inactive view or session.');
@@ -35,14 +35,39 @@ export class ManagementClient {
   }
 
   async request(path, method = 'GET', body) {
+    return this.#send(this.prefix, path, method, body);
+  }
+
+  async requestHostLogin(path, method = 'GET', body, idempotencyKey) {
+    const allowed = {
+      '/capabilities': ['GET'], '/targets': ['GET'],
+      '/jobs': ['GET'], '/detail': ['GET'], '/logs': ['GET'], '/candidate': ['GET'],
+      '/callback': ['POST'], '/cancel': ['POST'], '/commit': ['POST'], '/discard': ['POST'],
+      '/vault/status': ['GET'],
+      '/accounts': ['GET'], '/accounts/detail': ['GET'], '/accounts/import': ['POST'], '/accounts/entry': ['PUT', 'DELETE'],
+      '/accounts/security': ['POST'], '/accounts/security/complete': ['POST'],
+      '/accounts/start': ['POST'], '/accounts/inspect': ['POST'], '/accounts/settings': ['GET', 'PUT'],
+    };
+    const parsed = new URL(path, 'https://management.invalid');
+    const queryKeys = new Set(['id', 'auth_id', 'cursor', 'limit']);
+    if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || path.split('?')[0] !== parsed.pathname || parsed.origin !== 'https://management.invalid' || parsed.hash ||
+        !allowed[parsed.pathname]?.includes(method) || [...parsed.searchParams.keys()].some(key => !queryKeys.has(key))) {
+      throw new Error('不支持的登录管理操作。');
+    }
+    if (method !== 'GET' && !idempotencyKey) throw new Error('登录操作缺少请求标识。');
+    return this.#send(`${this.prefix}/login`, parsed.pathname + parsed.search, method, body, idempotencyKey);
+  }
+
+  async #send(prefix, path, method, body, idempotencyKey) {
     if (!this.#key) throw new Error('请先连接管理接口。');
     const epoch = this.#epoch;
     const controller = new AbortController();
     this.#pending.add(controller);
     const headers = { Authorization: `Bearer ${this.#key}`, Accept: 'application/json' };
+    if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     try {
-      const response = await fetch(`${this.prefix}${path}`, {
+      const response = await fetch(`${prefix}${path}`, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -54,7 +79,7 @@ export class ManagementClient {
       const text = response.status === 204 ? '' : await response.text();
       if (epoch !== this.#epoch) throw new DiscardedRequest();
       if (response.status === 401) {
-        this.onUnauthorized?.();
+        this.onUnauthorized?.(this.#key);
         throw new DiscardedRequest();
       }
       let data = {};

@@ -86,11 +86,9 @@ export const statusTag = (status) =>
     statusLabels[status] || status || '未知',
     ['failed', 'error', 'conflict', 'blocked'].includes(status)
       ? 'bad'
-      : ['completed', 'complete', 'success', 'succeeded', 'released'].includes(status)
-        ? 'good'
-        : ['queued', 'running'].includes(status)
-          ? 'warn'
-          : 'neutral',
+      : ['queued', 'running'].includes(status)
+        ? 'warn'
+        : 'neutral',
   );
 export const verdictTag = (verdict) =>
   tag(
@@ -350,7 +348,7 @@ export function renderRunEvidence(run = {}) {
   const comparable = samples.filter((sample) => sample.comparable === true).length;
   const unknown = samples.filter((sample) => !['correct', 'incorrect'].includes(sample.quality_verdict)).length;
   const metaHTML = simple
-    ? `<div class="run-state-line">${statusTag(run.status)}<strong>${completed} / ${planned} 份回答已结束</strong><span>不自动评分</span></div><div class="run-context-line"><span>${escapeHTML(config.question?.title || config.question_id || '题目测试')}</span></div>${run.error || run.block_reason ? `<p class="notice error">${escapeHTML(run.error || run.block_reason)}</p>` : ''}`
+    ? `<div class="run-state-line">${statusTag(run.status)}<strong class="run-model" title="${escapeHTML(models.join(' / '))}">${escapeHTML(models.join(' / '))}</strong><span>${completed} / ${planned} 份回答已结束 · 不自动评分</span><span>${escapeHTML(config.question?.title || config.question_id || '题目测试')}</span></div>${run.error || run.block_reason ? `<p class="notice error">${escapeHTML(run.error || run.block_reason)}</p>` : ''}`
     : `<div class="run-state-line">${statusTag(run.status)}<strong>${completed} / ${planned} 样本已结束</strong><span>${comparable} 份可比较 · ${unknown} 份无法判断</span></div>
     <div class="run-context-line"><span>凭证 <strong>${escapeHTML(evidenceValue(config.auth_id))}</strong></span><span>${escapeHTML(config.question?.title || config.question_id || '题目未知')}</span><span>动作：${escapeHTML(statusLabels[run.action_status] || run.action_status || '未知')}</span></div>
     ${run.error || run.block_reason ? `<p class="notice error">${escapeHTML(run.error || run.block_reason)}</p>` : ''}`;
@@ -368,7 +366,7 @@ export function renderRunEvidence(run = {}) {
   return {
     metaHTML,
     conditionsHTML: renderFrozenConditions(run),
-    samplesHTML: `<div class="comparison-grid${simple ? ' question-test-results' : ''}" data-key="models">${groups || '<p class="empty-line">本轮没有记录模型或样本。</p>'}</div>${controlHTML}`,
+    samplesHTML: `<div class="comparison-grid${simple ? ` question-test-results${models.length === 1 ? ' single-question' : ''}` : ''}" data-key="models">${groups || '<p class="empty-line">本轮没有记录模型或样本。</p>'}</div>${controlHTML}`,
     completed,
     planned,
   };
@@ -401,7 +399,7 @@ export function renderRuleRows(rules, targets, { connected, targetsFresh }) {
     const blockedBy = held ? (rule.blocked_auth_id ? `受暂停凭证 ${rule.blocked_auth_id} 影响` : '目标或依赖凭证暂停，所有检测停止') : !ready ? '凭证状态未确认，请刷新' : '';
     const id = escapeHTML(rule.id);
     const schedule = !enabled ? '已停止检测' : rule.scheduling_enabled ? (rule.cron || `每 ${rule.interval_seconds ?? '未知'} 秒`) : '仅手动执行';
-    return `<tr>
+    return `<tr data-key="rule:${id}">
       <td data-label="规则 / 目标"><div class="rule-info"><strong>${escapeHTML(rule.name || rule.id)}</strong><small>${escapeHTML(config.auth_id || '目标未知')}</small><details><summary>${escapeHTML(config.models?.length ?? 0)} 个检测模型 · 条件</summary><p>${escapeHTML(config.models?.join(' / ') || '模型未知')}</p><dl class="evidence-facts">${operationFact('题目', config.question_id)}${operationFact('每模型样本', config.samples)}${operationFact('规则版本', rule.revision)}${operationFact('对照凭证', config.control_auth_id || '未配置')}${operationFact('判题', config.judge?.mode === 'llm' ? `独立模型 · ${config.judge.auth_id || '未知'} · ${config.judge.model || '未知'}` : config.judge?.mode === 'deterministic' ? '题型专用确定性判题' : config.judge?.mode === 'manual' ? '人工评审' : '未知')}</dl></details></div></td>
       <td data-label="检测与处置">${tag(label, held ? 'warn' : enabled ? 'good' : 'neutral')}<small>${rule.action === 'pause_credential' ? '允许配置凭证暂停' : rule.action === 'observe_only' ? '只观察' : '处置未知'}<br>规则自动暂停许可：${rule.automatic_pause === true ? '开' : rule.automatic_pause === false ? '关' : '未知'}<br>同时受全局自动暂停许可约束</small>${blockedBy ? `<small class="error-note">${escapeHTML(blockedBy)}</small>` : ''}</td>
       <td data-label="调度">${escapeHTML(schedule)}<small>${escapeHTML(rule.timezone || '时区未知')}${enabled && rule.scheduling_enabled ? `<br>下次 ${escapeHTML(date(rule.next_run_at || rule.next_run))}` : ''}</small>${enabled && rule.scheduling_enabled ? '<small>同时受全局调度许可约束</small>' : ''}</td>
@@ -415,22 +413,22 @@ export function renderTargetRows(targets) {
   if (!targets.length) return '<tr><td colspan="5" class="empty-line">没有可展示的凭证。请连接并刷新；列表缺项不表示原有暂停已解除。</td></tr>';
   return targets.map((target) => {
     const reasons = target.reasons ?? target.unavailable_reasons;
-    return `<tr>
+    return `<tr data-key="target:${escapeHTML(targetID(target))}">
       <td data-label="凭证"><strong>${escapeHTML(target.provider || '未知')} · ${escapeHTML(target.auth_index || targetID(target) || '未知')}</strong><small>${escapeHTML(targetID(target) || '标识未知')}<br>${escapeHTML(target.type || '类型未知')}</small></td>
       <td data-label="人工禁用">${tag(target.manual_disabled === true ? '人工禁用' : target.manual_disabled === false ? '未禁用' : '未知', target.manual_disabled ? 'bad' : 'neutral')}</td>
-      <td data-label="质量暂停">${tag(target.quality_paused === true ? '整个凭证已暂停' : target.quality_paused === false ? '无质量暂停' : '未知', target.quality_paused ? 'warn' : 'neutral')}</td>
+      <td data-label="质量暂停">${tag(target.unsupported_reason === 'official_host_quality_pause_unavailable' ? '官方接口不支持' : target.quality_paused === true ? '整个凭证已暂停' : target.quality_paused === false ? '无质量暂停' : '未知', target.quality_paused ? 'warn' : 'neutral')}</td>
       <td data-label="有效状态 / 原因">${tag(target.effective_available === true ? '可用' : target.effective_available === false ? '不可用' : '状态未知', target.effective_available === true ? 'good' : 'neutral')}${restrictionList(reasons, Array.isArray(reasons) ? '未报告其他限制' : '限制原因未知')}</td>
-      <td data-label="能力与范围"><small>${target.can_pause === true ? '支持凭证级质量暂停' : target.can_pause === false ? '不支持质量暂停' : '暂停能力未知'}<br>${escapeHTML(target.unsupported_reason || '暂停后仅人工解除')}</small></td>
+      <td data-label="能力与范围"><small>${target.can_pause === true ? '支持凭证级质量暂停' : target.can_pause === false ? '不支持质量暂停' : '暂停能力未知'}<br>${escapeHTML(target.unsupported_reason === 'official_host_quality_pause_unavailable' ? '支持模型测试与观察' : target.unsupported_reason || '暂停后仅人工解除')}</small></td>
     </tr>`;
   }).join('');
 }
 
 export function renderActionItems(actions, targets) {
-  if (!actions.length) return '<div class="empty-line calm-empty"><strong>没有已加载的质量暂停动作</strong><span>凭证状态与其他限制见下方。</span></div>';
+  if (!actions.length) return '<div class="empty-line calm-empty"><strong>没有已加载的质量暂停动作</strong><span>在“凭证限制”中核对当前可用状态。</span></div>';
   return actions.map((action, index) => {
     const target = targets.find((entry) => targetID(entry) === action.auth_id);
     const owned = action.owner_plugin === 'model-quality';
-    return `<article class="action-item">
+    return `<article class="action-item" data-key="action:${escapeHTML(action.action_id || action.id || action.auth_id)}">
       <div class="action-summary"><div class="button-row">${tag('质量暂停', 'warn')}<strong>${escapeHTML(target?.auth_index || action.auth_id || '凭证未知')}</strong></div><p>${escapeHTML(action.reason ? reasonLabel(action.reason) : '暂停原因未提供')}</p><small>影响整个凭证所有模型的新业务执行 · ${escapeHTML(date(action.created_at || action.time))}</small><dl class="evidence-facts">${operationFact('暂停归属', action.owner_plugin)}${operationFact('检测规则', action.rule_id)}${operationFact('动作版本', action.action_revision)}</dl></div>
       <div class="action-decision">${action.evidence_run_id ? `<button class="text-button" data-run="${escapeHTML(action.evidence_run_id)}">查看失败证据</button>` : ''}<p>${target?.manual_disabled ? '同时存在人工禁用；解除质量暂停后仍然生效。' : target ? '解除后相关检测规则仍停止，须另行恢复。' : '凭证当前不可发现；解除前需核对身份与剩余限制。'}</p><button class="danger small" data-action-preview="${index}" ${!owned || !(action.action_id || action.id) || action.action_revision == null ? 'disabled' : ''}>预览并解除自身暂停</button>${!owned ? '<small>仅可解除本插件持有的暂停</small>' : ''}</div>
     </article>`;

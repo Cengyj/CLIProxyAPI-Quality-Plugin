@@ -11,7 +11,7 @@ import (
 )
 
 func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
-	path := strings.TrimPrefix(req.Path, "/v8/management/plugins/model-quality")
+	path := strings.TrimPrefix(req.Path, "/v0/management/plugins/model-quality")
 	var result any
 	var err error
 	status := 200
@@ -20,6 +20,7 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 		var items []Target
 		items, err = en.host.Targets(ctx)
 		result = page(items, req)
+		result.(map[string]any)["capabilities"] = en.Capabilities()
 	case "GET /questions":
 		items := Questions()
 		for i := range items {
@@ -137,12 +138,12 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 			err = en.DeletePreset(body.ID)
 		}
 	case "GET /settings":
-		result = en.Config()
+		result = en.settingsResponse()
 	case "PUT /settings":
 		var c Config
 		if err = DecodeStrict(req.Body, &c); err == nil {
 			err = en.UpdateConfig(c)
-			result = en.Config()
+			result = en.settingsResponse()
 		}
 	default:
 		err = fmt.Errorf("not_found: route")
@@ -161,4 +162,11 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 		body = []byte(`{"error":{"code":"serialization_error"}}`)
 	}
 	return pluginapi.ManagementResponse{StatusCode: status, Headers: http.Header{"Content-Type": {"application/json; charset=utf-8"}, "Cache-Control": {"no-store"}, "X-Content-Type-Options": {"nosniff"}}, Body: body}
+}
+
+func (en *Engine) settingsResponse() any {
+	return struct {
+		Config
+		Capabilities HostCapabilities `json:"capabilities"`
+	}{en.Config(), en.Capabilities()}
 }

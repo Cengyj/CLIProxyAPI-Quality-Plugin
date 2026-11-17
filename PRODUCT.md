@@ -26,14 +26,16 @@ A paused credential cannot be tested again, including as a control or judge. Onl
 
 The administrator runs a standalone CPA host with the required extensions and opens the plugin's browser interface. The existing implementation uses plain HTML, CSS, and JavaScript ES modules embedded in a separate Go module and native C ABI library. It has no frontend framework, external font service, runtime CDN, or analytics dependency.
 
-The two existing workspaces are:
+The three independent workspaces are:
 
 - **IQ question testing** (current UI label: 智商测试): select a credential, choose the versioned candy logic or pelican HTML question (or a custom question), edit the prompt if desired, select one model and reasoning effort, request 1–8 independent answers, and read the responses below the same form. Manual runs do not score automatically or invoke a control/judge credential. Editing built-in text submits a custom question without inheriting its answer. Copy, isolated HTML preview, cancellation, eligible rerun, redacted download and history remain available. Legacy questions, presets and multi-model histories remain readable through their existing APIs; the current manual surface does not expose a general evaluation-configuration workflow.
 - **Quality operations** (质量运维): configure observation and pause rules, explicitly run or schedule detection, inspect credential restrictions and evidence, pause or resume detection rules, review audit history and budgets, and preview then manually release an owned credential pause.
 
+- **OpenAI login** (OpenAI 登录): manage locally persisted OpenAI accounts imported as email/password/TOTP, explicitly authorize and bind CPA credentials, and inspect locally recorded CPA authentication state. Separate global inspection, global automatic reauthorization and per-account consent enable bounded automatic repair only for verified bindings with explicit credential-level auth failures. Inspection defaults to 15 minutes (5–1440 configurable), with automation off. First and manual authorization require candidate confirmation. Temporary login and job history remain separate subviews; authentication repair never releases quality pauses or resumes rules.
+
 Tasks run in the background independently of the browser. Closing the page does not cancel a task. An explicit cancellation uses the host operation lifecycle. Interrupted tasks are retained after restart without automatically replaying potentially billable model requests.
 
-The administrator connects using the existing management key, held only in page memory. The public `/v0/resource/plugins/model-quality/index.html` entry serves static content; data and actions use authenticated same-origin `/v8/management/plugins/model-quality/` APIs. Opening the page, connecting, or saving configuration does not call a model.
+The administrator connects using the existing management key. After successful authentication, the plugin stores that key as plaintext in its own endpoint-scoped localStorage entry and restores the connection on reload, reopen, or browser back navigation. Explicit disconnect and HTTP 401 clear the saved key; transient connection failures retain it. Storage restrictions fall back to page memory with a visible explanation. The plugin never reads the parent CPA authentication store, and account passwords, TOTP secrets and OAuth callbacks remain outside browser storage. The public `/v0/resource/plugins/model-quality/index.html` entry serves static content; data and actions use authenticated same-origin `/v8/management/plugins/model-quality/` APIs. Opening the page, connecting, or saving configuration does not call a model.
 
 ## Capabilities and Constraints
 
@@ -62,20 +64,20 @@ The administrator connects using the existing management key, held only in page 
 - Preserve fixed credential selection, host model mapping, thinking configuration, and the final payload rules. Conditions that cannot be proven comparable cannot support automatic pause.
 - Keep calls, samples, output, concurrency, queues, storage, and known usage bounded. Development and demonstrations use offline fake upstreams and isolated fake credentials, never real model accounts or copied production credentials.
 - Model-generated HTML/SVG is untrusted. Show escaped source and an isolated preview without scripts, external network access, forms, navigation, or access to the parent page.
-- Never expose management keys or raw credentials through URLs, browser storage, logs, or exports. Production prompts and answers are not stored by default.
+- Never expose management keys or raw credentials through URLs or logs. The administrator explicitly requested persistence of the plugin management key in its scoped browser storage entry; account passwords, TOTP secrets and OAuth callbacks remain outside browser storage. At the administrator’s explicit request, OpenAI management views show full emails and identity IDs; opening account details displays saved passwords/TOTP in plaintext controls. Saved login materials and login proxy settings persist as plaintext in the host’s local database; no encryption initialization or storage key is required. Management authentication, restricted file permissions and transient secret handling remain intact. Task reports include full identity metadata and fixed diagnostic codes but do not include passwords, TOTP seeds or tokens. Production prompts and answers are not stored by default.
 - Account groups, automatic credential deletion, external notifications, BPS, Jev, ModelTrace, and Codex ticket probes are outside the current core scope.
 
 ## Brand Commitments
 
-The existing product name is **Model Quality**, plugin ID `model-quality`, with the Chinese descriptor 模型质量控制台. The interface currently uses Simplified Chinese and the two workspace labels recorded above. Preserve the precise distinctions between 暂停检测规则, 质量暂停, 人工禁用, 有效可用状态, and 人工解除.
+The existing product name is **Model Quality**, plugin ID `model-quality`, with the Chinese descriptor 模型质量控制台. The interface currently uses Simplified Chinese and the three workspace labels recorded above. Preserve the precise distinctions between 暂停检测规则, 质量暂停, 人工禁用, 有效可用状态, and 人工解除.
 
-The interface is an independent console. The 2026-11-14 redesign inherits CPA Management Center color roles only: warm light, white, and warm dark, adapted into accessible plugin semantic tokens. Navigation, composition, components, and interaction are independently designed around evaluation and credential operations. The fixed reference and license are recorded in plugin/NOTICE.md; DESIGN.md documents the implemented system.
+The interface follows the CPA Management Center plugin-management page and shared component language. The 2026-11-14 host-alignment instruction supersedes the previous color-only inheritance: warm light, white and warm dark themes, buttons, fields, cards, underlined navigation, switches, tables and dialogs share clear host references. Contrast and mobile target sizes may be adapted for readability. The CPA iframe is the primary setting and relies on the host shell; direct access retains a compact identity and complete tools. Same-origin theme following reads only the publicly applied parent theme attribute and never implies plugin authentication. The fixed reference and license are recorded in plugin/NOTICE.md; DESIGN.md documents the implemented system.
 
 ## Evidence on Hand
 
 - [AGENTS.md](AGENTS.md), the override at the beginning of [PROMPT_CN.md](PROMPT_CN.md), and [docs/RESEARCH_CN.md](docs/RESEARCH_CN.md) establish current invariants and source boundaries. Historical retest/recovery requirements below those overrides are superseded.
 - [README_CN.md](README_CN.md), [docs/DESIGN_CN.md](docs/DESIGN_CN.md), [docs/API_CN.md](docs/API_CN.md), and [docs/INSTALL_CN.md](docs/INSTALL_CN.md) describe current capabilities, semantics, deployment requirements, and limits.
-- [plugin/ui/index.html](plugin/ui/index.html), its sibling JavaScript/CSS files, and [docs/UI_CN.md](docs/UI_CN.md) contain the existing two-workspace interface. Desktop light/dark and mobile captures are in `artifacts/verification/`; they use mock data and are not customer or production evidence.
+- [plugin/ui/index.html](plugin/ui/index.html), its sibling JavaScript/CSS files, and [docs/UI_CN.md](docs/UI_CN.md) contain the existing three-workspace interface. Desktop light/dark and mobile captures are in `artifacts/verification/`; they use mock data and are not customer or production evidence.
 - [docs/TEST_REPORT_CN.md](docs/TEST_REPORT_CN.md) records module, native lifecycle, fake-API UI, and native-host browser verification. These are existing reports, not tests rerun by init. [docs/DEMO_CN.md](docs/DEMO_CN.md) documents the offline demonstration; `python3 scripts/demo.py start` reports its local page URL, and `python3 scripts/demo.py stop` stops it.
 - [plugin/NOTICE.md](plugin/NOTICE.md) and [docs/SOURCE_AUDIT_CN.md](docs/SOURCE_AUDIT_CN.md) record reference sources and licensing. This context does not establish customer testimonials, commercial pricing, public adoption, or generalized model benchmark claims.
 
@@ -93,6 +95,6 @@ The current web interface declares `zh-CN`, supports narrow screens and reduced-
 
 ## Planned Work and Open Decisions
 
-[docs/OPENAI_2FA_PLAN_CN.md](docs/OPENAI_2FA_PLAN_CN.md) describes a pending OpenAI credential-login workbench. It is a proposal, not an implemented capability or a new primary workspace. Its implementation timing and delivery are outside this init request. If developed, successful authorization must not imply quality approval, release a quality pause, resume a rule, clear cooldown, or trigger model execution.
+OpenAI account management is implemented as an independent workspace. [docs/OPENAI_ACCOUNTS_CN.md](docs/OPENAI_ACCOUNTS_CN.md) records current behavior; older planning documents are historical. Successful authorization does not imply quality approval, release a quality pause, resume a rule, clear cooldown, or trigger model execution.
 
 Broader team roles, public-distribution onboarding requirements, and a formal accessibility standard remain unconfirmed. Do not introduce them as established product requirements.

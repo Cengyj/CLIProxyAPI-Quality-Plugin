@@ -1,6 +1,6 @@
 # OpenAI 2FA 登录源码调研
 
-调研日期：2026-11-14。本文记录已读源码事实；实施决策见 [OPENAI_2FA_PLAN_CN.md](OPENAI_2FA_PLAN_CN.md)。本轮未登录真实账号、未提交密码或 TOTP、未调用模型，也未运行外部登录程序。
+调研日期：2026-11-14；实施补充：2026-11-15。第 1–8 节保留首次调研的已读源码事实与当时状态；新增实现见第 9 节及 [OPENAI_2FA_IMPLEMENTATION_CN.md](OPENAI_2FA_IMPLEMENTATION_CN.md)。首次调研未登录真实账号、未提交密码或 TOTP、未调用模型，也未运行外部登录程序。后续仅用离线假认证页面验证新本地运行时，仍未验证真实账号。
 
 ## 1. 固定参考与核查范围
 
@@ -144,3 +144,13 @@ sub2api `tools/openai_codex_oauth_adapter.py` 对固定 blob 做逐点改造：�
 已核对 sub2api HEAD、相关源码与测试定义，并补齐固定依赖的协议源码及许可证；协议文件 blob 与 adapter 固定校验匹配。源码证据哈希保存在 `artifacts/research/openai-2fa/source-evidence.json`。
 
 未运行 sub2api 单测、未安装登录运行时、未验证真实登录成功率。测试源码中的离线通过条件不能代替现场账号验收。当前交付仍是 model-quality 0.3.0；本轮新增的是调研与实施方案，尚未新增可运行的登录功能。
+
+## 9. 2026-11-15 实施补充：官方网页表单运行时
+
+当前已新增宿主登录服务、插件登录工作台和 `login-runtime/`，不再停留于设计阶段。实际本地引擎使用固定 `playwright-core@1.62.1` 与管理员安装的 Chromium，沿宿主授权 URL 操作官方邮箱/密码/TOTP 表单；没有把原始 toSub2 CLI 直接包成生产 worker。
+
+采用这条路径是因为固定协议源码包含动态 Sentinel、第二套 PKCE、设置账户资料/手机号、2FA enrollment 与 token/session 导出，完整移植会扩展本次作用域。新 worker 仅改编 MIT 的 TOTP 计算逻辑，保留来源、许可证和修改说明；正常网页 JavaScript 由真实浏览器执行，遇到验证码或额外安全挑战即停止，不自动解决挑战。
+
+宿主仍是 PKCE verifier、token 兑换、候选身份与提交的唯一所有者。worker 私有 stdin 读取一次任务，只输出匹配 state/redirect/job/attempt 的 callback URL。打包和宿主校验固定 Node/worker/Playwright 文件摘要，并记录系统浏览器主文件摘要；不在打开插件页面时安装任何依赖。
+
+离线测试已经实际启动本机 Chrome，在本地假页面完成邮箱、密码、TOTP和回调流程；还覆盖错误停止、取消、缓冲上限与进程组继承。该证据证明实现可执行及约束有效，不证明 OpenAI 当前线上表单不会变化，不证明真实账号登录或模型质量。具体安装、测试范围和未验证边界见 [OPENAI_2FA_RUNTIME_CN.md](OPENAI_2FA_RUNTIME_CN.md)。

@@ -38,3 +38,4 @@ Thumbs.db
 *.exe
 *.test
 *.out
+/tools/local-state-upgrade/local-state-upgrade

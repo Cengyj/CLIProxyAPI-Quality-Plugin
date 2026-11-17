@@ -7,6 +7,15 @@ TASK_DOMAIN="gui/$(id -u)"
 TASK_SERVICE="$TASK_DOMAIN/local.cpa.model-quality"
 TASK_PLIST="$TASK_DEPLOY/local.cpa.model-quality.plist"
 
+# A session process uses the current application's existing directory access.
+# It does not change macOS privacy permissions or run automatically at login.
+if [ -f "$TASK_DEPLOY/launch-mode" ] && [ "$(cat "$TASK_DEPLOY/launch-mode")" = session ]; then
+  case "${1:-status}" in
+    restart) "$0" stop; "$0" start; exit 0 ;;
+    *) exec /usr/bin/python3 "$TASK_ROOT/scripts/local_cpa_session.py" "${1:-status}" ;;
+  esac
+fi
+
 case "${1:-status}" in
   start)
     test -f "$TASK_PLIST"
@@ -21,7 +30,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 directory = Path(sys.argv[1])
@@ -31,12 +40,18 @@ waiter = threading.Event()
 deadline = time.monotonic() + 45
 while time.monotonic() < deadline:
     try:
-        request = Request(
-            'http://127.0.0.1:8317/v8/management/plugins/model-quality/targets',
-            headers={'Authorization': 'Bearer ' + access['management_key']},
-        )
-        with client.open(request, timeout=2) as response:
-            json.load(response)
+        for prefix in ['/v0/management/plugins/model-quality', '/v8/management/plugins/model-quality']:
+            request = Request(
+                'http://127.0.0.1:8317' + prefix + '/targets',
+                headers={'Authorization': 'Bearer ' + access['management_key']},
+            )
+            try:
+                with client.open(request, timeout=2) as response:
+                    json.load(response)
+                break
+            except HTTPError as error:
+                if error.code != 404 or prefix.startswith('/v8/'):
+                    raise
         print('CPA and model-quality are ready: http://127.0.0.1:8317/management.html')
         break
     except (OSError, URLError, ValueError):

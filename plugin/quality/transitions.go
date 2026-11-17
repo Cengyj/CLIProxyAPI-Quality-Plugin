@@ -12,18 +12,25 @@ import (
 
 // changeSet publishes a state transition only after all of its records are durable.
 type changeSet struct {
-	rules  map[string]*Rule
-	runs   map[string]*Run
-	audits []Audit
-	intent *Action
+	rules              map[string]*Rule
+	runs               map[string]*Run
+	audits             []Audit
+	intent             *Action
+	loginPreparationID string
+	loginPreparation   []byte
 }
 
 func changes() *changeSet { return &changeSet{rules: map[string]*Rule{}, runs: map[string]*Run{}} }
 func (en *Engine) commitLocked(c *changeSet) error {
-	if len(c.rules) == 0 && len(c.runs) == 0 && len(c.audits) == 0 && c.intent == nil {
+	if len(c.rules) == 0 && len(c.runs) == 0 && len(c.audits) == 0 && c.intent == nil && c.loginPreparationID == "" {
 		return nil
 	}
 	err := en.store.Write(func(tx *bolt.Tx) error {
+		if c.loginPreparationID != "" {
+			if err := tx.Bucket([]byte("meta")).Put([]byte("login-prepare:"+c.loginPreparationID), c.loginPreparation); err != nil {
+				return err
+			}
+		}
 		for id, r := range c.rules {
 			if err := put(tx, "rules", id, r); err != nil {
 				return err
@@ -127,6 +134,9 @@ func (en *Engine) localPause(c RunConfig) string {
 	for _, r := range en.rules {
 		if r.ActionID != "" && usesCredential(c, r.AuthID) {
 			return r.AuthID
+		}
+		if !en.Capabilities().QualityPause && r.BlockedAuthID != "" && usesCredential(c, r.BlockedAuthID) {
+			return r.BlockedAuthID
 		}
 	}
 	return ""
@@ -238,6 +248,9 @@ func (en *Engine) checkExecution(ctx context.Context, runID string) error {
 		rule := en.rules[id]
 		if rule == nil || !rule.Enabled || rule.Revision != r.Config.RuleRevision || ruleStatus(rule) != "detecting" {
 			return fmt.Errorf("blocked: stale or stopped rule")
+		}
+		if en.unsupportedRule(rule) {
+			return unsupportedQuality()
 		}
 	}
 	targets, err := en.host.Targets(ctx)

@@ -1,3 +1,7 @@
+> 0.15.0 新增鉴权账号安全操作和本地完成接口，见 [重置 2FA 与退出设备](OPENAI_ACCOUNT_SECURITY_CN.md)。
+
+> 2026-11-17：官方兼容版已改为独立插件，详见 [官方单插件方案](OFFICIAL_PLUGIN_CN.md)。本文保留补丁宿主的历史实现/部署记录；本机 8317 已按用户确认更新为官方 CPA + 插件 0.14.0，详见 [本机升级记录](LOCAL_OFFICIAL_UPGRADE_CN.md)。
+
 # 0.3.0 鉴权 API 与存储
 
 业务前缀为 `/v8/management/plugins/model-quality`。公共 `/v0/resource/plugins/model-quality/{index.html,app.js,client.js,view.js,style.css}` 只返回静态 GET，无模型调用和状态变更。业务路由精确匹配，管理鉴权与 remote-access 策略由宿主执行；管理密钥仅存在页面内存，不保存到插件或回环请求。
@@ -48,6 +52,8 @@
 
 每模型 samples为1..8，总数还受 max_samples 限制；模型数、temperature、reasoning_effort、输出预算均服务端检查。custom 题可提供 prompt、review_standard，二者共同冻结；不得改内建题面后继承原答案。视觉/自定义题默认没有确定性 oracle。
 
+直接提交人工评阅任务（`judge.mode=manual` 或不指定 `judge.mode`）时，若 `parameters.max_tokens` 缺省或为零，服务端冻结 `min(2048, max_output_tokens)`；非手动模式原有默认值 1024 不变。省略 `temperature` 不等于传入 0。显式 token 预算超出上限仍会被拒绝；规则、旧记录和显式同配置重跑不改写已有参数。
+
 可选 control_auth_id/control_provider 与 seed 用于随机题有效对照。judge mode为 deterministic/manual/llm；LLM 需要独立 auth_id/provider/model。任何依赖被质量暂停都会阻止整个运行。答案仅提供给独立 judge，不发送给被测模型。
 
 规则增加 name、action（observe_only或pause_credential）、enabled、scheduling_enabled、automatic_pause、interval_seconds或cron、timezone、fail_threshold、retention_days。默认失败门槛3，范围1..100；间隔60..2678400秒；保留1..365天。规则 status为 detecting/paused/awaiting_release，由服务端状态导出，不能由客户端修改来绕过限制。
@@ -67,3 +73,22 @@ schema1升级保留历史与动作，不删除数据库，不发起复测，不�
 审计或被动指标数据损坏/读取失败时返回503，不再伪装成空历史或零指标。缺失或非法的历史流量来源归入unknown，不能自动归入production。
 
 每日预算按调用准入时的UTC日期记账，跨日完成仍更新原日，meta内budget:YYYY-MM-DD保留配置天数并保护在途日期。主动任务缺usage仍显示未知；被动ABI缺少零用量存在性标记，因此无法证实的0和旧事件未标记tokens_known时按unknown_usage统计，不伪造零成本。
+
+
+## OpenAI 登录（0.4.0）
+
+新增宿主鉴权前缀 `/v8/management/credential-logins`，不经过插件 Management RPC 传递秘密。接口包含 capabilities、targets、start、jobs、detail、candidate、callback、cancel、discard、commit 和 vault/status、vault/entry。写请求必须包含 Idempotency-Key；完整字段和限制见 [OPENAI_2FA_IMPLEMENTATION_CN.md](OPENAI_2FA_IMPLEMENTATION_CN.md)。公开静态 GET 新增 `login.js`，不承载业务操作。
+
+
+## OpenAI 账号管理（0.5.0）
+
+新增受保护的 `/v8/management/credential-logins/accounts` 列表及 `/accounts/import`、`/accounts/entry`、`/accounts/start`、`/accounts/inspect`、`/accounts/settings`。账号列表返回完整邮箱和身份字段，受鉴权保护的详情接口提供已保存的明文资料；所有写入使用原有幂等日志，修改和删除采用 revision。完整字段、请求限制、巡检证据和自动重登条件见 [账号管理与巡检](OPENAI_ACCOUNTS_CN.md)。
+
+UI 8.4.0 对应宿主增加登录代理字段：`PUT /accounts/settings` 的 `login_proxy_url` 设置默认代理；`POST /accounts/import` 的 `proxy_url` 应用于本批账号；`PUT /accounts/entry` 的 `proxy_url` 修改账号覆盖；`POST /start` 的 `proxy_url` 仅用于本次临时登录。更新请求省略代理字段保留原配置，传空字符串恢复继承，`direct` 明确直连。账号响应包含 `proxy_url`、`effective_proxy_url` 和 `proxy_source`；最新失败任务以 `last_job_error_code`、`last_job_error_stage`、`last_job_error_reason` 展示，任务本身提供 `error_stage` 和 `error_reason`。诊断值使用有限枚举，不返回网页内容或回调秘密。代理优先级和支持范围见 [登录代理说明](OPENAI_LOGIN_PROXY_CN.md)。
+
+
+## OpenAI完整账号视图（0.6.0）
+
+新增受管理鉴权的 `GET /v8/management/credential-logins/accounts/detail?id=...`，返回 `{account,credentials:{email,password,totp_secret}}`，用于管理员明确打开账号资料。账号、任务、目标、候选和资料库状态新增完整 `email`；目标与候选提供完整 `account_id/user_id`。旧 masked 字段仅为兼容，新UI不使用。普通列表不携带密码/TOTP，任务报告带完整邮箱和身份信息。身份不能可信还原的历史任务返回空值。详情不缓存，也不落入幂等或普通任务记录。
+
+TOTP 在导入、资料更新及登录请求的共享输入边界验证：支持有效 Base32 或 SHA-1／6 位／30 秒的 `otpauth://totp`，非法格式返回 `invalid_credentials`；错误导入不写入任何账号，错误更新保留旧资料。原始密钥文本和密码空白不因校验改变。执行边界改进见 [toSub2 Go 逻辑对照](TOSUB2_GO_REFERENCE_CN.md)。

@@ -1,3 +1,5 @@
+> 2026-11-17：官方兼容版已改为独立插件，详见 [官方单插件方案](OFFICIAL_PLUGIN_CN.md)。本文保留补丁宿主的历史实现/部署记录；本机 8317 已按用户确认更新为官方 CPA + 插件 0.14.0，详见 [本机升级记录](LOCAL_OFFICIAL_UPGRADE_CN.md)。
+
 # 已核实的架构事实
 
 当前 CPA 参考路径：`/Users/ceng/Downloads/CLIProxyAPI-8.0.67`。
@@ -39,6 +41,7 @@ sub2api 参考提交：`ccf997c73868083d96c0bec56e71c1a34d26c98a`，仓库为 ht
 
 ## sub2api 值得借鉴的部分
 
+- 手动「题目测试」的界面字段、不同上游的实际输出参数及 CPA 插件移除输出设置后的差异，见 [sub2api 题目测试对照](SUB2API_QUESTION_TEST_CN.md)。
 - 手动题目测试主要面向人工评审：逻辑题、HTML/SVG、冻结参数、多样本、安全预览。生成完成和质量正确分开。
 - 质量运维采用 correct/incorrect/unknown，明确答错与网络、鉴权、限流、判题失败区分。
 - 随机题使用本地求解答案、版本化题目和同批同条件通过对照。

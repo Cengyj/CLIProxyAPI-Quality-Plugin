@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify UI 4.2 question-test APIs through the actual native plugin and an isolated mock."""
+"""Verify current question-test APIs through the actual native plugin and an isolated mock."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,9 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "artifacts/question-test-4.2.0"
+OUTPUT = ROOT / "artifacts/host-alignment-4.3.0"
+PLUGIN_VERSION = re.search(r'const Version = "([^\"]+)"', (ROOT / "plugin/quality/types.go").read_text()).group(1)
+UI_VERSION = re.search(r'"ui_version":"([^\"]+)"', (ROOT / "plugin/ui/index.html").read_text()).group(1)
 UI_NAMES = ("index.html", "app.js", "client.js", "view.js", "style.css")
 API_PREFIX = "/v8/management/plugins/model-quality"
 
@@ -89,12 +92,12 @@ def main():
     parser.add_argument("--demo-dir", type=Path, default=OUTPUT / "api-demo")
     args = parser.parse_args()
     report_path, demo_dir = args.report.resolve(), args.demo_dir.resolve()
-    require(demo_dir.is_relative_to(OUTPUT.resolve()), "demo directory must be inside artifacts/question-test-4.2.0")
-    require(report_path.is_relative_to(OUTPUT.resolve()), "report must be inside artifacts/question-test-4.2.0")
+    require(demo_dir.is_relative_to((ROOT / "artifacts").resolve()), "demo directory must be inside artifacts")
+    require(report_path.is_relative_to((ROOT / "artifacts").resolve()), "report must be inside artifacts")
     demo_dir.mkdir(parents=True, exist_ok=True)
     lock = demo_dir / ".verification-lock"
-    report = {"result": "failed", "started_at": utc_now(), "plugin_version": "0.3.1",
-              "ui_version": "4.2.0", "platform": f"{sys.platform}/{platform.machine()}",
+    report = {"result": "failed", "started_at": utc_now(), "plugin_version": PLUGIN_VERSION,
+              "ui_version": UI_VERSION, "platform": f"{sys.platform}/{platform.machine()}",
               "scope": "actual patched host and C shared library; isolated loopback fake credentials and upstream",
               "checks": [], "demo_directory": str(demo_dir.relative_to(ROOT))}
     env = {**os.environ, "MQ_DEMO_DIR": str(demo_dir)}
@@ -145,14 +148,14 @@ def main():
         require(digest(installed) == report["input_sha256"][library_key], "loaded library differs from the snapshotted artifact")
         plugins = client.request(base + "/v8/management/plugins", key=key)
         plugin = next(item for item in plugins["plugins"] if item["id"] == "model-quality")
-        require(plugin["effective_enabled"] and plugin["metadata"]["version"] == "0.3.1", "native plugin 0.3.1 is not effective")
+        require(plugin["effective_enabled"] and plugin["metadata"]["version"] == PLUGIN_VERSION, "native plugin version is not effective")
         served = {}
         for name in UI_NAMES:
             data = client.request(base + "/v0/resource/plugins/model-quality/" + name, raw=True)
             served[name] = hashlib.sha256(data).hexdigest()
             require(served[name] == report["input_sha256"]["plugin/ui/" + name], f"served {name} differs from source")
         report["served_ui_sha256"] = served
-        passed("native plugin 0.3.1 loads and serves all five UI 4.2 resources byte-identical to source")
+        passed(f"native plugin {PLUGIN_VERSION} loads and serves all five UI {UI_VERSION} resources byte-identical to source")
 
         client.request(base + API_PREFIX + "/targets", expected=401)
         targets = api("/targets")["items"]

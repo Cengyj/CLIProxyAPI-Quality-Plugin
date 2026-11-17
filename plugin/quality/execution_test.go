@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -63,54 +62,43 @@ func TestSSEAssemblyRequiresTerminalCompletion(t *testing.T) {
 		t.Fatal("unbounded stream accepted")
 	}
 }
-func TestNativeHostCancellationBeforeFirstByteAndNonStream(t *testing.T) {
+func TestNativeHostCancellationBeforeFirstByteRemainsPendingUntilOfficialCallbackReturns(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {
-			started := make(chan struct{})
-			cancelled := make(chan struct{})
-			var once sync.Once
-			calls := 0
-			var mu sync.Mutex
+			started, released := make(chan struct{}), make(chan struct{})
 			h := &NativeHost{Call: func(method string, in, out any) error {
-				switch method {
-				case "host.model.operation_open":
-					return decode([]byte(`{"operation_id":"op-1"}`), out)
-				case "host.model.cancel":
-					once.Do(func() { close(cancelled) })
-					return nil
-				case "host.model.execute", "host.model.execute_stream":
-					req := in.(pluginapi.HostModelExecutionRequest)
-					if req.AuthID != "fixed" || req.ForcedProvider != "provider" || req.OperationID != "op-1" || req.TrafficSource != "manual_test" {
-						return fmt.Errorf("lost request binding")
-					}
-					mu.Lock()
-					calls++
-					mu.Unlock()
-					close(started)
-					<-cancelled
-					return context.Canceled
+				if method != "host.model.execute" && method != "host.model.execute_stream" {
+					t.Errorf("unexpected callback %s", method)
 				}
-				return fmt.Errorf("unexpected method %s", method)
+				req := in.(pluginapi.HostModelExecutionRequest)
+				if req.AuthID != "fixed" || req.ForcedProvider != "provider" {
+					return fmt.Errorf("lost request binding")
+				}
+				close(started)
+				<-released
+				return context.Canceled
 			}}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan Sample, 1)
 			go func() {
-				done <- h.Execute(ctx, Execution{AuthID: "fixed", Provider: "provider", Model: "alias", Prompt: "Question only", Source: "manual_test", Parameters: Parameters{MaxTokens: 64, Stream: stream}})
+				done <- h.Execute(ctx, Execution{AuthID: "fixed", Provider: "provider", Model: "alias", Parameters: Parameters{MaxTokens: 64, Stream: stream}})
 			}()
 			<-started
 			cancel()
-			s := <-done
-			if s.ExecutionStatus != "cancelled" {
-				t.Fatal(s)
+			select {
+			case <-done:
+				t.Fatal("claimed to cancel a callback without official cancellation support")
+			default:
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			if calls != 1 {
-				t.Fatal("execution replayed")
+			close(released)
+			s := <-done
+			if s.ExecutionStatus != "cancelled" || s.Evidence.Verified || h.Capabilities().ModelOperationCancel {
+				t.Fatal(s)
 			}
 		})
 	}
 }
+
 func TestNonstreamCompletionClassification(t *testing.T) {
 	for _, tc := range []struct{ body, status string }{{`{"model":"upstream","choices":[{"message":{"content":"4"},"finish_reason":"stop"}]}`, "completed"}, {`{"choices":[{"message":{"content":"4"},"finish_reason":"length"}]}`, "incomplete"}, {`{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}`, "empty"}, {`{"choices":[{"message":{"refusal":"cannot comply"},"finish_reason":"stop"}]}`, "refused"}, {`{"error":{"message":"rate limit"}}`, "failed"}} {
 		h := &NativeHost{Call: func(method string, in, out any) error {
@@ -131,6 +119,62 @@ func TestNonstreamCompletionClassification(t *testing.T) {
 		}
 	}
 }
+
+func TestManualMaxReasoningPreservedThroughExecution(t *testing.T) {
+	engine, host := lifeFixture(t)
+	var payloads []struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	native := &NativeHost{Call: func(method string, in, out any) error {
+		switch method {
+		case "host.model.operation_open":
+			return decode([]byte(`{"operation_id":"offline-op"}`), out)
+		case "host.model.cancel":
+			return nil
+		case "host.model.execute":
+			req := in.(pluginapi.HostModelExecutionRequest)
+			if req.AuthID != "auth-a" || req.ForcedProvider != "offline" {
+				return fmt.Errorf("lost manual request binding")
+			}
+			var payload struct {
+				Model           string `json:"model"`
+				ReasoningEffort string `json:"reasoning_effort"`
+			}
+			if err := json.Unmarshal(req.Body, &payload); err != nil {
+				return err
+			}
+			payloads = append(payloads, payload)
+			body, err := json.Marshal(pluginapi.HostModelExecutionResponse{StatusCode: 200, Body: []byte(`{"choices":[{"message":{"content":"4"},"finish_reason":"stop"}]}`)})
+			if err != nil {
+				return err
+			}
+			return decode(body, out)
+		}
+		return fmt.Errorf("unexpected callback %s", method)
+	}}
+	host.execute = native.Execute
+	config := lifeConfig()
+	config.Judge.Mode = "manual"
+	config.Samples = 2
+	config.Parameters.ReasoningEffort = "max"
+	run, err := engine.Submit(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Parameters.ReasoningEffort = "low"
+	engine.execute(<-engine.queue)
+	result, err := engine.Run(run.ID)
+	if err != nil || result.Status != "completed" || result.Config.Parameters.ReasoningEffort != "max" || len(payloads) != 2 {
+		t.Fatalf("max reasoning was not admitted, frozen and executed: result=%+v payloads=%+v err=%v", result, payloads, err)
+	}
+	for _, payload := range payloads {
+		if payload.Model != "a" || payload.ReasoningEffort != "max" {
+			t.Fatalf("host payload lost explicit max reasoning: %+v", payload)
+		}
+	}
+}
+
 func TestDuplicateAPIBodyIsRejected(t *testing.T) {
 	var v RunConfig
 	if DecodeStrict([]byte(`{"auth_id":"a","auth_id":"b"}`), &v) == nil {
@@ -141,43 +185,44 @@ func TestDuplicateAPIBodyIsRejected(t *testing.T) {
 	}
 }
 
-func TestRawNativeStreamRequiresActualUpstreamTerminalProof(t *testing.T) {
-	for _, complete := range []bool{false, true} {
-		t.Run(fmt.Sprint(complete), func(t *testing.T) {
+func TestOfficialStreamCompletionNeverBecomesVerifiedEvidence(t *testing.T) {
+	for _, finished := range []bool{false, true} {
+		t.Run(fmt.Sprint(finished), func(t *testing.T) {
 			read := 0
 			h := &NativeHost{Call: func(method string, in, out any) error {
 				switch method {
-				case "host.model.operation_open":
-					return decode([]byte(`{"operation_id":"op"}`), out)
-				case "host.model.cancel", "host.model.stream_close":
+				case "host.model.stream_close":
 					return nil
 				case "host.model.execute_stream":
 					return decode([]byte(`{"status_code":200,"stream_id":"s"}`), out)
 				case "host.model.stream_read":
-					var response pluginapi.HostModelStreamReadResponse
+					response := out.(*pluginapi.HostModelStreamReadResponse)
 					switch read {
 					case 0:
 						response.Payload = []byte(`{"choices":[{"delta":{"content":"4"},"finish_reason":null}]}`)
 					case 1:
-						response.Payload = []byte(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10}}`)
+						if finished {
+							response.Payload = []byte(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10}}`)
+						} else {
+							response.Done = true
+						}
 					default:
 						response.Done = true
-						response.UpstreamComplete = complete
-						response.Evidence = &pluginapi.ModelEvidence{Verified: complete, AuthID: "a", RequestedModel: "m", ResolvedModel: "m", PayloadFingerprint: "p", PayloadConfigVersion: "v1"}
 					}
 					read++
-					b, _ := json.Marshal(response)
-					return decode(b, out)
+					return nil
 				}
 				return fmt.Errorf("unexpected callback %s", method)
 			}}
-			sample := h.Execute(context.Background(), Execution{AuthID: "a", Provider: "p", Model: "m", Prompt: "test", Parameters: Parameters{MaxTokens: 64, Stream: true}})
-			if complete {
-				if sample.ExecutionStatus != "completed" || !sample.Evidence.Verified || sample.Output != "4" || sample.Usage.Total != 10 {
-					t.Fatal(sample)
-				}
-			} else if sample.ExecutionStatus == "completed" || sample.Evidence.Verified {
-				t.Fatal("synthetic terminal accepted as complete", sample)
+			sample := h.Execute(context.Background(), Execution{AuthID: "a", Provider: "p", Model: "m", Parameters: Parameters{MaxTokens: 64, Stream: true}})
+			if sample.Evidence.Verified || sample.Comparable || sample.Evidence.Reason != "official_host_evidence_unavailable" {
+				t.Fatal("invented verified evidence", sample)
+			}
+			if finished && (sample.ExecutionStatus != "completed" || sample.Output != "4" || sample.Usage == nil || sample.Usage.Total != 10) {
+				t.Fatal(sample)
+			}
+			if !finished && sample.ExecutionStatus == "completed" {
+				t.Fatal("accepted a stream without completion", sample)
 			}
 		})
 	}

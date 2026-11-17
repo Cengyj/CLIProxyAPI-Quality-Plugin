@@ -169,6 +169,16 @@ func (c *collector) FeedHostChunk(raw []byte) error {
 	combined := append(append([]byte(nil), c.pending...), raw...)
 	if !bytes.ContainsRune(combined, '\n') {
 		line := strings.TrimSpace(string(combined))
+		// Official executors can forward scanner lines and append a bare
+		// terminal sentinel. Preserve those record boundaries before buffering.
+		if len(c.pending) == 0 && (strings.HasPrefix(line, ":") || strings.HasPrefix(line, "event:") || strings.HasPrefix(line, "id:")) {
+			return c.Feed(append(combined, '\n', '\n'))
+		}
+		if line == "[DONE]" {
+			c.received -= len(c.pending)
+			c.pending = nil
+			return c.Feed([]byte("data: [DONE]\n\n"))
+		}
 		if strings.HasPrefix(line, "data:") {
 			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if payload == "[DONE]" || ojson.Valid(payload) {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { questionTestSelection, reasonLabel, renderRunEvidence } from '../plugin/ui/view.js';
+import { questionTestSelection, reasonLabel, renderRunEvidence, statusTag, verdictTag } from '../plugin/ui/view.js';
 
 const question = { id: 'logic-candy', prompt: 'Only this exact prompt owns the reference answer.', version: 'v1' };
 assert.deepEqual(questionTestSelection(question, question.prompt), { question_id: 'logic-candy' });
@@ -38,4 +38,8 @@ const cancelledSample = { ...run.samples[0], execution_status: 'cancelled', erro
 const cancelled = renderRunEvidence({ ...run, status: 'cancelled', samples: [cancelledSample] });
 assert.match(cancelled.samplesHTML, /测试已取消/);
 assert.equal(cancelledSample.error, 'context canceled');
+for (const status of ['completed', 'complete', 'success', 'succeeded', 'released']) {
+  assert.doesNotMatch(statusTag(status), /tag good/, 'Execution completion and owned release must not imply correct quality or full availability');
+}
+assert.match(verdictTag('correct'), /tag good/, 'Only an explicitly correct verdict uses the quality success color');
 console.log('Question test prompt binding, manual result presentation, escaping and rule-view compatibility passed.');

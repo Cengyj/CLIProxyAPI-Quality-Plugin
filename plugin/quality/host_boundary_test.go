@@ -2,7 +2,6 @@ package quality
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -33,28 +32,6 @@ func TestNativeHostAlreadyCancelledMakesNoCallbacks(t *testing.T) {
 	}
 	if _, err := h.ActionStatus(ctx, "action"); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
-	}
-}
-
-func TestNativeHostCancellationDuringOperationOpenNeverStartsModel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	var cancelled atomic.Int32
-	h := &NativeHost{Call: func(method string, in, out any) error {
-		switch method {
-		case "host.model.operation_open":
-			cancel()
-			return decode([]byte(`{"operation_id":"op"}`), out)
-		case "host.model.cancel":
-			cancelled.Add(1)
-			return nil
-		default:
-			t.Errorf("cancelled operation reached %s", method)
-			return errors.New("unexpected model call")
-		}
-	}}
-	s := h.Execute(ctx, Execution{Parameters: Parameters{MaxTokens: 16}})
-	if s.ExecutionStatus != "cancelled" || cancelled.Load() != 1 {
-		t.Fatal(s, cancelled.Load())
 	}
 }
 
@@ -93,14 +70,9 @@ func TestNativeHostClosesRejectedStreamAndNeverReadsInvalidID(t *testing.T) {
 		{"redirect", "stream", 302, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var closed, cancelled atomic.Int32
+			var closed atomic.Int32
 			h := &NativeHost{Call: func(method string, in, out any) error {
 				switch method {
-				case "host.model.operation_open":
-					return decode([]byte(`{"operation_id":"op"}`), out)
-				case "host.model.cancel":
-					cancelled.Add(1)
-					return nil
 				case "host.model.execute_stream":
 					response := out.(*pluginapi.HostModelStreamResponse)
 					response.StreamID, response.StatusCode = tc.id, tc.status
@@ -121,23 +93,26 @@ func TestNativeHostClosesRejectedStreamAndNeverReadsInvalidID(t *testing.T) {
 			if tc.id != "" {
 				wantClose = 1
 			}
-			if s.ExecutionStatus != "failed" || closed.Load() != wantClose || cancelled.Load() != 1 {
-				t.Fatal(s, closed.Load(), cancelled.Load())
+			if s.ExecutionStatus != "failed" || closed.Load() != wantClose {
+				t.Fatal(s, closed.Load())
 			}
 		})
 	}
 }
 
-func TestNativeHostRejectsInconsistentRecoveryCapabilities(t *testing.T) {
-	for _, flag := range []string{"quality_retest", "automatic_recovery"} {
-		h := &NativeHost{Call: func(_ string, _, out any) error {
-			fields := map[string]any{"version": 2, "manual_release_only": true, "management_v8": true, "model_operations": true, "quality_pause": true, flag: true}
-			b, _ := json.Marshal(fields)
-			return decode(b, out)
-		}}
-		if h.Check() == nil {
-			t.Fatal("accepted inconsistent capability", flag)
+func TestNativeHostChecksOnlyOfficialCallbackAvailability(t *testing.T) {
+	h := &NativeHost{Call: func(method string, _, out any) error {
+		if method != "host.auth.list" {
+			t.Fatalf("used a private host extension: %s", method)
 		}
+		return decode([]byte(`{"files":[]}`), out)
+	}}
+	if err := h.Check(); err != nil {
+		t.Fatal(err)
+	}
+	caps := h.Capabilities()
+	if caps.QualityPause || caps.ManualRelease || caps.VerifiedEvidence || caps.ModelOperationCancel || !caps.StreamClose {
+		t.Fatal(caps)
 	}
 	if (&NativeHost{}).Check() == nil {
 		t.Fatal("accepted absent callback")
@@ -149,7 +124,7 @@ func TestNativeHostCancellationDuringStreamClosesOnce(t *testing.T) {
 	defer cancel()
 	reading := make(chan struct{})
 	cancelled := make(chan struct{})
-	var closeCalls, cancelCalls atomic.Int32
+	var closeCalls atomic.Int32
 	reads := 0
 	h := &NativeHost{Call: func(method string, in, out any) error {
 		switch method {
@@ -166,13 +141,10 @@ func TestNativeHostCancellationDuringStreamClosesOnce(t *testing.T) {
 			close(reading)
 			<-cancelled
 			return context.Canceled
-		case "host.model.cancel":
-			if cancelCalls.Add(1) == 1 {
+		case "host.model.stream_close":
+			if closeCalls.Add(1) == 1 {
 				close(cancelled)
 			}
-			return nil
-		case "host.model.stream_close":
-			closeCalls.Add(1)
 			return nil
 		}
 		return fmt.Errorf("unexpected callback %s", method)
@@ -182,8 +154,8 @@ func TestNativeHostCancellationDuringStreamClosesOnce(t *testing.T) {
 	<-reading
 	cancel()
 	s := <-done
-	if s.ExecutionStatus != "cancelled" || s.Output != "4" || closeCalls.Load() != 1 || cancelCalls.Load() != 1 {
-		t.Fatal(s, closeCalls.Load(), cancelCalls.Load())
+	if s.ExecutionStatus != "cancelled" || s.Output != "4" || closeCalls.Load() != 1 {
+		t.Fatal(s, closeCalls.Load())
 	}
 }
 

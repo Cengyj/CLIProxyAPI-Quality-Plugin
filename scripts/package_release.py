@@ -13,7 +13,7 @@ from release_support import ROOT, UI_NAMES, digest, host_sources, require_matchi
 
 REQUIRED = ('host-tests-fresh', 'host-race-fresh', 'host-compile', 'baseline', 'patch',
             'plugin-tests', 'plugin-race', 'plugin-vet', 'plugin-build',
-            'native-lifecycle', 'ui', 'native-ui')
+            'native-lifecycle', 'question-logic', 'native-api', 'ui', 'native-ui', 'host-ui')
 
 
 def verify_evidence(evidence):
@@ -48,10 +48,10 @@ def verify_evidence(evidence):
         if ui_record.get('output_sha256', {}).get(str(path.relative_to(ROOT))) != digest(path):
             raise ValueError('Browser command does not bind its measured evidence: ' + name)
         files.add(path)
-    for name in ('ui-results.json', 'native-ui-results.json'):
+    for name in ('ui-results.json', 'native-ui-results.json', 'host-ui-results.json'):
         path = evidence / name
         data = json.loads(path.read_text())
-        command_name = 'native-ui' if name.startswith('native') else 'ui'
+        command_name = 'native-ui' if name.startswith('native') else 'host-ui' if name.startswith('host') else 'ui'
         command_record = json.loads((evidence / (command_name + '.json')).read_text())
         if command_record.get('output_sha256', {}).get(str(path.relative_to(ROOT))) != digest(path):
             raise ValueError('Browser command does not bind its result report: ' + name)
@@ -60,12 +60,19 @@ def verify_evidence(evidence):
         for asset in UI_NAMES:
             if data.get('source_sha256', {}).get(asset) != digest(ROOT / 'plugin/ui' / asset):
                 raise ValueError('Browser report source mismatch: ' + name + '/' + asset)
-        if name == 'native-ui-results.json':
+        if name in {'native-ui-results.json', 'host-ui-results.json'}:
             for binary in ('model-quality.dylib', 'cli-proxy-api-quality'):
-                if data.get('binary_sha256', {}).get(binary) != digest(ROOT / 'artifacts' / binary):
+                if data.get('binary_sha256', {}).get(binary, data.get('binary_sha256', {}).get('artifacts/' + binary)) != digest(ROOT / 'artifacts' / binary):
                     raise ValueError('Native browser report binary mismatch: ' + binary)
+        if name == 'host-ui-results.json':
+            if data.get('host_reference', {}).get('head') != 'd0126752201a35ff999bd2a1d4741215542258a8':
+                raise ValueError('Host visual reference differs from the pinned revision')
+            for asset in UI_NAMES:
+                if data.get('native_resource_sha256', {}).get(asset) != digest(ROOT / 'plugin/ui' / asset):
+                    raise ValueError('Host shell used a non-native or stale plugin resource: ' + asset)
         files.add(path)
-        for screenshot in data.get('screenshots', []):
+        for screenshot_entry in data.get('screenshots', []):
+            screenshot = screenshot_entry['file'] if isinstance(screenshot_entry, dict) else screenshot_entry
             candidate = (evidence / screenshot).resolve()
             if not candidate.is_relative_to(evidence.resolve()) or candidate.suffix != '.png':
                 raise ValueError('Invalid screenshot path: ' + screenshot)
@@ -76,6 +83,35 @@ def verify_evidence(evidence):
             files.add(candidate)
         checks[name] = {'result': data['result'], 'checks': len(data['checks']),
                         'record': str(path.relative_to(ROOT)), 'record_sha256': digest(path)}
+    native_api = evidence / 'native-api-results.json'
+    native_api_data = json.loads(native_api.read_text())
+    native_api_record = json.loads((evidence / 'native-api.json').read_text())
+    if native_api_data.get('result') != 'passed' or not native_api_data.get('checks'):
+        raise ValueError('Current question API validation has not passed')
+    if native_api_record.get('output_sha256', {}).get(str(native_api.relative_to(ROOT))) != digest(native_api):
+        raise ValueError('Native API command does not bind its result')
+    for asset in UI_NAMES:
+        if native_api_data.get('served_ui_sha256', {}).get(asset) != digest(ROOT / 'plugin/ui' / asset):
+            raise ValueError('Native API served source mismatch: ' + asset)
+    files.add(native_api)
+    finish_path = evidence / 'finish-review.json'
+    finish = json.loads(finish_path.read_text())
+    if finish.get('result') != 'ship' or finish.get('blockers'):
+        raise ValueError('Final independent visual review is not shippable')
+    for asset in UI_NAMES:
+        if finish.get('source_sha256', {}).get(asset) != digest(ROOT / 'plugin/ui' / asset):
+            raise ValueError('Final visual review source mismatch: ' + asset)
+    finish_text = evidence / 'finish-review.md'
+    if finish.get('markdown_sha256') != digest(finish_text):
+        raise ValueError('Final visual review text changed')
+    files.update((finish_path, finish_text))
+    for field in ('reviewed_screenshot_sha256', 'evidence_reports'):
+        for rel, expected in finish.get(field, {}).items():
+            reviewed = (evidence.parent / rel).resolve()
+            if not reviewed.is_relative_to(evidence.resolve()) or digest(reviewed) != expected:
+                raise ValueError('Final review references a changed or non-final artifact: ' + rel)
+            files.add(reviewed)
+    checks['finish-review'] = {'result': 'ship', 'record': str(finish_path.relative_to(ROOT)), 'record_sha256': digest(finish_path)}
     detector_path = evidence / 'design-detector.json'
     detector_findings = json.loads(detector_path.read_text())
     if not isinstance(detector_findings, list):
@@ -84,7 +120,7 @@ def verify_evidence(evidence):
     checks['design-detector'] = {
         'result': 'findings-recorded', 'findings': len(detector_findings),
         'record': str(detector_path.relative_to(ROOT)), 'record_sha256': digest(detector_path),
-        'interpretation': 'Mechanical findings are retained; disposition and rendered checks are documented in docs/UI_POLISH_REPORT_CN.md',
+        'interpretation': 'Mechanical findings are retained; current disposition and rendered checks are documented in docs/UI_HOST_ALIGNMENT_REPORT_CN.md',
     }
     return checks, files
 
@@ -121,7 +157,7 @@ def main():
     files.add(ROOT / '.impeccable/surfaces/plugin-ui-index-html.md')
     files.add(ROOT / '.impeccable/design.json')
     baseline_dir = evidence.parent / 'baseline'
-    for rel in ('baseline.json', 'paired-clean/ui-results.json', 'polling/polling-probe.json'):
+    for rel in ('baseline.json', 'paired-clean/ui-results.json'):
         path = baseline_dir / rel
         if not path.is_file():
             raise ValueError('Missing baseline evidence: ' + str(path))
@@ -135,12 +171,29 @@ def main():
     paired = sorted((baseline_dir / 'paired-clean').glob('paired-*.png'))
     if len(paired) != 8 or any(not (evidence / path.name).is_file() for path in paired):
         raise ValueError('Eight matching before/after captures are required')
+    after = json.loads((evidence / 'ui-results.json').read_text())
+    for path in paired:
+        if not before.get('capture_fixture_sha256', {}).get(path.name) or before['capture_fixture_sha256'][path.name] != after.get('capture_fixture_sha256', {}).get(path.name):
+            raise ValueError('Before/after screenshot fixtures differ: ' + path.name)
+        if before.get('screenshot_sha256', {}).get(path.name) != digest(path):
+            raise ValueError('Baseline screenshot changed: ' + path.name)
     files.update(paired)
+    files.update(baseline_dir / 'frozen/plugin/ui' / name for name in UI_NAMES)
     for name in ('comparison-desktop.png', 'comparison-mobile.png', 'comparison-provenance.json'):
         path = evidence.parent / name
         if not path.is_file():
             raise ValueError('Missing comparison presentation: ' + name)
         files.add(path)
+    comparison = json.loads((evidence.parent / 'comparison-provenance.json').read_text())
+    for rel, expected in comparison['sha256'].items():
+        if digest(ROOT / rel) != expected:
+            raise ValueError('Comparison presentation changed: ' + rel)
+    reference = ROOT / 'workspaces/cpa-management-reference'
+    files.update(reference / name for name in ('dist/index.html', 'LICENSE'))
+    files.add(evidence.parent / 'reference-provenance.json')
+    host_ui_data = json.loads((evidence / 'host-ui-results.json').read_text())
+    if digest(reference / 'dist/index.html') != host_ui_data['host_reference']['html_sha256']:
+        raise ValueError('Pinned host frontend build changed')
     records = {str(p.relative_to(ROOT)): {'bytes': p.stat().st_size, 'sha256': digest(p)} for p in sorted(files)}
     manifest = {
         'name': 'model-quality', 'version': version, 'ui_version': ui_version,

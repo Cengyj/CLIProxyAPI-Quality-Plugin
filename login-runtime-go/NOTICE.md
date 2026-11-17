@@ -1,0 +1,13 @@
+# Source provenance
+
+This private workspace adaptation incorporates the Go authentication transport, JavaScript host, SDK and website-check runtime from the user-supplied `/Users/ceng/Downloads/toSub2-go-port` checkout. Its source inventory, upstream hashes and adapted hashes are recorded in `UPSTREAM_SOURCE_MANIFEST.json`. The reference checkout is read-only.
+
+The source checkout has local changes and no root project license file was found. This notice does not assert that the whole reference project is MIT licensed. Its supplied dependency notices are preserved in `licenses/reference-THIRD_PARTY_NOTICES.txt`; runtime dependency license texts are collected separately.
+
+Changes made during adaptation: local module import paths; Go toolchain declaration uses the installed supported toolchain; Base64 operations and typed/stream JSON operations use the workspace-required MoeForge packages. Target package comments, tests and embedded JavaScript assets are otherwise retained except for the lifecycle adaptations below. Later file changes are recorded in the inventory. No accounts, passwords, TOTP seeds, cookies, credentials, configuration, logs, databases or original binaries were copied.
+
+The CPA entry point sets `MQ_LOGIN_OWNED_PROCESS_GROUP=1`. On Unix, this keeps every Go JavaScript worker in the outer process group created and owned by CPA, so CPA can terminate all descendants after a crash. Routine session cancellation terminates only its script worker PID; standalone engine use retains the reference behavior of creating and terminating a separate process group. The Windows job-object implementation is unchanged.
+
+The JavaScript worker also watches the protocol input pipe. EOF allows up to 250 ms for queued commands and diagnostics to finish, then cancels the execution context even when a synchronous script or microtask loop cannot process EOF. Closing the parent process therefore does not leave script execution running until the normal 150-second worker deadline. Offline subprocess tests cover inherited group ownership, cancellation boundaries, idle EOF and busy-script EOF cleanup.
+
+The 2.1.0 account-security adaptation follows the reference web-session preparation, MFA factor disable/enroll/activate endpoints, explicit receipt contracts, same-session read-only reconciliation, and logout-all response compatibility. Private plugin-owned journals retain write-ahead intent and pending factor material before mutations. They never retain web cookies or authorize remote-operation replay. Optional fresh reauthorization continues through the existing CPA-owned OAuth exchange and save path. Tests use synthetic local upstreams only.

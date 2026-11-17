@@ -63,6 +63,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cliproxyapi-plugins/model-quality/login"
 	"github.com/cliproxyapi-plugins/model-quality/quality"
 	"github.com/cliproxyapi-plugins/model-quality/ui"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -78,6 +79,7 @@ var staticResources = []struct{ name, contentType string }{
 	{"app.js", "application/javascript; charset=utf-8"},
 	{"client.js", "application/javascript; charset=utf-8"},
 	{"view.js", "application/javascript; charset=utf-8"},
+	{"login.js", "application/javascript; charset=utf-8"},
 	{"style.css", "text/css; charset=utf-8"},
 }
 
@@ -177,7 +179,7 @@ func callback(method string, request, response any) error {
 	return decodeHostResponse(b, int(status), response)
 }
 func registration() any {
-	return map[string]any{"schema_version": pluginabi.SchemaVersion, "metadata": pluginapi.Metadata{Name: "model-quality", Version: quality.Version, Author: "Model Quality Plugin", GitHubRepository: "local-workspace:CLIProxyAPI-Quality-Plugin", ConfigFields: []pluginapi.ConfigField{{Name: "data_dir", Type: pluginapi.ConfigFieldTypeString, Default: "model-quality-data", Description: "Dedicated persistent plugin database directory"}, {Name: "scheduling_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Default: false, Description: "Enable scheduled probes"}, {Name: "automatic_pause", Type: pluginapi.ConfigFieldTypeBoolean, Default: false, Description: "Allow credential-wide automatic quality pauses"}}}, "capabilities": map[string]bool{"management_api": true, "usage_plugin": true}}
+	return map[string]any{"schema_version": pluginabi.SchemaVersion, "metadata": pluginapi.Metadata{Name: "model-quality", Version: quality.Version, Author: "Model Quality Plugin", GitHubRepository: "local-workspace:CLIProxyAPI-Quality-Plugin", ConfigFields: []pluginapi.ConfigField{{Name: "data_dir", Type: pluginapi.ConfigFieldTypeString, Default: "model-quality-data", Description: "Dedicated persistent plugin database directory"}, {Name: "scheduling_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Default: false, Description: "Enable scheduled observation"}}}, "capabilities": map[string]bool{"management_api": true, "usage_plugin": true}}
 }
 func handle(method string, raw []byte) (any, error) {
 	switch method {
@@ -202,7 +204,7 @@ func handle(method string, raw []byte) (any, error) {
 		if err := native.Check(); err != nil {
 			return nil, err
 		}
-		if err := runtime.replace(func() (runtimeEngine, error) { return quality.New(cfg, native) }); err != nil {
+		if err := runtime.replace(func() (runtimeEngine, error) { return newApplication(cfg, native) }); err != nil {
 			return nil, err
 		}
 		return registration(), nil
@@ -218,7 +220,14 @@ func handle(method string, raw []byte) (any, error) {
 			}
 			resources = append(resources, route)
 		}
-		return map[string]any{"routes_v8": quality.ManagementRoutes(), "resources": resources}, nil
+		routes := quality.ManagementRoutes()
+		for index := range routes {
+			routes[index].Path = "/v0/management/plugins/model-quality" + routes[index].Path
+		}
+		for _, route := range login.ManagementRoutes() {
+			routes = append(routes, quality.ManagementRoute{Method: route["method"], Path: route["path"]})
+		}
+		return map[string]any{"routes": routes, "resources": resources}, nil
 	case pluginabi.MethodManagementHandle:
 		var req struct {
 			pluginapi.ManagementRequest
@@ -270,7 +279,7 @@ func handle(method string, raw []byte) (any, error) {
 		if at.IsZero() {
 			at = time.Now().UTC()
 		}
-		instance.engine.Usage(quality.UsageEvent{ID: record.RequestID, Source: record.TrafficSource, Provider: record.Provider, Model: record.Model, Failed: record.Failed, LatencyMS: record.Latency.Milliseconds(), TTFTMS: ttft, Tokens: record.Detail.TotalTokens, TokensKnown: record.Detail.TotalTokens > 0, Time: at})
+		instance.engine.Usage(quality.UsageEvent{ID: record.RequestID, Source: "unknown", Provider: record.Provider, Model: record.Model, Failed: record.Failed, LatencyMS: record.Latency.Milliseconds(), TTFTMS: ttft, Tokens: record.Detail.TotalTokens, TokensKnown: record.Detail.TotalTokens > 0, Time: at})
 		return struct{}{}, nil
 	}
 	return nil, fmt.Errorf("unknown plugin method")

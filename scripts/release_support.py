@@ -4,7 +4,7 @@ import hashlib
 import json
 
 ROOT = Path(__file__).resolve().parents[1]
-UI_NAMES = ('index.html', 'app.js', 'client.js', 'view.js', 'style.css')
+UI_NAMES = ('index.html', 'app.js', 'client.js', 'view.js', 'login.js', 'style.css')
 
 
 def digest(path):
@@ -28,7 +28,7 @@ def host_sources(root=ROOT):
 
 
 def source_files(directory):
-    allowed = {'.go', '.mod', '.sum', '.html', '.js', '.css', '.md', '.json', '.yaml', '.yml', '.sh', '.py', '.cjs', '.h', '.c', '.patch'}
+    allowed = {'.go', '.mod', '.sum', '.html', '.js', '.css', '.md', '.json', '.yaml', '.yml', '.sh', '.py', '.cjs', '.mjs', '.txt', '.h', '.c', '.patch'}
     return [p for p in directory.rglob('*') if p.is_file() and not p.is_symlink()
             and not {'__pycache__', '.git', 'auths', 'node_modules', 'plugin-data', '.cache', 'playwright-report', 'test-results'}.intersection(p.parts) and (p.suffix in allowed or p.name in {'LICENSE', 'NOTICE', 'CPA_LICENSE'})]
 
@@ -40,12 +40,15 @@ def snapshot(scope, root=ROOT):
         files.update(root / 'host-patches' / name for name in ('baseline.json', 'model-quality.patch'))
     if scope in {'plugin', 'native', 'all'}:
         files.update(source_files(root / 'plugin'))
+    if scope in {'runtime', 'all'}:
+        files.update(source_files(root / 'login-runtime'))
+        files.update(source_files(root / 'login-runtime-go'))
     if scope in {'ui', 'all'}:
         files.update(root / 'plugin/ui' / name for name in UI_NAMES)
-        files.add(root / 'scripts/verify_ui.cjs')
+        files.update(root / 'scripts' / name for name in ('verify_ui.cjs', 'test_question_test.mjs', 'build_ui.sh', 'verify_host_ui.cjs', 'verify_login_ui.cjs', 'verify_account_ui.cjs'))
     if scope == 'native':
         files.update(root / 'artifacts' / name for name in ('model-quality.dylib', 'cli-proxy-api-quality'))
-        files.update(root / 'scripts' / name for name in ('demo.py', 'verify_native_ui.cjs'))
+        files.update(root / 'scripts' / name for name in ('demo.py', 'verify_native_ui.cjs', 'verify_question_test.py'))
     return {str(p.relative_to(root)): digest(p) for p in sorted(files)}
 
 

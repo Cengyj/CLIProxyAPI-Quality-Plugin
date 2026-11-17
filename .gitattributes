@@ -1,2 +1,5 @@
 # Preserve patch bytes and their significant context-line whitespace.
 host-patches/*.patch -text -whitespace
+# Preserve upstream license bytes and recorded source checksums.
+login-runtime/licenses/** -text -whitespace
+login-runtime-go/licenses/** -text -whitespace

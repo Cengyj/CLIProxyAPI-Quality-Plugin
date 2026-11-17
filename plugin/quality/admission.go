@@ -38,7 +38,7 @@ func (en *Engine) validate(c *RunConfig) error {
 		return fmt.Errorf("temperature out of bounds")
 	}
 	switch c.Parameters.ReasoningEffort {
-	case "", "none", "minimal", "low", "medium", "high", "xhigh", "auto":
+	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max", "auto":
 	default:
 		return fmt.Errorf("invalid reasoning_effort")
 	}
@@ -84,6 +84,9 @@ func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, schedu
 		if rule == nil {
 			return nil, fmt.Errorf("rule not found")
 		}
+		if en.unsupportedRule(rule) {
+			return nil, unsupportedQuality()
+		}
 		if scheduledRevision != 0 && (rule.Revision != scheduledRevision || !en.cfg.SchedulingEnabled || !rule.SchedulingEnabled) {
 			return nil, fmt.Errorf("blocked: scheduled rule changed or scheduling disabled")
 		}
@@ -99,6 +102,9 @@ func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, schedu
 		}
 	}
 	c = cloneConfig(c)
+	if rule == nil && c.Judge.Mode == "manual" && c.Parameters.MaxTokens == 0 {
+		c.Parameters.MaxTokens = min(2048, en.cfg.MaxOutputTokens)
+	}
 	if e := en.validate(&c); e != nil {
 		return nil, e
 	}

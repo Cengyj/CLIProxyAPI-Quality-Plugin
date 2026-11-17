@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "runtime_version": "1.2.2",
+  "engine": "official_browser_forms",
+  "upstream_references": [
+    {
+      "repository": "https://github.com/ranxi2001/sub2api",
+      "commit": "ccf997c73868083d96c0bec56e71c1a34d26c98a",
+      "use": "Research only; no backend source bundled"
+    },
+    {
+      "repository": "https://github.com/poxiao33/toSub2",
+      "commit": "8548397e89bf80e508eda64a87e0d556d43abc84",
+      "file": "src/protocol-login.mjs",
+      "git_blob": "ff2db2507e401c29fa78705e44f5b40a3108a8c6",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 poxiao33",
+      "adapted_file": "totp.mjs",
+      "changes": "Extract SHA1 six-digit TOTP generation; strict Base32/otpauth validation; reject enrollment, rotation, nondefault TOTP parameters; injectable test clock. The protocol login engine is not bundled."
+    },
+    {
+      "local_reference": "/Users/ceng/Downloads/toSub2-go-port",
+      "use": "Existing-account protocol behavior reimplemented in reference-flow.mjs; official browser supplies JavaScript, cookies, network and human-verification boundary. No Go runtime, TLS fingerprint engine, challenge solver, registration or MFA enrollment code copied.",
+      "files": {
+        "internal/protocol/flow.go": "d2af8a13c05c5e994b8882426b92db41fb5b0f1acd194295fdb0039070aa6157",
+        "internal/protocol/client.go": "9fda6862f73162cb3be764d563f2d4a84fd2b0f636ae53eacc153df20f7e99ec",
+        "internal/protocol/recovery.go": "aa67297a73ba0ff2fdadf6e2b94d5ff5d688ff0274a033ae2647da616e8b6aff",
+        "internal/legacyruntime/sentinel.go": "1bcb62c09505747b176f22de8fd26d8bc0400929faa117e75b6bc2e2e616c5d4"
+      },
+      "reference_head": "2c2c841199b9ec7ba36588f6bf4ca129dd24f54e",
+      "reference_contains_local_changes": true
+    }
+  ],
+  "dependencies": {
+    "playwright-core": {
+      "version": "1.62.1",
+      "tarball": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.62.1.tgz",
+      "integrity": "sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==",
+      "license": "Apache-2.0",
+      "file_hashes": "playwright-files.json",
+      "modifications": "None. Worker configures child_process.spawn within its own process to retain the host-owned process group."
+    },
+    "node": {
+      "minimum_major": 22,
+      "packaging": "Explicit local executable and matching license; executable SHA-256 recorded per installed manifest."
+    },
+    "browser": {
+      "packaging": "Not bundled or downloaded. Explicit installed Chromium executable required; exact executable SHA-256 and version recorded per installed manifest."
+    }
+  },
+  "source_files": {
+    "worker.mjs": "6b316be15ac84fadf93fec5309aab9490acc54bd628687d5f90ff063fb627973",
+    "core.mjs": "e476cca28a4641f214647a4a256ee60b460b575422a29ca1d7ac32fc1e0e0428",
+    "totp.mjs": "5d51f9d41cc8f329624e1be5b445abb30c9411aec0e41e0612a9f4a9738b399f",
+    "process-scope.mjs": "6d53f71b6840e596d1e6d5640e13f4428510d9ea8c30d9275dc1b8cffb316531",
+    "package.json": "1e5c153611334c4821137661faa1e3199c1891cf40d3f3716848837e438ad27d",
+    "package-lock.json": "6a3a490dfb38726a7a4218c3b8851ebfe0b35c55f88547bcbc6126766529bcf9",
+    "playwright-files.json": "ae5d85df8c1ed65726245d12f8d680cbad410e8726120c7b9068ae2718d95132",
+    "reference-flow.mjs": "4d83f12e3360428b94a498db117eaaf4334ea9e89d1503019d91477793ea6e52"
+  },
+  "verification": "Offline dual-origin login including shared operation device identity, authenticated existing-session continuation and precise JSON/HTTP website-check classification, alongside password/TOTP/host-OAuth and scoped request tests. Real account outcome remains distinct from fixture results."
+}

@@ -16,7 +16,13 @@ func (en *Engine) Rules() []Rule {
 	defer en.mu.Unlock()
 	items := []Rule{}
 	for _, r := range en.rules {
-		items = append(items, *cloneRule(r))
+		next := cloneRule(r)
+		if en.unsupportedRule(next) {
+			next.Enabled = false
+			next.Status = "unsupported"
+			next.NextRun = time.Time{}
+		}
+		items = append(items, *next)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	return items
@@ -26,6 +32,9 @@ func (en *Engine) SaveRule(ctx context.Context, in Rule, update bool) (*Rule, er
 	defer en.mu.Unlock()
 	if en.closed || en.fault != nil {
 		return nil, fmt.Errorf("unavailable")
+	}
+	if en.unsupportedRule(&in) {
+		return nil, unsupportedQuality()
 	}
 	if e := en.validate(&in.RunConfig); e != nil {
 		return nil, e
@@ -81,6 +90,9 @@ func (en *Engine) SaveRule(ctx context.Context, in Rule, update bool) (*Rule, er
 	if update {
 		if old == nil {
 			return nil, fmt.Errorf("not_found: rule")
+		}
+		if !en.Capabilities().QualityPause && (old.ActionID != "" || old.BlockedAuthID != "") {
+			return nil, unsupportedQuality()
 		}
 		if in.Revision != old.Revision {
 			return nil, fmt.Errorf("conflict: stale rule revision")
@@ -178,6 +190,9 @@ func (en *Engine) PauseRule(id string, rev uint64, paused bool) error {
 	next.Revision++
 	resetRule(next)
 	if !paused {
+		if en.unsupportedRule(r) {
+			return unsupportedQuality()
+		}
 		if r.ActionID != "" {
 			return fmt.Errorf("blocked: owned pause requires manual release")
 		}
@@ -211,14 +226,18 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 	if r.Revision != rev {
 		return fmt.Errorf("conflict: stale rule revision")
 	}
-	actions, e := en.host.Actions(ctx)
-	if e != nil {
-		return e
-	}
-	for _, a := range actions {
-		if a.RuleID == id {
-			return fmt.Errorf("conflict: release owned pause before deleting rule")
+	if en.Capabilities().QualityPause {
+		actions, e := en.host.Actions(ctx)
+		if e != nil {
+			return e
 		}
+		for _, a := range actions {
+			if a.RuleID == id {
+				return fmt.Errorf("conflict: release owned pause before deleting rule")
+			}
+		}
+	} else if r.ActionID != "" || r.BlockedAuthID != "" {
+		return unsupportedQuality()
 	}
 	if r.ActionID != "" {
 		return fmt.Errorf("conflict: reconcile pending action before deleting rule")
@@ -300,6 +319,14 @@ func (en *Engine) decideLocked(run *Run) {
 		return
 	}
 	r.LastRun = run.ID
+	if !en.Capabilities().VerifiedEvidence {
+		r.FailCount = 0
+		r.EvidenceSignature = ""
+		out.ActionStatus = "observe_only"
+		c.rules[r.ID] = r
+		_ = en.commitLocked(c)
+		return
+	}
 	verdict := RoundVerdict(run)
 	var targets []Target
 	if verdict != "unknown" {
@@ -406,8 +433,35 @@ func (en *Engine) auditLocked(kind, ruleID, runID, actionID, detail string) {
 	a := Audit{ID: ID(), Time: en.now(), Kind: kind, RuleID: ruleID, RunID: runID, ActionID: actionID, Detail: detail}
 	en.persistFailure(en.store.Put("audit", a.ID, a))
 }
-func (en *Engine) Actions(ctx context.Context) ([]Action, error) { return en.host.Actions(ctx) }
+func (en *Engine) Actions(ctx context.Context) ([]Action, error) {
+	if en.Capabilities().QualityPause {
+		return en.host.Actions(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	en.mu.Lock()
+	defer en.mu.Unlock()
+	retained := []Action{}
+	for _, rule := range en.rules {
+		if rule.ActionID == "" {
+			continue
+		}
+		action := Action{AuthID: rule.AuthID, OwnerPlugin: "model-quality", RuleID: rule.ID, RuleRevision: rule.ActionRuleRevision, ActionID: rule.ActionID, ActionRevision: rule.ActionRevision, IdentityVersion: rule.IdentityVersion}
+		var intent Action
+		if err := en.store.Get("meta", "intent:"+rule.ActionID, &intent); err == nil {
+			action = intent
+		}
+		action.Status = "retained_unverified"
+		retained = append(retained, action)
+	}
+	sort.Slice(retained, func(i, j int) bool { return retained[i].ActionID < retained[j].ActionID })
+	return retained, nil
+}
 func (en *Engine) Preview(ctx context.Context, ruleID, actionID string, revision uint64) (map[string]any, error) {
+	if !en.Capabilities().ManualRelease {
+		return nil, unsupportedQuality()
+	}
 	actions, e := en.host.Actions(ctx)
 	if e != nil {
 		return nil, e
@@ -431,6 +485,9 @@ func (en *Engine) Release(ctx context.Context, ruleID, actionID string, revision
 	defer en.mu.Unlock()
 	if err := en.mutableLocked(); err != nil {
 		return err
+	}
+	if !en.Capabilities().ManualRelease {
+		return unsupportedQuality()
 	}
 	r := en.rules[ruleID]
 	if r == nil {

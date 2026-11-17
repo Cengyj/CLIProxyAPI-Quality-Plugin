@@ -18,6 +18,10 @@ type lifecycleHost struct {
 	pauses  int
 }
 
+func (h *lifecycleHost) Capabilities() HostCapabilities {
+	return HostCapabilities{Mode: "offline_verified_fixture", QualityPause: true, ManualRelease: true, VerifiedEvidence: true, ModelOperationCancel: true, StreamClose: true}
+}
+
 func (h *lifecycleHost) Targets(context.Context) ([]Target, error) { return []Target{h.target}, nil }
 func (h *lifecycleHost) Actions(context.Context) ([]Action, error) {
 	h.mu.Lock()

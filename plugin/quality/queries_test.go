@@ -54,7 +54,7 @@ func TestHistoryAndMetricsCorruptionReturnUnavailable(t *testing.T) {
 			if err := en.store.Write(func(tx *bolt.Tx) error { return tx.Bucket([]byte(bucket)).Put([]byte("broken"), []byte(`{`)) }); err != nil {
 				t.Fatal(err)
 			}
-			response := en.Handle(context.Background(), pluginapi.ManagementRequest{Method: "GET", Path: "/v8/management/plugins/model-quality/" + endpoint})
+			response := en.Handle(context.Background(), pluginapi.ManagementRequest{Method: "GET", Path: "/v0/management/plugins/model-quality/" + endpoint})
 			if response.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(response.Body), `"code":"unavailable"`) {
 				t.Fatal(response.StatusCode, string(response.Body))
 			}

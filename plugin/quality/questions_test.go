@@ -99,3 +99,51 @@ func TestQuestionTestDefaultsToManualWithoutChangingRules(t *testing.T) {
 		}
 	}
 }
+
+func TestManualQuestionOutputBudget(t *testing.T) {
+	zeroTemperature := 0.0
+	for _, scenario := range []struct {
+		name       string
+		mode       string
+		limit      int
+		parameters Parameters
+		want       int
+	}{
+		{name: "server default", limit: 4096, want: 2048},
+		{name: "budget below previous form default", mode: "manual", limit: 512, want: 512},
+		{name: "explicit historical parameters", mode: "manual", limit: 4096, parameters: Parameters{MaxTokens: 128, Temperature: &zeroTemperature}, want: 128},
+		{name: "explicit limit is not silently clamped", mode: "manual", limit: 512, parameters: Parameters{MaxTokens: 513}},
+		{name: "non-manual default unchanged", mode: "deterministic", limit: 4096, want: 1024},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			engine, _ := lifeFixture(t)
+			settings := engine.Config()
+			settings.MaxOutputTokens = scenario.limit
+			if err := engine.UpdateConfig(settings); err != nil {
+				t.Fatal(err)
+			}
+			config := lifeConfig()
+			config.QuestionID = "logic-candy"
+			config.Judge.Mode = scenario.mode
+			config.Parameters = scenario.parameters
+			run, err := engine.Submit(context.Background(), config)
+			if scenario.want == 0 {
+				if err == nil || !strings.Contains(err.Error(), "max_tokens out of bounds") {
+					t.Fatalf("expected explicit output budget rejection, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual := run.Config.Parameters
+			if actual.MaxTokens != scenario.want {
+				t.Fatalf("frozen output budget = %d, want %d", actual.MaxTokens, scenario.want)
+			}
+			if (actual.Temperature == nil) != (scenario.parameters.Temperature == nil) ||
+				(actual.Temperature != nil && *actual.Temperature != *scenario.parameters.Temperature) {
+				t.Fatalf("unexpected frozen temperature: %v", actual.Temperature)
+			}
+		})
+	}
+}

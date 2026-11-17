@@ -16,9 +16,10 @@ type ActionState struct {
 }
 
 func (h *NativeHost) ActionStatus(ctx context.Context, id string) (ActionState, error) {
-	var out ActionState
-	e := h.call(ctx, "host.quality.action_status", map[string]string{"action_id": id}, &out)
-	return out, e
+	if err := ctx.Err(); err != nil {
+		return ActionState{}, err
+	}
+	return ActionState{}, unsupportedQuality()
 }
 
 // Reconcile repairs state uncertainty without ever starting a model call or resuming a rule.
@@ -30,6 +31,10 @@ func (en *Engine) Reconcile(ctx context.Context) error {
 	}
 	if en.fault != nil {
 		return en.fault
+	}
+	if !en.Capabilities().QualityPause {
+		// An absent official authority cannot confirm, release, or replay a retained pause.
+		return nil
 	}
 	actions, err := en.host.Actions(ctx)
 	if err != nil {

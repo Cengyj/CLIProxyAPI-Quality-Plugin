@@ -1,11 +1,17 @@
 #!/bin/sh
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-case $(uname -s) in Darwin) EXT=dylib;; *) EXT=so;; esac
-mkdir -p "$ROOT/artifacts/verification"
-(cd "$ROOT/plugin" && go test ./...) > "$ROOT/artifacts/verification/plugin-tests.log" 2>&1
-(cd "$ROOT/plugin" && go test -race ./...) > "$ROOT/artifacts/verification/plugin-race.log" 2>&1
-(cd "$ROOT/workspaces/CLIProxyAPI" && go test ./...) > "$ROOT/artifacts/verification/host-go-test.log" 2>&1
-(cd "$ROOT/workspaces/CLIProxyAPI" && go test -race ./sdk/cliproxy/auth ./internal/pluginhost ./sdk/cliproxy/usage) > "$ROOT/artifacts/verification/host-race.log" 2>&1
-(cd "$ROOT/workspaces/CLIProxyAPI" && MODEL_QUALITY_LIBRARY="$ROOT/artifacts/model-quality.$EXT" go test -count=1 -run TestModelQualityNativeLifecycle -v ./internal/pluginhost) > "$ROOT/artifacts/verification/native-e2e.log" 2>&1
-python3 "$ROOT/scripts/verify_baseline.py" --reference
+TASK_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+TASK_GO=${GO_BIN:-go}
+mkdir -p "$TASK_ROOT/artifacts/official-plugin/verification"
+(cd "$TASK_ROOT/plugin" && "$TASK_GO" test ./...) > "$TASK_ROOT/artifacts/official-plugin/verification/plugin-tests.log" 2>&1
+(cd "$TASK_ROOT/plugin" && "$TASK_GO" test -race ./...) > "$TASK_ROOT/artifacts/official-plugin/verification/plugin-race.log" 2>&1
+(cd "$TASK_ROOT/login-runtime-go" && "$TASK_GO" test ./...) > "$TASK_ROOT/artifacts/official-plugin/verification/runtime-tests.log" 2>&1
+(cd "$TASK_ROOT/plugin" && "$TASK_GO" test -tags loginbundle_embedded ./...) > "$TASK_ROOT/artifacts/official-plugin/verification/embedded-bundle.log" 2>&1
+python3 "$TASK_ROOT/scripts/verify_baseline.py" --source "$TASK_ROOT/workspaces/CLIProxyAPI-official"
+(cd "$TASK_ROOT/workspaces/CLIProxyAPI-official" && "$TASK_GO" build -o "$TASK_ROOT/artifacts/official-plugin/cli-proxy-api-official" ./cmd/server)
+TASK_ARCHIVE=$(python3 - "$TASK_ROOT/artifacts/official-plugin/build-manifest.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))['archive'])
+PY
+)
+python3 "$TASK_ROOT/scripts/verify_official_plugin.py" --archive "$TASK_ARCHIVE"

@@ -122,6 +122,10 @@ func (en *Engine) evaluate(ctx context.Context, runID string, f Frozen, authID, 
 	s := en.host.Execute(ctx, Execution{ResponseLimit: responseLimit, AuthID: authID, Provider: provider, Model: model, Prompt: f.Question.Prompt, Source: source, Parameters: f.Parameters})
 	s.Model = model
 	s.QualityVerdict = "unknown"
+	if !en.Capabilities().VerifiedEvidence {
+		s.Evidence.Verified = false
+		s.Evidence.Reason = "official_host_evidence_unavailable"
+	}
 	s.Comparable = s.ExecutionStatus == "completed" && s.Evidence.Verified && !s.Evidence.ConditionsChanged && s.Evidence.AuthID == authID && s.Evidence.RequestedModel == model && s.Evidence.ResolvedModel != "" && s.Evidence.PayloadFingerprint != "" && f.PayloadConfigVersion != "" && s.Evidence.PayloadConfigVersion == f.PayloadConfigVersion
 	if err := en.account(day, s.Usage); err != nil {
 		return s, err
