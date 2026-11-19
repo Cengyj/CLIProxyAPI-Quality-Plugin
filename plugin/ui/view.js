@@ -383,7 +383,7 @@ export function renderSampleEvidence(sample = {}, manual = false, credentialLabe
     ])}</details>${evidenceJSON(copy)}`;
 }
 
-function renderAnswer(sample, arrayIndex, ordinal, isActive, control = false, simple = false, idPrefix = '') {
+function renderAnswer(sample, arrayIndex, ordinal, isActive, { control, simple, qualityDetail }) {
   const model = sample.model || sample.request_model || '模型未知';
   const output = sample.output || '';
   const isHTML = /<(?:html|svg|!doctype)/i.test(output);
@@ -391,6 +391,8 @@ function renderAnswer(sample, arrayIndex, ordinal, isActive, control = false, si
   const pending = ['pending', 'queued', 'running'].includes(sample.execution_status);
   const emptyText = pending ? '正在等待回答，取得结果后会在这里更新。' : '本次没有取得回答内容，请查看执行状态。';
   const review = sample.review || 'unknown';
+  const idPrefix = qualityDetail ? 'quality-' : '';
+  const statusHTML = qualityDetail ? '' : `<div class="sample-statuses">${simple ? answerTag(sample) : sampleStates(sample)}</div>`;
   const actions = control ? '' : `<div class="sample-actions" data-part="actions">
     ${output.length > 1500 || output.split("\n").length > 12 ? `<button class="text-button" data-expand-sample="${arrayIndex}" aria-expanded="false">展开完整回答</button>` : ''}
     <button class="text-button" data-copy-sample="${arrayIndex}" ${!output ? 'disabled' : ''}>复制原文</button>
@@ -410,14 +412,14 @@ function renderAnswer(sample, arrayIndex, ordinal, isActive, control = false, si
     </details>`;
   const reason = sample.error || (!simple || sample.reason !== 'manual assessment required' ? sample.reason : '');
   return `<article class="sample${control ? ' control-sample' : ''}" data-key="${escapeHTML(`${control ? 'control-' : ''}sample:${JSON.stringify([model, ordinal])}`)}" data-model="${escapeHTML(model)}" data-sample="${ordinal}">
-    <div class="sample-heading" data-part="heading"><span class="sample-model-label" title="${escapeHTML(model)}">${escapeHTML(model)}</span><h4 class="sample-title"><span class="sample-number" aria-hidden="true">${String(ordinal + 1).padStart(2, '0')}</span><span>${control ? '对照 · ' : ''}${simple ? '回答' : '样本'} ${ordinal + 1}</span></h4><div class="sample-statuses">${simple ? answerTag(sample) : sampleStates(sample)}</div></div>
+    <div class="sample-heading" data-part="heading"><span class="sample-model-label" title="${escapeHTML(model)}">${escapeHTML(model)}</span><h4 class="sample-title"><span class="sample-number" aria-hidden="true">${String(ordinal + 1).padStart(2, '0')}</span><span>${control ? '对照 · ' : ''}${simple ? '回答' : '样本'} ${ordinal + 1}</span></h4>${statusHTML}</div>
     <pre class="answer-text ${isCode ? 'answer-code' : 'answer-prose'}" data-part="output" tabindex="0" aria-label="${escapeHTML(model)} 样本 ${ordinal + 1} 回答">${escapeHTML(output || emptyText)}</pre>
     <p class="sample-reason${reason ? '' : ' hidden'}" data-part="reason">${reason ? escapeHTML(reasonLabel(reason)) : ''}</p>
     <div class="sample-footer" data-part="footer"><div class="sample-meta" data-part="meta"><span>总耗时 <strong>${duration(sample.total_ms)}</strong></span><span>首字时间 <strong>${duration(sample.ttft_ms)}</strong></span><span>用量 <strong>${escapeHTML(formatSampleUsage(sample))}</strong></span></div>
     ${actions}</div>${reviewHTML}</article>`;
 }
 
-export function renderRunEvidence(run = {}, credentialName = id => id, idPrefix = '') {
+export function renderRunEvidence(run = {}, credentialName = id => id, { qualityDetail = false } = {}) {
   const config = run.config || {};
   const credentialLabel = run.credential_email || credentialName(config.auth_id);
   const samples = run.samples || [];
@@ -439,14 +441,14 @@ export function renderRunEvidence(run = {}, credentialName = id => id, idPrefix 
     const entries = samples.map((sample, index) => ({ sample, index })).filter(({ sample }) => (sample.model || sample.request_model || '模型未知') === model);
     const content = Array.from({ length: count }, (_, ordinal) => {
       const entry = entries.find(({ sample }, localIndex) => (sample.index ?? localIndex) === ordinal);
-      if (entry) return renderAnswer(entry.sample, entry.index, ordinal, isActive, false, simple, idPrefix);
+      if (entry) return renderAnswer(entry.sample, entry.index, ordinal, isActive, { simple, qualityDetail });
       if (modelIndex * count + ordinal < (run.pruned_samples || 0)) return '';
       return `<article class="sample sample-pending" data-key="${escapeHTML(`sample:${JSON.stringify([model, ordinal])}`)}" data-model="${escapeHTML(model)}" data-sample="${ordinal}"><div class="sample-heading" data-part="heading"><span class="sample-model-label" title="${escapeHTML(model)}">${escapeHTML(model)}</span><h4 class="sample-title"><span class="sample-number" aria-hidden="true">${String(ordinal + 1).padStart(2, '0')}</span><span>${simple ? '回答' : '样本'} ${ordinal + 1}</span></h4>${tag(isActive ? '等待结果' : simple ? '回答缺失' : '样本缺失', isActive ? 'neutral' : 'warn')}</div><p class="empty-line" data-part="pending">${isActive ? '后台按计划执行，结果取得后在此更新。' : simple ? '未取得这份回答，请查看执行状态。' : '本轮未取得该样本，不能作为完整失败证据。'}</p></article>`;
     }).join('');
-    const extras = entries.filter(({ sample }, localIndex) => (sample.index ?? localIndex) >= count).map(({ sample, index }) => renderAnswer(sample, index, sample.index ?? index, isActive, false, simple, idPrefix)).join('');
+    const extras = entries.filter(({ sample }, localIndex) => (sample.index ?? localIndex) >= count).map(({ sample, index }) => renderAnswer(sample, index, sample.index ?? index, isActive, { simple, qualityDetail })).join('');
     return `<section class="model-result" data-key="${escapeHTML(`model:${model}`)}" data-model="${escapeHTML(model)}"><div class="model-heading" data-part="model-heading"><div class="model-identity"><h3 title="${escapeHTML(model)}">${escapeHTML(model)}</h3><span>${entries.length} / ${count} 份结果</span></div><button type="button" class="text-button model-copy" data-copy-model="${escapeHTML(model)}" aria-label="复制模型 ID ${escapeHTML(model)}">复制 ID</button></div>${content}${extras}</section>`;
   }).join('');
-  const controlHTML = run.controls?.length ? `<details class="control-results" data-key="controls"><summary>同批对照 · ${run.controls.length} 份结果</summary><p class="field-note">只有身份不同、同题、同模型映射、同有效条件的通过样本才构成有效对照。</p><div class="comparison-grid">${run.controls.map((sample, index) => `<section class="model-result" data-key="${escapeHTML(`control-model:${index}:${sample.model || '模型未知'}`)}"><div class="model-heading" data-part="model-heading"><h3>${escapeHTML(sample.model || '模型未知')}</h3><span>对照凭证</span></div>${renderAnswer(sample, index, sample.index ?? index, isActive, true)}</section>`).join('')}</div></details>` : '';
+  const controlHTML = run.controls?.length ? `<details class="control-results" data-key="controls"><summary>同批对照 · ${run.controls.length} 份结果</summary><p class="field-note">只有身份不同、同题、同模型映射、同有效条件的通过样本才构成有效对照。</p><div class="comparison-grid">${run.controls.map((sample, index) => `<section class="model-result" data-key="${escapeHTML(`control-model:${index}:${sample.model || '模型未知'}`)}"><div class="model-heading" data-part="model-heading"><h3>${escapeHTML(sample.model || '模型未知')}</h3><span>对照凭证</span></div>${renderAnswer(sample, index, sample.index ?? index, isActive, { control: true, qualityDetail })}</section>`).join('')}</div></details>` : '';
   return {
     metaHTML,
     conditionsHTML: renderFrozenConditions(run, credentialLabel, credentialName),
@@ -460,7 +462,7 @@ export function renderQualityDetail(run, rules, credentialName) {
   const config = run.config || {};
   const ruleID = run.rule_id || config.rule_id;
   const ruleName = rules.find(rule => rule.id === ruleID)?.name || ruleID || '规则检测';
-  const { conditionsHTML, samplesHTML, completed, planned } = renderRunEvidence(run, credentialName, 'quality-');
+  const { conditionsHTML, samplesHTML, completed, planned } = renderRunEvidence(run, credentialName, { qualityDetail: true });
   const samples = (run.samples || []).filter(completedSample);
   const { correct, incorrect, unknown } = qualityCounts(samples);
   const verdict = [[correct, '正确', 'good'], [incorrect, '错误', 'warn'], [unknown, '无法判断', 'neutral']]

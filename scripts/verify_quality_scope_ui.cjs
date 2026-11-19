@@ -64,6 +64,7 @@ async function main() {
         Object.assign(children[0].config, {samples:1, question:{id:'logic-candy',kind:'logic', answer:'21'}, judge:{mode:'deterministic'}});
         Object.assign(children[0], {action_status:'observe_only', samples:[{model:'shared', index:0, execution_status:'completed', quality_verdict:'correct', comparable:false, output:'21', reason:'exact answer', evidence:{path:'cpa_management_probe',reason:'management_probe_not_business_payload'}}]});
         children[1].config.auth_id = directory[122].auth_id;
+        children[1].samples = [{model:'shared', index:0, execution_status:'completed', quality_verdict:'incorrect', output:'22'}];
         rules[0].last_scope_batch='test-batch';return route.fulfill({status:202,json:{count:23,skipped:100,scope_batch_id:'test-batch'}});
       }
       unexpected.push(p);return route.abort();
@@ -325,6 +326,9 @@ async function main() {
     await openRow(0); await text('#quality-detail-message','正在读取');
     await page.keyboard.press('Escape'); await openRow(1);
     await text('.quality-detail-identity','fixture-122');
+    assert.equal(await el('.quality-detail-facts dd').first().innerText(),'错误');
+    assert.equal(await el('#quality-detail .sample-heading .tag').count(),0);
+    assert.equal(await el('#quality-detail .answer-text').innerText(),'22');
     const late = page.waitForResponse(response => response.url().endsWith('/runs/detail?id=run-0'));
     releaseDetail(); await late; detailGate = null;
     assert.equal(await el('.quality-detail-identity > strong').innerText(),'fixture-122');
@@ -334,7 +338,8 @@ async function main() {
     failDetail = false; await click('#quality-detail-retry');
     await text('.quality-detail-identity','snapshot@example.test'); await text('.quality-detail-facts','未处理凭证');
     assert.equal(await el('.quality-detail-facts dd').first().innerText(),'正确');
-    await text('.quality-detail-question','21'); await text('#quality-detail .sample-heading','正确');
+    await text('.quality-detail-question','21'); await text('#quality-detail .sample-heading','样本 1');
+    assert.equal(await el('#quality-detail .sample-heading .tag').count(),0);
     assert.equal(await el('#quality-detail .answer-text').innerText(),'21');
     assert.doesNotMatch(await dialog.innerText(),/证据不足/);
     assert(await el('#page-operations').isVisible()); assert(await el('#page-manual').isHidden());

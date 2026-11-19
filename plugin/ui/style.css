@@ -201,7 +201,6 @@ dialog .button-row.end { margin-top: 22px; padding-top: 18px; border-top: 1px so
 .quality-detail-answers .sample-reason { padding-inline: 14px; margin-bottom: 10px; }
 .quality-detail-answers .sample-footer { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; padding: 5px 14px; }
 .quality-detail-answers .sample-meta { margin: 0; }
-.quality-detail-answers .sample-state:last-child .tag.bad { color: var(--warn); background: var(--warn-bg); }
 .quality-detail-conditions { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; min-width: 0; }
 .quality-detail-conditions > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .quality-detail-conditions .run-identifier { overflow-wrap: anywhere; }
