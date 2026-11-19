@@ -8,8 +8,19 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func (en *Engine) validate(c *RunConfig) error {
-	if c.AuthID == "" || c.Provider == "" || len(c.AuthID) > 512 || len(c.Provider) > 128 {
+func (en *Engine) validateManual(c *RunConfig) error {
+	if len(c.Models) > maxManualModels {
+		return fmt.Errorf("models out of bounds")
+	}
+	return en.validateConfig(c, false)
+}
+
+func (en *Engine) validateConfig(c *RunConfig, scoped bool) error {
+	if scoped {
+		if c.AuthID != "" || c.Provider != "" || c.ControlAuthID != "" || c.ControlProvider != "" || c.Judge.Mode == "llm" || c.Judge.AuthID != "" {
+			return fmt.Errorf("invalid_request: all-enabled observation cannot bind a subject, judge or control credential")
+		}
+	} else if c.AuthID == "" || c.Provider == "" || len(c.AuthID) > 512 || len(c.Provider) > 128 {
 		return fmt.Errorf("auth_id and provider are required")
 	}
 	if len(c.Models) < 1 || len(c.Models) > en.cfg.MaxModels {
@@ -29,7 +40,7 @@ func (en *Engine) validate(c *RunConfig) error {
 		return fmt.Errorf("samples must be 1..8 and within total budget")
 	}
 	if c.Parameters.MaxTokens == 0 {
-		c.Parameters.MaxTokens = 1024
+		c.Parameters.MaxTokens = min(1024, en.cfg.MaxOutputTokens)
 	}
 	if c.Parameters.MaxTokens < 16 || c.Parameters.MaxTokens > en.cfg.MaxOutputTokens {
 		return fmt.Errorf("max_tokens out of bounds")
@@ -75,6 +86,10 @@ func (en *Engine) Submit(ctx context.Context, c RunConfig) (*Run, error) {
 func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, scheduledRevision uint64) (*Run, error) {
 	en.mu.Lock()
 	defer en.mu.Unlock()
+	return en.submitLocked(ctx, c, ruleID, scheduledRevision, en.host.Targets)
+}
+
+func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, scheduledRevision uint64, inventory func(context.Context) ([]Target, error)) (*Run, error) {
 	if en.closed || en.fault != nil {
 		return nil, fmt.Errorf("unavailable: plugin is stopping or persistence failed")
 	}
@@ -87,7 +102,10 @@ func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, schedu
 		if en.unsupportedRule(rule) {
 			return nil, unsupportedQuality()
 		}
-		if scheduledRevision != 0 && (rule.Revision != scheduledRevision || !en.cfg.SchedulingEnabled || !rule.SchedulingEnabled) {
+		if dynamicScope(rule.TargetScope) {
+			return nil, fmt.Errorf("invalid_request: dynamic scope requires batch admission")
+		}
+		if scheduledRevision != 0 && (rule.Revision != scheduledRevision || !en.timerAllowed(rule)) {
 			return nil, fmt.Errorf("blocked: scheduled rule changed or scheduling disabled")
 		}
 		if !rule.Enabled || ruleStatus(rule) != "detecting" {
@@ -96,7 +114,7 @@ func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, schedu
 		c = rule.RunConfig
 		c.IdempotencyKey = ""
 		for _, r := range en.runs {
-			if r.Config.RuleID == ruleID && (r.Status == "queued" || r.Status == "running") {
+			if r.Config.RuleID == ruleID && (r.Status == "queued" || r.Status == "running" || en.active[r.ID] != nil) {
 				return nil, fmt.Errorf("conflict: rule already running")
 			}
 		}
@@ -105,8 +123,14 @@ func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, schedu
 	if rule == nil && c.Judge.Mode == "manual" && c.Parameters.MaxTokens == 0 {
 		c.Parameters.MaxTokens = min(2048, en.cfg.MaxOutputTokens)
 	}
-	if e := en.validate(&c); e != nil {
-		return nil, e
+	var validationErr error
+	if rule == nil {
+		validationErr = en.validateManual(&c)
+	} else {
+		validationErr = en.validateConfig(&c, false)
+	}
+	if validationErr != nil {
+		return nil, validationErr
 	}
 	requestHash := fingerprint(c)
 	if c.IdempotencyKey != "" {
@@ -118,7 +142,7 @@ func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, schedu
 			if r := en.runs[prior.ID]; r != nil {
 				return cloneRun(r), nil
 			}
-			return nil, fmt.Errorf("gone: idempotent run was removed by retention")
+			return nil, fmt.Errorf("gone: idempotent run was removed")
 		}
 	}
 	if err := en.storageAdmission(); err != nil {
@@ -130,9 +154,26 @@ func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, schedu
 	if len(en.queue) >= cap(en.queue) {
 		return nil, fmt.Errorf("queue_full: retry later")
 	}
-	targets, e := en.host.Targets(ctx)
+	targets, e := inventory(ctx)
 	if e != nil {
 		return nil, fmt.Errorf("host targets unavailable: %w", e)
+	}
+	if d := en.managed[c.AuthID]; d != nil && d.RuleID == ruleID {
+		found := false
+		for _, t := range targets {
+			if t.AuthID == c.AuthID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			en.noteRoundEndLocked(ruleID)
+		}
+	}
+	var managed *CredentialSnapshot
+	targets, managed, e = en.managedTargetsLocked(ctx, rule, targets)
+	if e != nil {
+		return nil, e
 	}
 	if paused := pausedTarget(c, targets); paused != "" {
 		if err := en.haltCredentialLocked(paused, "", "quality_paused"); err != nil {
@@ -215,8 +256,11 @@ func (en *Engine) submit(ctx context.Context, c RunConfig, ruleID string, schedu
 		r.Source = "scheduled_probe"
 		r.Config.RuleID = rule.ID
 		r.Config.RuleRevision = rule.Revision
+		r.Config.Scheduled = scheduledRevision != 0
 		r.ActionStatus = "observe_only"
+		r.Config.ManagedProbe = managed
 	}
+	r.CredentialEmail = target.Email
 	if judge != nil {
 		r.Config.JudgeIdentity = judge.IdentityVersion
 	}

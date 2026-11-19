@@ -125,6 +125,9 @@ func (s *Store) Prune(before time.Time, keep map[string]bool, cutoffs map[string
 						return e
 					}
 					ts = r.Time
+					if custom, ok := cutoffs[r.RunID]; ok {
+						cutoff = custom
+					}
 				}
 				if !ts.IsZero() && ts.Before(cutoff) {
 					if e := c.Delete(); e != nil {

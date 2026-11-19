@@ -154,8 +154,8 @@ def main():
     files.update(ROOT / 'artifacts' / name for name in ('model-quality.dylib', 'model-quality.h', 'cli-proxy-api-quality'))
     files.update(ROOT / 'artifacts/ui' / name for name in (*UI_NAMES, 'manifest.json'))
     files.add(ROOT / 'artifacts/config/model-quality.example.yaml')
-    files.add(ROOT / '.impeccable/surfaces/plugin-ui-index-html.md')
-    files.add(ROOT / '.impeccable/design.json')
+    files.add(ROOT / 'docs/UI_DESIGN_BRIEF.md')
+    files.add(ROOT / 'docs/design-system.json')
     baseline_dir = evidence.parent / 'baseline'
     for rel in ('baseline.json', 'paired-clean/ui-results.json'):
         path = baseline_dir / rel

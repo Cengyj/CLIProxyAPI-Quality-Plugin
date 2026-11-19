@@ -32,6 +32,9 @@ const journalReserveBytes int64 = 8 << 20
 const terminalRetention = 30 * 24 * time.Hour
 
 type storedJob struct {
+	AuthorizationSavedAt              string
+	HistoryDeleted                    bool
+	PlanObserved                      bool
 	SecurityAccountID                 string
 	SecurityStarted                   bool
 	SecurityResolved                  bool
@@ -240,36 +243,47 @@ func canonicalRequest(raw []byte) (string, error) {
 	}
 	return encode(ojson.ParseBytes(raw))
 }
-func (j *journal) save(v storedJob) error {
-	return j.db.Update(func(tx *bolt.Tx) error {
-		var previous storedJob
-		raw := tx.Bucket([]byte("jobs")).Get([]byte(v.View.ID))
-		if raw != nil {
-			if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&previous); err != nil {
-				return err
-			}
-		}
-		// Keep the event and the state it describes in the same transaction.
-		v.LogVersion, v.LogEntries = previous.LogVersion, previous.LogEntries
-		if raw == nil {
-			v.LogVersion = 1
-		}
-		event := safeLogEntry(v.View)
-		if raw == nil || event != safeLogEntry(previous.View) {
-			event.ID = 1
-			if len(v.LogEntries) > 0 {
-				event.ID = v.LogEntries[len(v.LogEntries)-1].ID + 1
-			}
-			event.Time = j.now().UTC().Format(time.RFC3339Nano)
-			v.LogEntries = append(v.LogEntries, event)
-			if len(v.LogEntries) > maxJobLogEntries {
-				v.LogEntries = v.LogEntries[len(v.LogEntries)-maxJobLogEntries:]
-			}
-		}
-		v.View.AuthorizationURL, v.View.Email = "", ""
-		return putGob(tx, "jobs", v.View.ID, v)
-	})
+func (j *journal) save(v storedJob, diagnostic ...LogEntry) error {
+	return j.db.Update(func(tx *bolt.Tx) error { return j.saveTx(tx, v, diagnostic...) })
 }
+
+// saveTx preserves the diagnostic stream when job state shares a transaction
+// with account credentials or admission metadata.
+func (j *journal) saveTx(tx *bolt.Tx, v storedJob, diagnostic ...LogEntry) error {
+	var previous storedJob
+	raw := tx.Bucket([]byte("jobs")).Get([]byte(v.View.ID))
+	if raw != nil {
+		if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&previous); err != nil {
+			return err
+		}
+	}
+	// Keep the event and the state it describes in the same transaction.
+	v.LogVersion, v.LogEntries = previous.LogVersion, previous.LogEntries
+	if raw == nil {
+		v.LogVersion = 1
+	}
+	events := []LogEntry{}
+	event := safeLogEntry(v.View)
+	if raw == nil || event != safeLogEntry(previous.View) {
+		events = append(events, event)
+	}
+	events = append(events, diagnostic...)
+	for _, event := range events {
+		event.Revision = v.View.Revision
+		event.ID = 1
+		if len(v.LogEntries) > 0 {
+			event.ID = v.LogEntries[len(v.LogEntries)-1].ID + 1
+		}
+		event.Time = j.now().UTC().Format(time.RFC3339Nano)
+		v.LogEntries = append(v.LogEntries, event)
+		if len(v.LogEntries) > maxJobLogEntries {
+			v.LogEntries = v.LogEntries[len(v.LogEntries)-maxJobLogEntries:]
+		}
+	}
+	v.View.AuthorizationURL, v.View.Email = "", ""
+	return putGob(tx, "jobs", v.View.ID, v)
+}
+
 func (j *journal) load() ([]storedJob, error) {
 	out := []storedJob{}
 	err := j.db.View(func(tx *bolt.Tx) error {
@@ -324,7 +338,7 @@ func (j *journal) idempotent(key, path string, raw []byte, fn func() (any, error
 		}
 		return old.Response, nil
 	}
-	maintenance := strings.HasSuffix(path, "/cancel") || strings.HasSuffix(path, "/discard") || strings.HasSuffix(path, "/commit") || strings.HasPrefix(path, "DELETE")
+	maintenance := strings.HasSuffix(path, "/cancel") || strings.HasSuffix(path, "/discard") || strings.HasSuffix(path, "/commit") || path == "POST/accounts/security/complete" || strings.HasPrefix(path, "DELETE")
 	if err = j.capacity(maintenance); err != nil {
 		return nil, err
 	}

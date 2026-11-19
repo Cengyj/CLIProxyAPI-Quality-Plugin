@@ -77,7 +77,7 @@ const server = http.createServer(async (req,res) => {
   if(suffix==='/accounts/entry') {
     if(req.method==='PUT'&&holdAccountWrite) { holdAccountWrite=false;await new Promise(resolve=>{releaseAccountWrite=resolve;accountWriteStarted();}); }
     if(!account||body.revision!==account.revision) return json(res,{code:'conflict'},409);
-    if(req.method==='DELETE') accounts.splice(accounts.indexOf(account),1);
+    if(req.method==='DELETE') { accounts.splice(accounts.indexOf(account),1);credentials.delete(account.id);return json(res,{deleted:true}); }
     else { Object.assign(account,{label:body.label,auto_relogin:body.auto_relogin,proxy_url:body.proxy_url??account.proxy_url,revision:account.revision+1});if(body.credentials)credentials.set(account.id,{...body.credentials}); }
     return json(res,account||{});
   }
@@ -335,7 +335,7 @@ const server = http.createServer(async (req,res) => {
   assert.equal(await page.locator('#account-search').inputValue(),startQuery);assert(await page.locator('#login-view-accounts').isVisible());
   assert(await row().locator('[data-account-action=start]').isDisabled());assert.equal(accounts[0].auth_id,'');
   await capture('login-started-in-list-light-1280');
-  assert.match(await page.locator('#login-notice').innerText(),/自动保存并启用/);
+  assert.equal(await page.locator('#login-notice').count(),0);
   const loginJob=jobs[0];
   Object.assign(loginJob,{status:'committing',phase:'saving',revision:loginJob.revision+1});
   Object.assign(accounts[0],{last_job_status:'committing',revision:accounts[0].revision+1});
@@ -409,7 +409,7 @@ const server = http.createServer(async (req,res) => {
   Object.assign(accounts[0],{security_pending:true,last_job_id:resetJob.id,last_job_status:'security_uncertain',last_job_action:'reset_totp',last_job_totp_reset:false,last_job_devices_logged_out:false,revision:accounts[0].revision+1});
   securityRecoveries.set(accounts[0].id,{job_id:resetJob.id,new_totp_secret:'MFRGGZDFMZTWQ2LK',activation_confirmed:false,can_complete:false,phase:'totp_activate'});await refresh();
   assert(await row().locator('[data-account-action=start]').isDisabled());await row().locator('[data-account-action=more]').click();
-  assert(await page.locator('#account-reset-totp').isDisabled());assert(await page.locator('#account-logout-all').isDisabled());assert(await page.locator('#account-menu-delete').isDisabled());await page.keyboard.press('Escape');
+  assert(await row().locator('[data-account-action=reset_totp]').isDisabled());assert(await page.locator('#account-logout-all').isDisabled());assert(await row().locator('[data-account-action=delete]').isDisabled());await page.keyboard.press('Escape');
   await row().locator('[data-account-action=edit]').click();await page.locator('#account-security-recovery').waitFor();await page.waitForFunction(()=>document.querySelector('#account-security-recovery-secret').value==='MFRGGZDFMZTWQ2LK');
   assert(await page.locator('#account-editor-save').isDisabled());assert(await page.locator('#account-replace-secrets').isDisabled());assert(await page.locator('#account-delete-open').isDisabled());
   assert(!await page.locator('#account-security-complete').isVisible());assert(await page.locator('#account-security-recovery-secret').isEnabled());assert(await page.locator('#account-security-recovery-secret').evaluate(n=>n.readOnly));assert.match(await page.locator('#account-security-recovery-note').innerText(),/不代表它已生效/);
@@ -833,7 +833,11 @@ const server = http.createServer(async (req,res) => {
   checks.push('Desktop login/save/confirm actions and complete account fields stay visible; all three views and import/editor/candidate/empty states fit three themes and desktop/phone sizes, including the 1554×605 reference viewport and 360/768/1440px widths');
   accounts.splice(0,accounts.length,...originalAccounts);jobs.splice(1);await refresh();
   await page.setViewportSize({width:1280,height:800});
-  await page.locator('#account-list .account-row').filter({hasText:'second@example.test'}).locator('[data-account-action=more]').click();await page.locator('#account-menu-delete').click();await editorReady();await page.locator('#account-delete-confirm').waitFor();assert.equal(accounts.length,2);await page.locator('#account-delete-yes').click();await page.waitForFunction(()=>document.querySelectorAll('#account-list .account-row').length===1);
+  const deleteBoundary=calls.length;
+  await page.locator('#account-list .account-row').filter({hasText:'second@example.test'}).locator('[data-account-action=delete]').click();
+  await page.locator('#account-delete-confirm').waitFor();assert(await page.locator('#account-editor-dialog').isHidden());assert.equal(accounts.length,2);
+  await page.locator('#account-delete-yes').click();await page.waitForFunction(()=>document.querySelectorAll('#account-list .account-row').length===1);
+  assert(!calls.slice(deleteBoundary).some(c=>c.path.endsWith('/accounts/detail')));
   assert.equal(accounts[0].auth_id,target.auth_id);checks.push('Deleting a saved account requires confirmation and leaves the CPA credential intact');
   await page.locator('#account-import-open').click();await page.locator('#account-import-text').fill('clear-on-401@example.test----unsaved-password----JBSWY3DPEHPK3PXP');
   assert.notEqual(await page.locator('#account-import-text').inputValue(),'');

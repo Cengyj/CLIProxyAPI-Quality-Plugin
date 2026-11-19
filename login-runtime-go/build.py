@@ -38,7 +38,7 @@ def main():
         if result.stderr or len(result.stdout) > 12288:
             raise ValueError('native self-test produced invalid diagnostics')
         probe = json.loads(result.stdout)
-        if probe['engine'] != 'go_sobek_protocol' or probe['runtime_version'] != '2.1.0' or probe['node_required'] or probe['browser_required']:
+        if probe['engine'] != 'go_sobek_protocol' or probe['runtime_version'] != '2.2.1' or probe['node_required'] or probe['browser_required']:
             raise ValueError('native self-test engine mismatch')
         for name in ('NOTICE.md', 'SOURCE_MANIFEST.json', 'UPSTREAM_SOURCE_MANIFEST.json'):
             shutil.copyfile(ROOT / name, stage / name)

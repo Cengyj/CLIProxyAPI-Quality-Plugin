@@ -3,11 +3,12 @@ package login
 
 import (
 	"context"
+	"github.com/MoeForge/moego/regexp"
 	"html"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/base64"
 	json "github.com/MoeForge/moego/json"
@@ -138,7 +139,7 @@ func (f *flow) securityHeaders(token, account string) http.Header {
 	return h
 }
 
-// Every mutation is dispatched once, without challenge replay or HTTP retry.
+// Mutations retry only when transport proves HTTP was never sent; challenges never replay.
 // A complete response is evidence even if closing its transport reports an error.
 func (f *flow) securityRequest(ctx context.Context, token, account, method, path string, body any) (*transport.Response, payload, error) {
 	headers := f.securityHeaders(token, account)
@@ -146,11 +147,14 @@ func (f *flow) securityRequest(ctx context.Context, token, account, method, path
 		headers.Set("Cache-Control", "no-cache, no-store")
 		headers.Set("Pragma", "no-cache")
 	}
-	opt := RequestOptions{Headers: headers, Referer: f.p.chat + "/", Origin: f.p.chat, DisableDefaultHeaders: true, DisableChallengeReplay: true, SingleAttempt: method != http.MethodGet, MaxResponseBytes: 256 << 10, CaptureResponse: true, JSON: body}
+	opt := RequestOptions{Headers: headers, Referer: f.p.chat + "/", Origin: f.p.chat, DisableDefaultHeaders: true, DisableChallengeReplay: true, SingleAttempt: method == http.MethodGet, RetryBeforeSend: method != http.MethodGet, MaxResponseBytes: 256 << 10, CaptureResponse: true, JSON: body}
 	response, err := f.client.Request(ctx, method, f.p.chat+path, opt)
 	var decoded payload
 	if response != nil {
 		if parsed, valid := decodeTOTPResponse(response.Body); valid {
+			if !stateAccountMatches(parsed, account) {
+				return response, nil, failure("security_identity_mismatch", f.stage, "session_unconfirmed")
+			}
 			decoded = payload(parsed)
 		}
 		if response.BodyComplete {
@@ -161,7 +165,7 @@ func (f *flow) securityRequest(ctx context.Context, token, account, method, path
 }
 
 func receiptOutcome(response *transport.Response, err error, step string, body payload, factor, session string) totpMutationOutcome {
-	if response == nil || err != nil || isBrowserChallenge(response) {
+	if response == nil || !response.BodyComplete || err != nil || isBrowserChallenge(response) {
 		return totpMutationUnknown
 	}
 	if response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != 408 {
@@ -197,30 +201,9 @@ func liveFactor(info payload) (state, id string) {
 	}
 	return "enabled", id
 }
-func (f *flow) readFactor(ctx context.Context, token, account string) (string, string, error) {
-	r, body, err := f.securityRequest(ctx, token, account, http.MethodGet, mfaInfoEndpoint, nil)
-	if err != nil || r == nil || r.StatusCode < 200 || r.StatusCode >= 300 || isBrowserChallenge(r) {
-		return "unknown", "", failure("security_state_unconfirmed", f.stage, "upstream_rejected")
-	}
-	state, id := liveFactor(body)
-	return state, id, nil
-}
-func (f *flow) reconcileFactor(ctx context.Context, token, account, wanted, id string) bool {
-	// Read-only reconciliation is limited to this operation's in-memory session.
-	for i := 0; i < 3; i++ {
-		if ctx.Err() != nil {
-			return false
-		}
-		state, actual, err := f.readFactor(ctx, token, account)
-		if err == nil && state == wanted && (wanted == "disabled" || actual == id) {
-			return true
-		}
-	}
-	return false
-}
 func securityOutcomeError(phase, state string) error {
 	code := "security_outcome_unknown"
-	if state == "rejected" {
+	if state == "rejected" || state == "not_sent" {
 		code = "security_rejected"
 	}
 	return failure(code, phase, "upstream_rejected")
@@ -228,46 +211,154 @@ func securityOutcomeError(phase, state string) error {
 
 func (f *flow) resetTOTP(ctx context.Context, token, account string) error {
 	j := f.security
-	state, old, err := f.readFactor(ctx, token, account)
+	info, err := f.readInitialState(ctx, token, account)
 	if err != nil {
 		return err
 	}
-	if state != "enabled" {
-		return failure("security_state_unconfirmed", "security_check", "totp_factor_missing")
+	state, old := liveFactor(info)
+	j.InitialState = state
+	if state == "enabled" {
+		if !f.permitsResetTarget(old, false) {
+			return failure("security_state_unconfirmed", "security_check", "totp_factor_missing")
+		}
+		j.OldFactorID = old
+		if err := f.disableTOTP(ctx, token, account); err != nil {
+			return err
+		}
+	} else {
+		if !totpInitialEnrollmentAllowed(info) {
+			return failure("security_state_unconfirmed", "security_check", "totp_factor_missing")
+		}
+		conflict, err := f.enrollTOTP(ctx, token, account, true)
+		if err != nil {
+			return err
+		}
+		if !conflict {
+			return f.activateTOTP(ctx, token, account)
+		}
+		info, err = f.readInitialState(ctx, token, account)
+		if err != nil {
+			return err
+		}
+		state, old = liveFactor(info)
+		j.PostConflictState = state
+		if state == "enabled" && f.permitsResetTarget(old, true) {
+			j.OldFactorID = old
+			if err := f.disableTOTP(ctx, token, account); err != nil {
+				return err
+			}
+		} else if state != "disabled" {
+			return failure("security_state_unconfirmed", "totp_enroll", "totp_factor_missing")
+		}
 	}
-	j.OldFactorID = old
-	j.DisableStatus = "pending"
-	f.emit("totp_disable")
-	if err = j.save("totp_disable"); err != nil {
+	conflict, err := f.enrollTOTP(ctx, token, account, false)
+	if err != nil {
 		return err
 	}
-	r, body, requestErr := f.securityRequest(ctx, token, account, http.MethodPost, disableEndpoint, payload{"factor_id": old})
-	switch receiptOutcome(r, requestErr, "disable", body, old, "") {
+	if conflict {
+		if j.InitialEnrollStatus != "not_requested" {
+			return securityOutcomeError("totp_enroll", "rejected")
+		}
+		info, err := f.readInitialState(ctx, token, account)
+		if err != nil {
+			return err
+		}
+		state, _ := liveFactor(info)
+		if state != "disabled" {
+			return securityOutcomeError("totp_enroll", "rejected")
+		}
+		j.PostConflictState, j.EnrollStatus = state, "not_requested"
+		if err := j.save("totp_enroll"); err != nil {
+			return err
+		}
+		conflict, err = f.enrollTOTP(ctx, token, account, false)
+		if err != nil {
+			return err
+		}
+		if conflict {
+			return securityOutcomeError("totp_enroll", "rejected")
+		}
+	}
+	return f.activateTOTP(ctx, token, account)
+}
+
+func (f *flow) permitsResetTarget(id string, requireBinding bool) bool {
+	stored, live := f.in.Credentials.TOTPFactorID, f.verifiedFactor
+	return id != "" && (stored == "" || stored == id) && (live == "" || live == id) && (!requireBinding || stored == id || live == id)
+}
+
+func (f *flow) disableTOTP(ctx context.Context, token, account string) error {
+	j := f.security
+	if j.DisableStatus != "not_requested" || j.OldFactorID == "" {
+		return securityOutcomeError("totp_disable", "unknown")
+	}
+	j.DisableStatus = "pending"
+	f.emit("totp_disable")
+	if err := j.save("totp_disable"); err != nil {
+		return err
+	}
+	r, body, requestErr := f.securityRequest(ctx, token, account, http.MethodPost, disableEndpoint, payload{"factor_id": j.OldFactorID})
+	if failure, ok := requestErr.(*Error); ok && failure.Code == "security_identity_mismatch" {
+		j.DisableStatus = "unknown"
+		if err := j.save("totp_disable"); err != nil {
+			return err
+		}
+		return requestErr
+	}
+	switch receiptOutcome(r, requestErr, "disable", body, j.OldFactorID, "") {
 	case totpMutationSucceeded:
-		j.DisableStatus = "succeeded"
+		j.DisableStatus, j.DisableConfirmation = "succeeded", "business_receipt"
 	case totpMutationRejected:
 		j.DisableStatus = "rejected"
 	default:
 		j.DisableStatus = "unknown"
 	}
-	if err = j.save("totp_disable"); err != nil {
+	if transport.IsRequestDefinitelyUnsent(requestErr) {
+		j.DisableStatus = "not_sent"
+	}
+	if err := j.save("totp_disable"); err != nil {
 		return err
 	}
 	if j.DisableStatus == "unknown" && f.reconcileFactor(ctx, token, account, "disabled", "") {
-		j.DisableStatus = "succeeded"
-		if err = j.save("totp_disable"); err != nil {
+		j.DisableStatus, j.DisableConfirmation = "succeeded", "state_read"
+		if err := j.save("totp_disable"); err != nil {
 			return err
 		}
 	}
 	if j.DisableStatus != "succeeded" {
 		return securityOutcomeError("totp_disable", j.DisableStatus)
 	}
-	j.EnrollStatus = "pending"
-	f.emit("totp_enroll")
-	if err = j.save("totp_enroll"); err != nil {
-		return err
+	return nil
+}
+
+func (f *flow) enrollTOTP(ctx context.Context, token, account string, initial bool) (bool, error) {
+	j := f.security
+	if j.EnrollStatus != "not_requested" || j.ActivationStatus != "not_requested" || initial && j.InitialEnrollStatus != "not_requested" {
+		return false, securityOutcomeError("totp_enroll", "unknown")
 	}
-	r, body, requestErr = f.securityRequest(ctx, token, account, http.MethodPost, enrollEndpoint, payload{"factor_type": "totp", "source": "settings"})
+	firstFormal := !initial && j.FirstEnrollStatus == "not_requested"
+	j.EnrollStatus = "pending"
+	if firstFormal {
+		j.FirstEnrollStatus = "pending"
+	}
+	if initial {
+		j.InitialEnrollStatus = "pending"
+	}
+	f.emit("totp_enroll")
+	if err := j.save("totp_enroll"); err != nil {
+		return false, err
+	}
+	r, body, requestErr := f.securityRequest(ctx, token, account, http.MethodPost, enrollEndpoint, payload{"factor_type": "totp", "source": "settings"})
+	if r != nil && r.BodyComplete && requestErr == nil && !isBrowserChallenge(r) && (r.StatusCode >= 200 && r.StatusCode < 300 || r.StatusCode == 400 || r.StatusCode == 409 || r.StatusCode == 422) && totpEnrollmentAlreadyExists(body) {
+		j.EnrollStatus = "conflict"
+		if firstFormal {
+			j.FirstEnrollStatus = "conflict"
+		}
+		if initial {
+			j.InitialEnrollStatus, j.EnrollStatus = "conflict", "not_requested"
+		}
+		return true, j.save("totp_enroll")
+	}
 	// Preserve recognized enrollment material even when its receipt is incomplete.
 	secret, session := text(body["secret"]), text(body["session_id"])
 	factor := object(body["factor"])
@@ -282,9 +373,9 @@ func (f *flow) resetTOTP(ctx context.Context, token, account string) error {
 		j.NewFactorID = id
 	}
 	_, seedErr := normalizeSecret(secret)
-	valid := seedErr == nil && strings.TrimSpace(session) != "" && session == strings.TrimSpace(session) && len(session) <= 2048 && strings.TrimSpace(id) != "" && id == strings.TrimSpace(id) && len(id) <= 512 && id != old && factor["factor_type"] == "totp" && factor["is_recovery"] == false && totpOutcomeFieldsValid(body) && !totpResponseRejected(body) && totpResponseBindingMatches(body, id, session)
+	valid := seedErr == nil && strings.TrimSpace(session) != "" && session == strings.TrimSpace(session) && len(session) <= 2048 && strings.TrimSpace(id) != "" && id == strings.TrimSpace(id) && len(id) <= 512 && id != j.OldFactorID && factor["factor_type"] == "totp" && factor["is_recovery"] == false && totpOutcomeFieldsValid(body) && !totpResponseRejected(body) && totpResponseBindingMatches(body, id, session)
 	j.EnrollStatus = "unknown"
-	if r != nil && requestErr == nil && !isBrowserChallenge(r) {
+	if r != nil && r.BodyComplete && requestErr == nil && !isBrowserChallenge(r) {
 		if r.StatusCode >= 400 && r.StatusCode < 500 && r.StatusCode != 408 || r.StatusCode >= 200 && r.StatusCode < 300 && totpResponseRejected(body) {
 			j.EnrollStatus = "rejected"
 		}
@@ -292,24 +383,48 @@ func (f *flow) resetTOTP(ctx context.Context, token, account string) error {
 			j.EnrollStatus = "succeeded"
 		}
 	}
-	if err = j.save("totp_enroll"); err != nil {
-		return err
+	if transport.IsRequestDefinitelyUnsent(requestErr) {
+		j.EnrollStatus = "not_sent"
+	}
+	if firstFormal {
+		j.FirstEnrollStatus = j.EnrollStatus
+	}
+	if initial {
+		j.InitialEnrollStatus = j.EnrollStatus
+	}
+	if err := j.save("totp_enroll"); err != nil {
+		return false, err
 	}
 	if j.EnrollStatus != "succeeded" {
-		return securityOutcomeError("totp_enroll", j.EnrollStatus)
+		return false, securityOutcomeError("totp_enroll", j.EnrollStatus)
+	}
+	return false, nil
+}
+
+func (f *flow) activateTOTP(ctx context.Context, token, account string) error {
+	j := f.security
+	if j.EnrollStatus != "succeeded" || j.ActivationStatus != "not_requested" {
+		return securityOutcomeError("totp_activate", "unknown")
 	}
 	j.ActivationStatus = "pending"
 	f.emit("totp_activate")
 	// This publication, fsync and readback is the pending-seed durability barrier.
-	if err = j.save("totp_activate"); err != nil {
+	if err := j.save("totp_activate"); err != nil {
 		return err
 	}
-	code, err := generateTOTP(secret, f.p.now())
+	code, err := generateTOTP(j.NewTOTPSecret, f.p.now())
 	if err != nil {
 		return err
 	}
-	r, body, requestErr = f.securityRequest(ctx, token, account, http.MethodPost, activateEndpoint, payload{"factor_type": "totp", "session_id": session, "code": code, "source": "settings"})
-	switch receiptOutcome(r, requestErr, "activation", body, id, session) {
+	r, body, requestErr := f.securityRequest(ctx, token, account, http.MethodPost, activateEndpoint, payload{"factor_type": "totp", "session_id": j.EnrollmentSessionID, "code": code, "source": "settings"})
+	if failure, ok := requestErr.(*Error); ok && failure.Code == "security_identity_mismatch" {
+		j.ActivationStatus = "unknown"
+		if err := j.save("totp_activate"); err != nil {
+			return err
+		}
+		return requestErr
+	}
+	switch receiptOutcome(r, requestErr, "activation", body, j.NewFactorID, j.EnrollmentSessionID) {
 	case totpMutationSucceeded:
 		j.ActivationStatus = "succeeded"
 		j.ActivationConfirmation = "business_receipt"
@@ -318,19 +433,39 @@ func (f *flow) resetTOTP(ctx context.Context, token, account string) error {
 	default:
 		j.ActivationStatus = "unknown"
 	}
-	if err = j.save("totp_activate"); err != nil {
+	if j.ActivationStatus == "succeeded" {
+		j.ConfirmationDigest = j.confirmationDigest()
+	}
+	if transport.IsRequestDefinitelyUnsent(requestErr) {
+		j.ActivationStatus = "not_sent"
+	}
+	if err := j.save("totp_activate"); err != nil {
 		return err
 	}
-	if j.ActivationStatus == "unknown" && f.reconcileFactor(ctx, token, account, "enabled", id) {
+	if j.ActivationStatus == "unknown" && f.reconcileFactor(ctx, token, account, "enabled", j.NewFactorID) {
 		j.ActivationStatus = "succeeded"
 		j.ActivationConfirmation = "state_read"
+		j.ActivationVerifiedAt = f.p.now().UTC().Format(time.RFC3339Nano)
 	}
 	if j.ActivationStatus != "succeeded" {
 		return securityOutcomeError("totp_activate", j.ActivationStatus)
 	}
-	// Confirmed evidence is the authoritative credential result. The parent can
-	// promote it on exit or restart even if subsequent logout or OAuth fails.
-	if err = j.save("totp_saved"); err != nil {
+	// The parent commits and reads back account/vault/job data before any logout.
+	// Confirmed activation remains recoverable if the local commit fails.
+	j.ConfirmationDigest = j.confirmationDigest()
+	if err := j.save("totp_commit"); err != nil {
+		return err
+	}
+	f.emit("totp_commit")
+	commit := f.p.commit
+	if commit == nil {
+		commit = securityCommitFromContext(ctx)
+	}
+	if commit == nil || commit(ctx) != nil {
+		return failure("security_storage_failed", "totp_commit", "journal_unavailable")
+	}
+	j.LocalCommit = "committed"
+	if err := j.save("totp_saved"); err != nil {
 		return err
 	}
 	f.emit("totp_saved")
@@ -346,13 +481,16 @@ func (f *flow) logoutAll(ctx context.Context, token, account string) error {
 	}
 	r, _, requestErr := f.securityRequest(ctx, token, account, http.MethodPost, logoutEndpoint, nil)
 	j.LogoutStatus = "unknown"
-	if r != nil && requestErr == nil {
+	if r != nil && r.BodyComplete && requestErr == nil {
 		if r.StatusCode >= 400 && r.StatusCode < 500 && r.StatusCode != 408 && !isBrowserChallenge(r) {
 			j.LogoutStatus = "rejected"
 		}
 		if r.StatusCode >= 200 && r.StatusCode < 300 && logoutResponseValid(r) {
 			j.LogoutStatus = "succeeded"
 		}
+	}
+	if transport.IsRequestDefinitelyUnsent(requestErr) {
+		j.LogoutStatus = "not_sent"
 	}
 	if err := j.save("logout_all"); err != nil {
 		return err

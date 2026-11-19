@@ -1,57 +1,59 @@
 ---
 name: "Model Quality"
-description: "Compact CPA task workspaces for manual question testing and credential quality operations."
+description: "UI 11.18 visual baseline restored by UI 12.1; see the linked revision for contrast and small-screen changes."
+appliesTo: "11.18.0"
+supersededBy: "docs/UI_REWORK_12_1_1_CN.md"
 colors:
-  page: "#f7f6f2"
-  card: "#fffdf9"
-  input: "#ffffff"
+  page: "#faf9f5"
+  card: "#f0eee8"
+  input: "#faf9f5"
   floating: "#fffdf9"
-  hover: "#f0ede6"
+  hover: "#e9e6df"
   ink: "#2d2a26"
-  muted: "#68625b"
-  border: "#dedbd4"
-  control-border: "#8e877e"
-  accent: "#59564f"
-  accent-hover: "#45423c"
+  muted: "#6d6760"
+  border: "#e3e1db"
+  control-border: "#d5d2cb"
+  accent: "#8b8680"
+  accent-hover: "#7f7a74"
   on-accent: "#ffffff"
-  focus: "#59564f"
-  focus-ring: "rgb(89 86 79 / 18%)"
+  focus: "#8b8680"
+  focus-ring: "#8b86802e"
   good: "#065f46"
-  good-bg: "#e2f3e9"
-  warn: "#85400e"
-  warn-bg: "#fcf0d8"
-  bad: "#963f32"
-  bad-bg: "#f9e8e3"
-  danger: "#a33e32"
+  good-bg: "#d1fae5"
+  warn: "#92400e"
+  warn-bg: "#d977061a"
+  bad: "#8a3a30"
+  bad-bg: "#c6574624"
+  danger: "#c65746"
   on-danger: "#ffffff"
   white-page: "#ffffff"
   white-card: "#ffffff"
-  white-input: "#fafaf9"
+  white-input: "#ffffff"
   white-floating: "#ffffff"
-  white-hover: "#f3f3f1"
+  white-hover: "#f6f6f6"
   white-border: "#e5e5e5"
   dark-page: "#151412"
-  dark-card: "#201e1b"
-  dark-input: "#191715"
-  dark-floating: "#27241f"
-  dark-hover: "#302c26"
+  dark-card: "#1d1b18"
+  dark-input: "#151412"
+  dark-floating: "#2a2723"
+  dark-hover: "#2e2a26"
   dark-ink: "#f6f4f1"
   dark-muted: "#c9c3bb"
   dark-border: "#3a3530"
-  dark-control-border: "#827b72"
-  dark-accent: "#d5cfc4"
-  dark-accent-hover: "#e0d9d0"
-  dark-on-accent: "#1d1b18"
-  dark-focus: "#c9c3bb"
-  dark-focus-ring: "rgb(201 195 187 / 24%)"
+  dark-control-border: "#4a453f"
+  dark-accent: "#8b8680"
+  dark-accent-hover: "#9a948e"
+  dark-on-accent: "#ffffff"
+  dark-focus: "#a6a099"
+  dark-focus-ring: "#8b86802e"
   dark-good: "#6ee7b7"
-  dark-good-bg: "#143b2f"
+  dark-good-bg: "#064e3b4d"
   dark-warn: "#fcd34d"
-  dark-warn-bg: "#3d301b"
+  dark-warn-bg: "#f59e0b24"
   dark-bad: "#f1b0a6"
-  dark-bad-bg: "#442820"
-  dark-danger: "#efb0a5"
-  dark-on-danger: "#442820"
+  dark-bad-bg: "#c657463d"
+  dark-danger: "#c65746"
+  dark-on-danger: "#ffffff"
 typography:
   brand:
     fontFamily: "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif"
@@ -60,7 +62,7 @@ typography:
     lineHeight: 1.5
   headline:
     fontFamily: "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif"
-    fontSize: "28px"
+    fontSize: "26px"
     fontWeight: 700
     lineHeight: 1.3
   headline-mobile:
@@ -126,7 +128,7 @@ typography:
 rounded:
   tag: "6px"
   control: "8px"
-  card: "#fffdf9"
+  card: "12px"
   switch: "24px"
 spacing:
   tight: "4px"
@@ -191,31 +193,35 @@ components:
 
 # Design System: Model Quality
 
+> **Current design:** [UI 12.8.0 reset confirmation](docs/UI_REWORK_12_8_0_CN.md) builds on [12.1.1's workspaces](docs/UI_REWORK_12_1_1_CN.md). The reset dialog separates account identity, authenticator impact, optional actions and the exact pending plan. The rest of the interface keeps its three themes, horizontal navigation, compact account rows, responsive answer comparisons and shared metrics band.
+
+> UI 11.18.0 / plugin 0.17.3 / Go+Sobek 2.1.3 puts Account management first and redesigns Login tasks around compact results and visible diagnostic logs. Offline checks, native packaging and 8317 deployment/restart verification passed with protected state preserved. The unchanged CPA foundation and toSub2 plan colors remain. [UI 11.18.0](docs/UI_REWORK_11_18_0_CN.md) tracks evidence; prior reports remain historical.
+
 ## Overview
 
 **Creative North Star: "The CPA Quality Workspace"**
 
 Model Quality follows the CPA plugin-management page and its shared UI components. Warm light, white and warm dark themes retain the host's surface hierarchy, system typography and restrained controls. Consistency makes the administrator's current task, evidence and next action easy to find.
 
-The plugin supplies task navigation inside the existing CPA shell and keeps direct access complete. Buttons, fields, cards, underlined navigation, switches, tables and focused dialogs share host contracts; adjustments serve readable contrast, mobile input and the plugin's precise state semantics. The interface uses native HTML, CSS and ES modules with Go embed. No raster artwork, remote fonts or runtime component library ships.
+The plugin supplies task navigation inside the existing CPA shell and keeps direct access complete. Buttons, fields, cards, primary and local navigation, switches, tables and focused dialogs share host contracts; adjustments serve readable contrast, mobile input and the plugin's precise state semantics. The interface uses native HTML, CSS and ES modules with Go embed. No raster artwork, remote fonts or runtime component library ships.
 
 **Key Characteristics:**
 
 - Separate page, card, input, floating and hover roles in all three themes.
-- Host system type, eight-pixel controls and twelve-pixel working surfaces; primary navigation names the task without a repeated visible page title.
-- Compact configuration stays above current answers; only answers and history switch locally, and explicit expanded reading preserves the mounted draft.
-- Underlined task navigation, consistent table density and native accessible control behavior.
+- Host system type, eight-pixel controls and twelve-pixel working surfaces; workspace headings identify the task and purpose.
+- From 960px content width, a 320px settings column sits beside answers; narrower layouts stack. Local answer/history switching and expanded reading preserve the mounted draft.
+- Neutral grouped primary navigation, underlined local tabs, consistent table density and native control behavior.
 - Independent labels for execution, quality, rule state and credential restrictions.
 
-The shared manual-testing composition records UI 4.9.0; the independent OpenAI workspace is redesigned in UI 8.0.0 in `plugin/ui/`. The manual form places credential selection immediately left of question selection above the wide left prompt editor. The right column groups native model selection, capability-based reasoning, a fixed one-to-eight answer selector and the start action. The desktop target keeps configuration, the primary action and the start of answers together in a 1280×720 window. Product semantics remain in `PRODUCT.md`; this route's Operate strategy lives in `.impeccable/surfaces/plugin-ui-index-html.md`. The pinned CPA component direction remains authoritative. Current verification artifacts belong in `artifacts/ui-polish-4.9.0/`; only completed reports establish passing checks. Captures from `artifacts/samepage-4.6.0/` and earlier remain historical.
+The current workspaces are 账号管理, 智商测试 and 质量观察, in that order. Account management opens by default for an empty or invalid hash; explicit manual-testing and observation links continue to work. Account filters, search, inspect-all and import share a single desktop toolbar; the redundant proxy shortcut is removed. The account Actions cell shows login/reset-2FA/delete above account profile/logs/more, following the specified reference. More contains task, inspection and logout-all. Reset and delete remain explicit actions with confirmation. The observation table presents credential, availability and restrictions. Main testing forms omit reference-version labels; unchanged built-in questions have no caption and edited prompts show “已修改”. Frozen conditions, raw evidence and identity/version metadata remain available in details and exports. Product semantics remain in `PRODUCT.md`. Current source evidence belongs in `artifacts/ui-rework-11.18.0/`; older versioned records below are historical.
 
 ## Colors
 
-Frontmatter is the exact color source for this document. Unprefixed tokens are light; `white-` and `dark-` tokens override the matching role. The fixed upstream reference is `router-for-me/Cli-Proxy-API-Management-Center` at `d0126752201a35ff999bd2a1d4741215542258a8`, especially `themes.scss`, `variables.scss` and `components.scss`. The component and license inventory is in `plugin/NOTICE.md`.
+The frontmatter foundation color roles match UI 11.16.0; plan-specific colors are described below. Unprefixed tokens are light; `white-` and `dark-` override the matching role. UI 11.0.0 extracted the actual running CPA stylesheet into `artifacts/ui-rework-11.0.0/host-styles.css` and mapped its page, card, input, hover, border, text and action roles directly. This supersedes the custom blue palette. The earlier upstream component reference and license inventory remain in `plugin/NOTICE.md`.
 
 ### Primary
 
-- **Warm Stone Action** (`accent`, `accent-hover`, `on-accent`) distinguishes the explicit submit. In dark mode it uses a light neutral fill with dark text.
+- **Warm Stone Action** (`accent`, `accent-hover`, `on-accent`) distinguishes the explicit submit. All three themes use the host action gray `#8b8680` with white text; dark hover is `#9a948e`.
 - **Neutral Focus** (`focus`, `focus-ring`) marks the keyboard and text-editing location. Field focus uses a border plus a soft ring; other keyboard targets keep an offset outline.
 - **Consequential Action** (`danger`, `on-danger`) fills only the final consequential confirmation. Other consequential actions use outlined error text.
 
@@ -227,9 +233,9 @@ Deep green, amber and clay pairs identify named positive, attention and error st
 
 ### Neutral
 
-Page, card, input, floating and hover are distinct roles. Warm light uses an off-white working surface over a quiet warm page, with white form fields. White keeps white page/card/floating surfaces and subtly shaded inputs. Dark separates the raised working surface from darker fields. Cards use a single fine border without a shadow; floating dialogs use shadow without a second border. Primary and secondary ink carry reading; fine borders divide content and strengthened control borders identify fields and secondary actions.
+Page, card, input, floating and hover are separate semantic roles. Light uses page/input `#faf9f5`, card `#f0eee8`, and floating `#fffdf9`; white uses white surfaces; dark uses page/input `#151412`, card `#1d1b18`, and floating `#2a2723`. Borders and text also come from the running host palette. Cards have a fine border and a subtle light-theme shadow.
 
-The host's normal action gray with white small text is approximately 3.61:1, below the ordinary-text target. This implementation uses a stronger graphite action shade and strengthened secondary text and control boundaries; current ratios are recorded in the completed contrast report. These purposeful deviations keep the host family. Targets are 4.5:1 for ordinary text and 3:1 for applicable large text, controls and states; they do not assert accessibility certification. Historical UI 4.6.0 measurements are in `artifacts/samepage-4.6.0/verification/fixtures/contrast-results.json`; current verification belongs under `artifacts/ui-polish-4.9.0/` and must be read separately.
+Earlier graphite-action substitutions and contrast reports describe historical releases. UI 11.16.0 retains the actual CPA foundation colors and does not claim a new contrast audit or accessibility certification.
 
 When embedded in a recognizable same-origin CPA page, the plugin follows only the parent's public applied root theme: missing attribute means light, `white` means white and `dark` means dark. A MutationObserver tracks changes. The host's auto mode applies white in system light, so white must not collapse into light. The local selector is hidden and disabled while following. Unrecognized parent, cross-origin access, unsupported theme or observer failure falls back to a local in-memory selector; no parent key, store or browser storage is read.
 
@@ -237,49 +243,40 @@ When embedded in a recognizable same-origin CPA page, the plugin follows only th
 
 The UI uses the host's system-font approach with explicit Chinese fallback. Titles are strong, body copy is compact and ordinary model prose is larger for reading. Code, HTML, SVG and raw diagnostics use the local monospace stack. No remote font loads.
 
-The frontmatter records exact roles: page headline, card title, section, body, label, supporting copy, metadata, state, prose answer, code answer, diagnostic source and compact 24px metric. Page headline tokens remain available, but all three task H1 elements are screen-reader-only because the visible primary navigation already names the active task. Explanatory paragraphs have a readable maximum measure (75ch). Long identifiers and original source wrap; timing, usage, dates and comparable values use tabular numerals.
+The frontmatter records typography roles; current component sizes are authoritative in `plugin/ui/style.css`. Visible workspace headings identify each task. Explanatory paragraphs stay concise. Long identifiers and original source wrap; timing, usage, dates and comparable values use tabular numerals.
 
-Supporting metadata can be smaller than the body, but restriction, action and verdict meaning must remain in readable named text. Phone inputs and selects use at least 16px to preserve editing usability.
+Supporting metadata can be smaller than the body, but restriction, action and verdict meaning must remain in readable named text. Native input and select behavior remains intact; component sizes are defined in the current stylesheet.
 
 ## Layout
 
-The host owns the global shell, sidebar and floating tools. The plugin header carries only task navigation, connection/freshness tools and a compact identity in direct mode. Task H1 elements remain available to assistive technology while the duplicate visible title/description rows are removed. The disconnected management connection is a compact button at the right of the primary tabs. Its explanatory copy lives in the existing connection dialog; no separate banner occupies a workspace row. The connected state replaces the button with connection status and freshness tools.
+The host owns the shell, sidebar and floating tools. The plugin header starts with the active page title and description, with refresh/connection tools alongside. Primary navigation sits below the title inside the shared workspace. Section headings remain available to assistive technology without duplicating the visible title. Embedded mode reserves the top-right area for host tools. The shared workspace has a 1600px maximum width and uses continuous page scrolling. At 768px and below, the embedded header reflows below the host tools; local navigation and actions remain reachable.
 
-The workspace is bounded to 1440px with host-related responsive gutters. Embedded mode hides the wordmark and clears the pinned host toolbar vertically: the plugin header begins after an 80px desktop or 68px narrow-screen top inset. This adapts the fixed reference tools at y=24–76 desktop / y=12–60 mobile; it is not a claimed host geometry API. Sidebar width remains entirely outside the iframe.
+Manual testing splits into a 320px settings column and a flexible answer/history surface at a content width of 960px. The submit button stays in the settings header and remains associated with `run-form`. Credential, model, reasoning, answer count and question controls share a compact vertical form. Narrower viewports stack settings above answers. “展开阅读” hides the mounted settings temporarily without clearing the draft. Reference-version strings no longer appear in the question caption; editing a built-in prompt still shows “已修改”. Frozen task conditions and raw evidence remain available on demand. UI 11.13 removes the entire footer summary after the question field, including its reserved spacing, unused updatePlan logic and selectors. The form ends with the question content and applicable field errors. The header submit button retains eligibility checks, disabled state and its explanatory title; sample count and execution behavior are unchanged.
 
-At a CSS viewport width of at least 801px and height of at least 600px, the body and current workspace use the available dynamic viewport height. Compact configuration remains visible above the answer surface by default. Only current answers and history switch locally inside that surface. Starting a task shows its answers without hiding the form. An explicit “展开阅读” control temporarily hides configuration; “返回配置” restores the same mounted form and draft. The normal 1280×720 desktop target includes the configuration, primary submit and the start of the answers together. Unbounded prompts, outputs and records still need local scrolling.
+The account surface includes a tablist for Accounts, Login tasks and Login settings (登录设置), followed by the selected panel. Tabs use tab/tabpanel associations, aria-selected, roving tabindex and Left/Right/Home/End keyboard selection. The list toolbar places segmented status filters with count badges at the left and search, inspect-all and import at the right. Search and action controls are 36px high. At 900px and below, filters occupy the first row and search/actions the second; at 600px and below, compact action labels preserve full accessible names. The redundant proxy shortcut is absent. The four-column table and pagination follow inside the same surface. Columns are Account, CPA state, Recent operation and Actions. At 800px and below, rows become labeled account groups. Each Actions cell uses two rows with 1.12:1.12:0.8 tracks: login/reset-2FA/delete, then account profile/logs/more. All six controls are 29px high on desktop and phones. Icons, thin borders and stable tracks follow the specified reference while colors follow CPA. Logs continue inline; more contains task, inspection and logout-all. Reset and delete open existing guarded dialogs. Tasks and settings keep their separate local views. UI 11.14 removes the “服务状态” disclosure from Login settings and the unused login-engine rendering/styles; task IDs and machine diagnostic codes remain in “排障信息”. Actionable failure explanations and security consequences remain visible.
 
-The configuration card is a two-column workspace separated by whitespace, without a vertical divider. The wide left column places the credential selector immediately left of the question selector, above the editable prompt. Version and edited-state feedback sit below the editor. The reset action is removed. The right column is 260–320px wide and groups model selection, reasoning and answer count, then a run summary and full-width start action directly below. On wide desktop the prompt starts at 128px and grows with the settings column, keeping the disconnected options-to-action gap near 12–16px while retaining bottom alignment. Long prompts scroll inside the editor. Tablet and short-window prompts retain a 160px base; phones retain 180px. Normal credential status and model count sit beside their labels; blocked or unavailable states receive a full-width explanation below the control. Unknown reasoning retains its default-setting note. Before model selection the helper is hidden. The start action aligns with the bottom of the prompt editor; the caption occupies a separate grid row, so version feedback does not push the button below the editor. Option groups keep a 12px minimum gap without a horizontal action separator. Compact header controls stay beside the tabs when space allows and wrap without squeezing labels on narrow screens. At 800px and below, the question workspace comes first, then model settings and start. At 600px and below, credential and question selectors also stack. Native controls preserve readable type and 44px phone touch targets; DOM focus order follows the visual task order.
+Quality observation uses concise metrics and a three-column credential table: credential, availability and restriction details. Rule configuration, audit records and retained pause ownership remain available. Official-host limitations stay explicit; UI layout must never enable an unsupported pause or release. Editor sections remain grouped and preserve existing form IDs, validation and save behavior.
 
-The answer/history surface sizes to short content by default, with its height bounded by the remaining desktop space. Explicit expanded reading fills that space. Its underlined navigation and reading control sit outside the scrolling results/history region, so switching views cannot obscure the heading. Empty history has no forced full-height body and no pagination; pagination appears only when needed and follows the records. Prose answers are capped at 80ch while code and side-by-side results retain their available width. A compact run summary carries the model, execution status, progress and question alongside the frozen-condition disclosure. Single-model manual results omit repeated model group headings, sample model labels and inapplicable comparison/filter controls. Task actions remain available. Short answers retain natural height, while long answers support explicit expanded reading. Editable configuration and frozen execution conditions remain distinct.
-
-OpenAI login is a third primary tab with its own disconnected state, form and task list. Leaving the tab clears secret inputs without cancelling host tasks; returning reloads task state. On phones, all three tabs occupy a full navigation row and connection tools wrap below. The login form and task details use normal document flow on narrow or short screens, with a bounded body on desktop.
-
-Quality operations use the same component foundation. Attention, rule lists and audit size to their content while remaining bounded on desktop; short lists no longer stretch into large empty panels. Rule table edges are flat, with quieter secondary actions and consistent status tags. Each rule keeps execution/pause on the first action row and edit/delete together on the second. Edit sections use a 20px rhythm, and the manual release consequence uses the warning surface to highlight that dependent rules remain stopped. On desktop, attention and credential restrictions share two columns, with secondary statistics spanning the row below. Each content-heavy panel can scroll locally. Rules retain a unified table and audit retains a list. Long rule and global-budget editors remain inline; their body scrolls while the title/close control and save footer stay outside the scrolling body. Rule fields retain the five groups for target/question, judgment, scheduling, credential action and call budget/retention.
-
-| Viewport | Adaptation |
+| Content viewport | Adaptation |
 | --- | --- |
-| At least 801px wide and 600px high | Compact configuration above answers: credential/question selectors and prompt on the left; model, reasoning, answer count and start on the right; primary actions outside local scroll regions. |
-| At or below 1100px wide | Rule title columns narrow; wide rule tables scroll inside their wrapper. |
-| At or below 800px wide | Normal document flow; credential/question selection and prompt precede model settings and start; rule groups stack in task order. |
-| Below 600px high | Normal document flow even on a wide viewport, allowing zoom and short windows to expose every control. |
-| At or below 600px wide | Inputs remain at least 16px and primary touch targets at least 44px; tables become labeled rows and answers use one column. |
+| At least 960px wide | Manual settings and answers sit side by side. |
+| Below 960px wide | Manual settings precede answers in document flow. |
+| At or below 900px wide | Account toolbar uses two rows: status filters, then search and actions. |
+| At or below 800px wide | Account and observation tables become labeled groups. |
+| At or below 768px wide | Embedded header reflows below the host tools. |
+| At or below 600px wide | Account task columns stack; row action buttons retain 29px height; toolbar actions stay 36px with compact labels, while dialog actions retain 44px targets; forms and answer controls wrap. |
 
-The actual iframe CSS viewport determines these changes. Native dialogs retain dynamic maximum height and safe-area padding. Narrow and short layouts deliberately allow document scrolling so content remains reachable under mobile keyboards and browser zoom. Long identifiers wrap; local scrolling must not produce document-wide horizontal overflow.
-
-**The First Viewport Rule.** Keep normal desktop configuration, primary actions and the start of the answers visible together. Use local scrolling for unbounded content, and restore document flow on narrow or short viewports instead of clipping controls or reducing readable type.
-
-**The Reading Continuity Rule.** Polling updates changed evidence without replacing stable drafts, focused controls, selections, disclosures or reading positions.
+The actual iframe width determines these changes. Native dialogs have bounded height and internal scrolling; long values wrap. Polling preserves stable drafts, focus, disclosure state and reading positions. Current verification scope is recorded in the UI 11.18.0 report, rather than inferred from these layout rules.
 
 ## Elevation & Depth
 
-CPA-style cards combine a fine structural edge and a small soft shadow. Floating dialogs and the mobile action menu use the deeper shadow. Ordinary groups inside cards use spacing or separators rather than extra elevated containers. Surface tones remain deliberate across all three themes. No decorative gradient, raster texture or entrance animation ships.
+CPA-style cards combine a fine structural edge and a small soft shadow. Floating dialogs and the mobile action menu use the deeper shadow. Ordinary groups inside cards use spacing or separators rather than extra elevated containers. Surface tones remain deliberate across all three themes. Plan badges use toSub2 tier colors: Pro has a silver gradient, Pro Lite and Business Premium have gold gradients, and ordinary tiers use a restrained tint. Other surfaces remain flat. No raster texture or entrance animation ships.
 
 The sidecar records card/dialog shadows and motion. Shared control feedback uses 150ms; switch movement and progress use 200ms. Polling never replays entrance motion. Reduced motion disables transitions and animations. These are deliberate adaptations of the host's shared feedback language, without its larger page entrance effects.
 
 ## Shapes
 
-Control corners are eight pixels; cards and native dialogs are twelve. Small state tags use four pixels. Switch tracks are 44×24 with an 18px thumb; the native checkbox remains the focusable control and falls back to native appearance in forced colors. Underlined tabs retain rounded top corners and a two-pixel inset selection line. Inline icons use one restrained line language; existing independently authored SVG paths remain.
+Control corners are eight pixels; cards and native dialogs are twelve. Account plan and state badges use full pill corners; other small state tags retain their local shape. Switch tracks are 44×24 with an 18px thumb; the native checkbox remains the focusable control and falls back to native appearance in forced colors. Underlined tabs retain rounded top corners and a two-pixel inset selection line. Inline icons use one restrained line language; existing independently authored SVG paths remain.
 
 ## Components
 
@@ -287,7 +284,51 @@ Control corners are eight pixels; cards and native dialogs are twelve. Small sta
 
 ### Buttons
 
-Primary, secondary, ghost and consequential variants share dimensions, weight, spacing and radius. The filled primary action identifies the explicit submit; secondary controls have a readable boundary; ghost actions defer to nearby content. Final deletion/release confirmation receives the filled danger pair while earlier stop/release affordances stay outlined. Small desktop buttons retain readable 14px type. Busy actions preserve their measured width, disable duplicate submission and announce current state. Disabled and active states are distinct; keyboard focus is visible.
+Primary, secondary, ghost and consequential variants share dimensions, weight, spacing and radius. The filled primary action identifies the explicit submit; secondary controls have a readable boundary; ghost actions defer to nearby content. Final deletion/release confirmation receives the filled danger pair while earlier stop/release affordances stay outlined. Desktop control type is generally 12–13px; primary state and task text remain explicitly named. Busy actions preserve their measured width, disable duplicate submission and announce current state. Disabled and active states are distinct; keyboard focus is visible.
+
+### Account actions — retained from UI 11.5.0
+
+The action layout follows the read-only reference `/Users/ceng/Downloads/toSub2-go-port-2026.11.17/web/src/components/accounts.jsx` (around line 470), `account-actions.css` and `docs/pure-go-runtime/ui/row-actions-polished.jpg`. Two rows share three tracks in a 1.12:1.12:0.8 ratio: login/reset-2FA/delete above profile/logs/more. Profile replaces the reference upload slot because this plugin already uploads and enables CPA credentials after eligible successful login, subject to configured plan exclusions. The column is 242px with a 218px action group; 29px buttons use 10.5px type, 14px icons, 6px gaps, 8px corners, thin borders and CPA background/hover colors. Explicit appearance:none prevents native WebKit button bezels. Delete uses the readable CPA danger text role; more has text plus a down arrow. Desktop 1064px and phone 390px measurements both give approximately 75.89/75.89/54.22px tracks, with no clipping or horizontal overflow. Dynamic state and capability checks disable unsafe reset/delete entries. Existing confirmation dialogs, pending-state protections and row-specific focus restoration remain in effect; no security operation was executed during validation.
+
+### Account toolbar — retained from UI 11.6.0
+
+The toolbar has three desktop tracks: a segmented status filter group, a flexible search track capped at 260px, and inspect/import actions. Controls align at 36px; filter buttons are 28px inside their 36px container. The toolbar measures 68px high at 1064px viewport width. Below 900px, the status group spans the first row. At 600px and below, four filters share equal tracks, inspect becomes an icon button and import displays “导入”; full aria-labels and titles remain. At 390px, the toolbar measures 110px high. A 320px check confirms the toolbar itself fits; it does not certify the whole page against horizontal overflow. The UI 11.6 toolbar change preserved existing IDs and JavaScript; UI 11.7 adds the plan presentation and setting described below.
+
+### Account identity, recent operation and plans — UI 11.16.0
+
+Identity uses two visible lines: a full-value email rendered on one ellipsized line, then a small authorization-plan badge and an optional single-line real label or enabled-automation note; UI 11.17 omits the default manual-login note. The 34px avatar aligns with that block. Recent operation also uses two lines: a named result and compact timestamp, followed by an operation/diagnostic summary that opens inline logs. Pending candidate status opens the existing task review. Full email remains available in the title and profile; the log action's accessible name and tooltip retain its full operation summary. CPA status uses a compact state tag and one secondary line; its tooltip preserves full binding, reason, previous inspection and next inspection values. Long values do not increase each row's information stack. Underlying account values and logs are not truncated.
+
+UI 11.15 follows the actual CPA AuthFileQuota plan label/value structure and SiwcStatusBadge proportions, recorded in [CPA badge research](artifacts/ui-rework-11.15.0/CPA_BADGE_REFERENCE_CN.md). The specified Go host source downloads a separate management asset; the verified source is the static frontend served by the local 8317 host. Each plan pill is 22px high, with 8px horizontal padding, a quiet 10px “套餐” label and 11px monospace value. UI 11.16 supersedes those CPA tier colors with the requested toSub2 PlanBadge palette: Pro silver (`#f9fbfd`, `#e3eaf1`, `#abb8c8`, `#eef2f6`); Pro Lite and Business Premium gold (`#fff9e3`, `#f5df9b`, `#dfba58`), with explicit dark gold. Plus uses blue `#618cc4`, Go green `#56877a`, Team purple `#8d79b3`, Enterprise blue-grey `#67768b` and Edu rose `#b08398`; ordinary tints blend with the current theme. The geometry and state styles remain from UI 11.15. Unknown reads “套餐 未知” with a dashed border. The tooltip identifies known plans as authorization snapshots rather than live subscriptions. Canonical `plan_type` values and upload-exclusion meanings are unchanged.
+
+CPA health and recent-operation badges share 22px height, 11px text, a 5px dot and full pill corners. Green, red, amber and neutral tones retain explicit status text. Identity, CPA state and operation occupy aligned 48px two-line blocks, with a 4px gap between 22px tracks. Only an `awaiting_inspection` reason paired with `unknown` or `not_checked` displays “待巡检”; other unknown states remain uncertain. Operation time sits beside its badge. At 600px and below, its date is hidden; at 360px and below, inline time is hidden. The complete timestamp remains in the title and details, and critical state labels retain priority.
+
+The Login settings (登录设置) view includes “CPA 上传排除套餐” as a grouped native checkbox fieldset. UI 11.16 retains each option as a 30px-high rounded pill with the same toSub2 plan palette. Checked options reinforce the border while preserving the tier background; native checkbox, focus and disabled states remain. `cpa_upload_excluded_plans` defaults to empty. The help text covers manual login, automatic reauthorization and authorization after security actions. Known local, candidate and currently bound plans participate in the write guard; `unknown` applies only without known evidence. Selection remains a draft until Save. Saving never replays an excluded candidate. A blocked candidate receives “套餐已排除” and retains explicit review within the current session. This broader upload policy follows the user's request; the reference only applied its exclusion in automatic repair.
+
+[UI 11.16.0](docs/UI_REWORK_11_16_0_CN.md) records passing light/dark palette checks: displayed plan pills remain22px with no label overflow, checked exclusion options preserve their tier backgrounds, and no console errors were observed. Native build and deployment/restart passed with protected state preserved. The retained layout was verified in [UI 11.15.0](docs/UI_REWORK_11_15_0_CN.md): six desktop rows have22px badges and aligned48px identity/state/operation blocks;390px state headings and plan names fit, and a320px check has no document overflow or critical text clipping. Three themes and native build/deployment/restart passed. The 20px badges and 45px identity measurements in [UI 11.14.0](docs/UI_REWORK_11_14_0_CN.md) describe the previous design. Earlier [UI 11.7.0](docs/UI_REWORK_11_7_0_CN.md) contains synthetic upload-policy interactions and responsive action measurements. Historical checks do not certify upstream authentication or real credential writes.
+
+### Login task workspace — UI 11.18.0
+
+The desktop task surface uses a 288px history sidebar and a flexible detail area. History has a compact count, search field and all/active/attention filters; each card separates operation/time, identity and result. Explicit maximum-content rows prevent a long history from compressing cards into overlap. At 900px and below the history stacks above the detail with a bounded list viewport; at 600px it uses a single card column. Selected cards, controls and semantic result colors use the existing CPA tokens.
+
+The result header pairs a small semantic icon with an operation label and 20px outcome heading. Identity, method, start time and recorded span sit below it. Confirmed reset/logout/reauthorization facts appear as horizontal numbered or completed steps with subtle arrows; pending or uncertain steps never claim completion. Duplicate success banners are removed. Necessary unknown-write guidance remains above the logs.
+
+Execution logs are always visible in a framed area with compact tools and a 330px maximum scrolling viewport. They reuse the account-log event grid and safe rendering: time/interval, severity, readable phase/result, optional request method/HTTP status/duration, then expandable labeled fields and escaped JSON. Search and abnormal filtering affect display only. Polling keeps the mounted log panel, search input, expanded events and reading position; following the latest event is explicit. Task-level diagnostic facts remain in a small disclosure below the log list.
+
+Reports use the selected task and all loaded retained events. They exclude full account identity, secrets, URLs, proxy configuration and response bodies. Schema 2 includes job/log revisions, mismatch and incomplete-read flags, request-detail limits and retained-range metadata. HTTP status or transport failures describe individual requests; confirmed side effects are recorded only when known. The backend caps request details at 128 with an explicit marker, keeps the latest 200 events per task and retains terminal jobs for 30 days. Historical records are not backfilled. [UI 11.18.0](docs/UI_REWORK_11_18_0_CN.md) separates current checks from earlier account-log evidence.
+
+### Account troubleshooting logs — UI 11.17.0
+
+The default “手动登录” text is omitted from account identity metadata. Explicit labels, automation states and unreadable-material warnings remain meaningful optional content beside the existing plan pill. The account's policy data is not changed.
+
+The inline panel starts with compact range and export tools, then a selected-task overview. History uses a native selector with date, operation, result and short ID, loading events only for that task. The full ID, task start, last recorded stage, recorded span and current confirmed security facts remain available without expanding raw JSON. The last stage means the last recorded event, not a guessed failure cause. The event grid has time/interval, severity, and stage/result columns, with a 360px maximum local viewport. A toolbar combines severity filtering and text search across Chinese summaries and raw fixed identifiers. Expanded event details pair labeled diagnostic values with escaped JSON. Existing focus, disclosure, scroll and single-flight polling behavior is preserved.
+
+The recorded span uses the first and last loaded timestamps; adjacent-event intervals are computed against the unfiltered event sequence. Neither is advertised as phase duration or complete elapsed execution. Legacy and truncated records have separate notices. A failed task's diagnosis separates code, stage, reason and advice. Uncertain credential writes and security mutations always retain their non-replay guidance before network advice. Event titles never spread the current Job's final security flags into prior records.
+
+Copy and JSON export use a field/type allowlist and all loaded events of the selected task, irrespective of display filters. The report includes versions, generation time/time zone, task identity, current facts, recorded span and incomplete/legacy/truncated metadata. It excludes full account identity, secrets, proxy configuration, URLs and raw runtime responses. Backend `/logs` adds `first_id`, `last_id`, `retained_count` and `truncated` for the persisted window, and `has_more`/`next_cursor` for the requested page; empty pages retain the cursor. Each job remains bounded at 200 events, and the account job-list cap is separately indicated. No historical record is rewritten. The new `cpa_plan_excluded` event is warning-level, and the UI also recognizes older events with an error code. See [UI 11.17.0](docs/UI_REWORK_11_17_0_CN.md) for that release’s implementation and validation status.
+
+### Login workspace selection — plugin 0.17.1
+
+This runtime correction retained UI 11.7.0 when released. New login tasks use Go+Sobek 2.1.2 to continue workspace selection in both web and OAuth phases: an explicit pin wins only on an exact ID match; otherwise the first valid organization, then first valid workspace, is selected. Empty/missing pinned targets still show the existing named interaction-required state. Bound credential identity and a security operation’s verified workspace cannot be silently replaced by the default. Existing task rows and logs preserve their historical result; the operator starts a new login to use the corrected flow. See [workspace-selection behavior and evidence](docs/WORKSPACE_SELECTION_CN.md).
 
 ### Inputs and selections
 
@@ -297,23 +338,41 @@ Reasoning always offers the omitted/default setting, plus only the selected mode
 
 ### Cards, tables and navigation
 
-A card uses the host title/actions/body vocabulary, compact 16px padding and restrained border/shadow. The selected local view is the working surface; a redundant card title is omitted when the active navigation already names it. Tables share header fill, aligned padding, top-aligned cells, row separators and hover. Numeric data uses tabular figures; actions wrap inside their allocated column. Underlined ProviderTabs inform both task and local navigation, including selected weight, inset underline, hover and focus. Narrow navigation scrolls locally without introducing a second sidebar.
+A card uses the host title/actions/body vocabulary, compact 16px padding and restrained border/shadow. The selected local view is the working surface; a redundant card title is omitted when the active navigation already names it. Tables share header fill, aligned padding, top-aligned cells, row separators and hover. Numeric data uses tabular figures; actions wrap inside their allocated column. Primary navigation uses a neutral grouped surface and filled active state. Local tabs use an underline, selected weight, hover and focus. Narrow navigation scrolls locally without introducing a second sidebar.
 
 ### Switches and states
 
-Rule enablement, scheduling and automatic pause are three independent native checkboxes with switch styling. They change a draft until saved, never immediately execute a rule. State tags and notices include explicit meaning in text. Empty, not connected, loading, no matches and error states retain their own explanations rather than treating every absence as zero data.
+The official rule editor exposes one switch for scheduled observation. Off is manual-only for new rules. Turning it on authorizes only the edited rule at its next due time; changing the draft never runs a model. The list shows the effective state, not another enable control. Historical holds and paused rules remain stopped on unrelated edits.
 
 ### Answer reading
 
 The current manual task presents one model and up to eight independent answers, two columns when space permits and one on phones. Its model identity appears once in the run summary; answer cards emphasize sample number, execution state, original answer, timing/usage and nearby actions. Single-model manual results hide redundant model headings and comparison/filter controls. Legacy multi-model histories and rule evidence keep their applicable comparison and filtering controls. Prose/code presentation changes typography only: original model content remains escaped and copy/export preserves original text. Selection, expanded answers, review drafts and internal scroll positions survive unchanged polling results. On phones, a local sticky sample heading preserves sample identity while an expanded answer is read; the global header stays in normal flow.
 
+### Current account action controls (UI 12.7.0)
+
+The user-supplied toSub2 account actions are the visual reference. Keep the two aligned rows with 1.12:1.12:0.8 tracks and 6px gaps. All six buttons share a visible thin border, floating surface, 8px corners, 10.5px text and 14px icons; remove the earlier borderless secondary row. Hover and expanded logs/more use the theme hover surface. Delete retains danger text, disabled controls retain their guards, and keyboard focus remains visible. Desktop controls are 29px high; narrow layouts retain 44px touch targets. Existing login/reset/delete and profile/logs/more actions remain: the user authorized visual alignment, not new upload actions or split authorization behavior.
+
+### Reset confirmation (UI 12.8.0)
+
+Use one compact column for the title, a short unboxed consequence note and two optional switches. The header has a shield mark and circular close control. Per the user’s explicit request, the reset dialog omits the email row; standalone logout still displays its account identity. Do not restore the inner key-comparison card. Each optional operation follows the supplied toSub2 reference: a separate bordered row, a small icon surface, concise outcome text and a native checkbox exposed as a switch. The row is 54px high including borders with 8px vertical padding, 12px regular-weight titles, 10.5px descriptions, 28px icon surfaces and 32×18px switches; the full label is clickable. Logout defaults off and CPA authorization defaults on. Retain CPA's warm light, white and dark color roles, with stronger ink contrast for the primary action and selected switches.
+
+The footer contains a bordered, rounded execution card followed by a full-width divider before the buttons. Its horizontal flow uses sequential numbered circles, directional connecting lines, operation names and a brief outcome per step. Render only selected operations in execution order; both options off shows one reset-only node. Update the selected count and a concise accessible status description together. Keep the flow and footer height stable across all four combinations. Expandable operation notes explain confirmed-seed preservation, upload exclusions and uncertain results. The native disclosure resets to closed on reopening. Cancel-first focus, Space toggling, Escape, focus return and submission guards remain intact. Short screens scroll the body while the flow and buttons remain visible. Standalone logout retains checkbox semantics and its separate flow. Unselected hover, selected and selected hover surfaces use 7%, 14% and 20% theme-accent mixes over the dialog surface, respectively. Disabled choices do not gain hover feedback. See [UI 12.8.0](docs/UI_REWORK_12_8_0_CN.md) for screenshots and verification.
+
+### Historical security confirmation (UI 11.12)
+
+Use one short main-action sentence followed by a single bordered group of equal-height optional rows. The complete row labels a native checkbox; concise titles and descriptions remain on one line. Remove the repeated required-action card, step numbering and duplicate selected/unselected text. Selection remains visible through checkbox state and CPA background feedback. Reset has two independent options; standalone logout has one.
+
+Keep the requested horizontal flow below the options as one neutral band rather than separately boxed nodes. Only step names and arrows remain visible in the flow; required/execute/skip text is removed. Optional nodes retain selected/unselected aria-labels and visual state, with unselected nodes occupying their position and dashed adjacent connectors. Put the operation count beside the flow heading. Preserve fixed header/footer, viewport-bounded sizing, internal scrolling, error-body scrolling, keyboard behavior, focus return and existing guards. Defaults remain logout=false and reauthorize=true; backend semantics do not change. Historical measurements and deployment belong in [UI 11.11.0](docs/UI_REWORK_11_11_0_CN.md), with12 layout cases confirming single-line complete text, equal66px rows and aligned checkboxes. Desktop reset measures480×500px; phones retain500px height, short windows480×432px and logout480×434px. Keyboard, focus, defaults and stale-state guards passed; native and static checks passed. Deployment and restart passed with unchanged account/job/settings snapshots, configuration and host image. UI 11.12 reduces reset/logout heights by14px to486/420px; new evidence belongs in [UI 11.12.0](docs/UI_REWORK_11_12_0_CN.md), with four reset combinations, narrow-screen overflow, two-node logout, static/native checks and deployment/restart verified. Earlier numbered-card and boxed-flow designs remain historical in their versioned reports.
+
 ### Editors and protected dialogs
 
-Long rules and global budget settings stay inline. In the bounded desktop workspace their body scrolls locally and the save footer remains visible. Closing a dirty draft requires an explicit discard decision; stale async responses cannot overwrite a newer editor. Connection and short confirmations use native modal dialogs with labeled headings, separated actions, bounded scrolling, Escape and focus restoration. Evidence and preview use wider dialogs when reading requires it. The native dialog supplies background non-interactivity; no framework modal implementation is added.
+The quality rule editor (UI 12.18) uses the same single column at every width. The rule name is its editable title, with credential scope immediately below. A full-width graphite strip separates selected models from ID entry and shortcuts; its lower edge holds the shared reasoning level and sample count. Grading and scheduling are two unboxed settings rows. Reference answers expand below the grading row in place. Keep the five-field server-time Cron label intact, with one input and one scheduling switch. Estimate calls only when confirming a batch execution. The sticky footer contains cancel, save and a status only when the draft has changed. Focus validation errors in context and preserve conditional and historical fields, keyboard navigation and draft-discard protection.
 
-The release dialog keeps exact ownership, identity, version, scope and remaining restrictions together. Conflict and uncertain outcomes expose refresh/reconciliation and disable unsupported repeat confirmation. Release leaves dependent rules stopped and never promises general availability. The HTML/SVG preview retains empty sandbox, inert state, strict CSP and blocked scripts/network/forms/navigation.
+Long rules and global budget settings stay inline. They use normal page flow with a sticky save footer where applicable. Closing a dirty draft requires an explicit discard decision; stale async responses cannot overwrite a newer editor. Connection and short confirmations use native modal dialogs with labeled headings, separated actions, bounded scrolling, Escape and focus restoration. Evidence and preview use wider dialogs when reading requires it. The native dialog supplies background non-interactivity; no framework modal implementation is added.
 
-**The Bounded Release Rule.** Show the exact owned pause, identity, action version, consequences and remaining restrictions together. Keep conflict and uncertain outcomes visible until reconciled.
+Historical release presentation keeps exact ownership, identity, version, scope and remaining restrictions together; official-host release remains unavailable. Conflict and uncertain outcomes expose refresh/reconciliation and disable unsupported repeat confirmation. Release leaves dependent rules stopped and never promises general availability. The HTML/SVG preview retains empty sandbox, inert state, strict CSP and blocked scripts/network/forms/navigation.
+
+**The Ownership Rule.** Preserve the exact owned pause, identity, action version, consequences and remaining restrictions. Keep conflict and uncertain outcomes visible; never simulate official-host release with another action.
 
 Copy feedback stays on its action and is also announced. Save feedback identifies its object. Connection loss, stale data and unresolved release stay visible where their recovery belongs. Selection, caret, scrollbars and focus inherit theme roles. The skip link, native controls and status live regions remain; the evidence report defines tested scope, not a blanket accessibility claim.
 
@@ -339,6 +398,10 @@ Copy feedback stays on its action and is also announced. Save feedback identifie
 - Don't hide overflow or shrink text to claim that unlimited content fits without scrolling.
 - Don't execute model-generated content in the parent page or relax the preview sandbox.
 
+
+## Historical account design records
+
+The following versioned records explain earlier design decisions and evidence. UI 11.18.0 above and the current source supersede conflicting layout, palette, endpoint and authorization statements.
 
 ### Managed OpenAI accounts
 
@@ -411,3 +474,17 @@ Status and the recorded diagnostic stage are separate unbroken phrases on the cu
 ### Account-only login workspace — UI 8.9.0
 
 The latest user explicitly removes the Login network column and Temporary login view. The account table now has six columns: Account, CPA state, Current operation, Operation time, Operation type and Actions. Redistribute the removed column width to the remaining data; use a1080px minimum width. Keep three local views: Accounts, Login tasks, Proxy and inspection. Remove the temporary form and its unused controls instead of hiding them. Preserve proxy configuration in account details and global settings; surface invalid proxy errors in current operation. Existing task review, candidate confirmation and historical browser callbacks remain supported. No recommendations may send users to the removed view.
+
+### Read recovery and account actions — UI 9.3.0
+
+This additive record documents plugin 0.16.0 within the established CPA themes, six-column account directory and three local views. It does not revise earlier layout decisions or global tokens. The reference is the read-only toSub2-go-port-2026.11.17 account, polling, history and security workflows; the implementation keeps the user's current account login and full-value display decisions.
+
+Retain the last validated account/settings/job content when reads fail and name the affected data beside a retry action. Stale state must not authorize account writes. Only reads recover automatically; a submitted login, save or security action is never automatically replayed. Account state polling and account log loading each use a single in-flight cycle, with logs independent from the main refresh. Hidden/offline pages pause scheduled reads. A management 401 disconnects and clears account secrets; stale reads cannot repopulate a closed or replaced editor.
+
+The active filter selects actual running account operations, including security and saving. A newly requested account-row 2FA login retains its approved one-action behavior: success saves and enables the CPA credential, keeps the directory visible and reports completion. Historical candidate review remains explicit. Account-scoped logs can show retained history outside the global latest-200 window, with honest per-account and per-task limits. Failed reads preserve existing events.
+
+Account details show the effective saved proxy and its source, with copy feedback for complete login material. Security dialogs preview the selected execution order and task detail distinguishes completed steps from later failure or uncertainty. Import uses the original input line number, disables empty/over-100 submissions, preserves password bytes and validates supported TOTP material. Closing clears transient secrets. After any failed or uncertain account save, require a fresh detail read before another edit; cleared proxy/credential fields must not be resubmitted.
+
+Evidence is documented in docs/LOGIN_EXPERIENCE_0_16_0_CN.md and artifacts/login-experience-0.16.0/. Offline Node regressions cover 16 cases; the Go build log records module tests and the Linux ARM64 package. CUA used six synthetic accounts to check recovery, filters, import, source/copy feedback, security steps, account history, simulated completion and 401 cleanup. Captures cover desktop/security plus 390px dark and 360px white with no horizontal document overflow. These checks do not certify real authentication or security mutations. Deployment completion is recorded separately in the release report.
+
+The detector returned 47 existing findings: seven container-padding warnings and 40 historical token advisories. Review considered rendered child insets and captures; no new finding was attributed to the changed JS/CSS. The token configuration was not modified. No new artwork, fonts or raster product assets ship; screenshots are verification evidence.

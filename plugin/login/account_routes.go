@@ -40,7 +40,7 @@ func credentialAccountWrite(s *Service, method, path string, raw []byte) (any, e
 		return map[string]any{"items": accounts}, err
 	}
 	if path == "/accounts/settings" && method == http.MethodPut {
-		r, err := Object(raw, "revision", "inspection_enabled", "auto_relogin_enabled", "interval_minutes", "login_proxy_url")
+		r, err := Object(raw, "revision", "inspection_enabled", "auto_relogin_enabled", "interval_minutes", "login_proxy_url", "cpa_upload_excluded_plans")
 		if err != nil {
 			return nil, err
 		}
@@ -68,12 +68,24 @@ func credentialAccountWrite(s *Service, method, path string, raw []byte) (any, e
 		if r.Get("login_proxy_url").Exists() {
 			current.LoginProxyURL = r.Get("login_proxy_url").String()
 		}
-		return s.UpdateAccountSettings(AccountSettings{Revision: revision, InspectionEnabled: r.Get("inspection_enabled").Bool(), AutoReloginEnabled: r.Get("auto_relogin_enabled").Bool(), IntervalMinutes: int(interval), LoginProxyURL: current.LoginProxyURL})
+		if values := r.Get("cpa_upload_excluded_plans"); values.Exists() {
+			if !values.IsArray() || len(values.Array()) > 32 {
+				return nil, invalid
+			}
+			current.CPAUploadExcludedPlans = []string{}
+			for _, value := range values.Array() {
+				if value.Type != ojson.String {
+					return nil, invalid
+				}
+				current.CPAUploadExcludedPlans = append(current.CPAUploadExcludedPlans, value.String())
+			}
+		}
+		return s.UpdateAccountSettings(AccountSettings{Revision: revision, InspectionEnabled: r.Get("inspection_enabled").Bool(), AutoReloginEnabled: r.Get("auto_relogin_enabled").Bool(), IntervalMinutes: int(interval), LoginProxyURL: current.LoginProxyURL, CPAUploadExcludedPlans: current.CPAUploadExcludedPlans})
 	}
 	if path == "/accounts/security" || path == "/accounts/security/complete" {
 		allowed := []string{"id", "revision", "job_id"}
 		if path == "/accounts/security" {
-			allowed = []string{"id", "revision", "action", "logout_all_devices", "reauthorize"}
+			allowed = []string{"id", "revision", "action", "logout_all_devices", "reauthorize", "upload_to_cpa"}
 		}
 		r, err := Object(raw, allowed...)
 		if err != nil || method != http.MethodPost {
@@ -98,14 +110,19 @@ func credentialAccountWrite(s *Service, method, path string, raw []byte) (any, e
 				return nil, invalid
 			}
 		}
-		return s.StartAccountSecurity(r.Get("id").String(), revision, r.Get("action").String(), r.Get("logout_all_devices").Bool(), r.Get("reauthorize").Bool())
+		reauthorize := r.Get("reauthorize").Bool()
+		upload, err := optionalCPAUpload(r, reauthorize)
+		if err != nil {
+			return nil, err
+		}
+		return s.startManualSecurity(r.Get("id").String(), revision, r.Get("action").String(), r.Get("logout_all_devices").Bool(), reauthorize, upload)
 	}
 	allowed := []string{"id"}
 	if path != "/accounts/inspect" {
 		allowed = append(allowed, "revision")
 	}
 	if path == "/accounts/start" {
-		allowed = append(allowed, "target_auth_id")
+		allowed = append(allowed, "target_auth_id", "upload_to_cpa")
 	}
 	if path == "/accounts/entry" && method == http.MethodPut {
 		allowed = append(allowed, "label", "auto_relogin", "credentials", "proxy_url")
@@ -134,7 +151,11 @@ func credentialAccountWrite(s *Service, method, path string, raw []byte) (any, e
 	}
 	switch {
 	case path == "/accounts/start" && method == http.MethodPost:
-		return s.StartAccount(id, revision, r.Get("target_auth_id").String())
+		upload, err := optionalCPAUpload(r, true)
+		if err != nil {
+			return nil, err
+		}
+		return s.startManualAccount(id, revision, r.Get("target_auth_id").String(), upload)
 	case path == "/accounts/entry" && method == http.MethodDelete:
 		return map[string]bool{"deleted": true}, s.DeleteAccount(id, revision)
 	case path == "/accounts/entry" && method == http.MethodPut:
@@ -162,6 +183,17 @@ func credentialAccountWrite(s *Service, method, path string, raw []byte) (any, e
 	default:
 		return nil, errors.New("not_found")
 	}
+}
+
+func optionalCPAUpload(r ojson.Result, fallback bool) (bool, error) {
+	v := r.Get("upload_to_cpa")
+	if !v.Exists() {
+		return fallback, nil
+	}
+	if v.Type != ojson.True && v.Type != ojson.False {
+		return false, errors.New("invalid_request")
+	}
+	return v.Bool(), nil
 }
 
 func accountUint(v ojson.Result) (uint64, error) {

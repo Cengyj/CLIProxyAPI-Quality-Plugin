@@ -1,6 +1,6 @@
 # 历史浏览器登录运行时（1.x，已由 Go＋Sobek 替代）
 
-> 当前为 1.2.2：默认流程已按目标项目重整为 ChatGPT 网页会话 → 密码 → TOTP → 同会话 CPA OAuth，并提供实时阶段日志。1.2.1 的网站验证请求与等待状态修复见 [验证修复](OPENAI_LOGIN_VERIFICATION_FIX_CN.md)。详见 [参考登录流程](OPENAI_LOGIN_REFERENCE_FLOW_CN.md)。下方直接 OAuth 表单及单 JSON 描述保留为 1.0/1.1 历史实现；1.2.0 的进度协议以新文档为准。
+> 以下为 1.2.2 历史行为；当前工作区规则见 [Go＋Sobek 2.1.2 工作区自动选择](WORKSPACE_SELECTION_CN.md)。1.2.2：默认流程已按目标项目重整为 ChatGPT 网页会话 → 密码 → TOTP → 同会话 CPA OAuth，并提供实时阶段日志。1.2.1 的网站验证请求与等待状态修复见 [验证修复](OPENAI_LOGIN_VERIFICATION_FIX_CN.md)。详见 [参考登录流程](OPENAI_LOGIN_REFERENCE_FLOW_CN.md)。下方直接 OAuth 表单及单 JSON 描述保留为 1.0/1.1 历史实现；1.2.0 的进度协议以新文档为准。
 
 ## 已实现的范围
 

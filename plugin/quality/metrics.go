@@ -15,7 +15,7 @@ func (en *Engine) Metrics() (map[string]any, error) {
 	judgeUnknown, controlUnknown := 0, 0
 	unknownUsage := 0
 	for _, r := range en.runs {
-		planned += len(r.Config.Models) * r.Config.Samples
+		planned += max(0, len(r.Config.Models)*r.Config.Samples-r.PrunedSamples)
 		for _, s := range r.Controls {
 			if s.Usage != nil {
 				controlTokens += s.Usage.Total

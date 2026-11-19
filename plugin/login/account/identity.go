@@ -30,6 +30,11 @@ func LoginPrincipalFromAuth(a *Auth) (LoginPrincipal, error) {
 	var fallbackSub string
 	for _, key := range []string{"id_token", "access_token"} {
 		token := authMetadataString(a, key)
+		// Imported Codex exports can omit ID tokens. Access-token account and
+		// user claims remain required; a present ID token must still agree.
+		if key == "id_token" && token == "" {
+			continue
+		}
 		parts := strings.Split(token, ".")
 		if len(parts) != 3 {
 			return p, errors.New("identity_unverifiable")

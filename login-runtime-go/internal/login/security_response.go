@@ -1,4 +1,4 @@
-// Adapted from toSub2-go-port internal/protocol/totp_response.go; see SOURCE_MANIFEST.json.
+// Adapted from reference current receipt validation; see SOURCE_MANIFEST.json.
 package login
 
 import (
@@ -23,6 +23,9 @@ func decodeTOTPResponse(body []byte) (map[string]any, bool) {
 		return nil, false
 	}
 	if _, valid := totpKnownResponseObject(raw["factor"]); !valid {
+		return nil, false
+	}
+	if _, valid := totpKnownResponseObject(raw["account"]); !valid {
 		return nil, false
 	}
 	factors, valid := totpKnownResponseObject(raw["factors"])
@@ -80,6 +83,11 @@ func classifyTOTPMutation(step string, result map[string]any, factorID, sessionI
 	if result == nil || !totpOutcomeFieldsValid(result) || !totpResponseBindingMatches(result, factorID, sessionID) {
 		return totpMutationUnknown
 	}
+	for _, key := range []string{"secret", "otpauth_uri", "new_totp_factor_id", "enrollment_factor"} {
+		if _, present := result[key]; present {
+			return totpMutationUnknown
+		}
+	}
 	success := result["success"] == true
 	switch step {
 	case "disable":
@@ -90,7 +98,7 @@ func classifyTOTPMutation(step string, result map[string]any, factorID, sessionI
 		return totpMutationUnknown
 	}
 	rejected := totpResponseRejected(result)
-	if success && rejected {
+	if success && (rejected || totpCrossedMutationSignals(step, result)) {
 		return totpMutationUnknown
 	}
 	if rejected {
@@ -100,6 +108,17 @@ func classifyTOTPMutation(step string, result map[string]any, factorID, sessionI
 		return totpMutationSucceeded
 	}
 	return totpMutationUnknown
+}
+
+// A generic success acknowledges the requested operation, not its opposite.
+func totpCrossedMutationSignals(step string, result map[string]any) bool {
+	switch step {
+	case "activation":
+		return totpDisabledMessage(result["message"]) && (result["success"] == true || result["activated"] == true)
+	case "disable":
+		return result["activated"] == true && (result["success"] == true || totpDisabledMessage(result["message"]))
+	}
+	return false
 }
 
 func totpDisabledMessage(value any) bool {
@@ -115,6 +134,11 @@ func totpDisabledMessage(value any) bool {
 }
 
 func totpOutcomeFieldsValid(result map[string]any) bool {
+	if value, present := result["request_id"]; present {
+		if _, ok := value.(string); !ok {
+			return false
+		}
+	}
 	for _, key := range []string{"success", "activated"} {
 		if value, present := result[key]; present {
 			if _, ok := value.(bool); !ok {

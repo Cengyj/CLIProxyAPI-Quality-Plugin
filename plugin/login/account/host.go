@@ -344,7 +344,7 @@ func (m *Manager) CommitLoginCandidate(ctx context.Context, r LoginCommitRequest
 		return result, errors.New("invalid_request")
 	}
 	result.AuthID = r.Candidate.ID
-	if old, e := m.LoginCommitStatus(r.CommitID); e == nil {
+	if old, e := m.LoginCommitStatus(r.CommitID); e == nil && old.State != "upload_excluded" {
 		return old, errors.New("already_consumed")
 	}
 	if e := ctx.Err(); e != nil {
@@ -445,6 +445,11 @@ func (m *Manager) CommitLoginCandidate(ctx context.Context, r LoginCommitRequest
 	}
 	abort := func(cause error) (LoginCommitResult, error) {
 		result.State = "aborted"
+		// This receipt proves that no save began. Only an explicit retry of the
+		// retained candidate may replace it; uncertain writes remain consumed.
+		if cause.Error() == "cpa_plan_excluded" {
+			result.State = "upload_excluded"
+		}
 		if e := m.receipt(result); e != nil {
 			result.State = "commit_unknown"
 			return result, errors.New("commit_unknown")

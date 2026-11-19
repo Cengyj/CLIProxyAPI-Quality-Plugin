@@ -96,8 +96,7 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await page.locator('#login-view-temporary, #login-form, #login-start, #login-method, #login-credential-rows').count(), 0, 'Temporary login is removed rather than hidden');
     assert.equal(await page.locator('#login-disconnected').isVisible(), true);
     await connect();
-    assert.equal(await page.locator('#login-engine').innerText(), 'Go + Sobek · 2.1.0');
-    assert.equal(await page.locator('#login-engine').isVisible(), true);
+    assert.equal(await page.locator('#login-engine, .runtime-info').count(), 0);
     assert.equal(await page.locator('[data-page=login]').getAttribute('aria-current'), 'page');
     assert.equal(await page.locator('#login-view-accounts').isVisible(), true);
     assert.deepEqual(writes(), []);
@@ -137,7 +136,7 @@ const server = http.createServer(async (req, res) => {
     await select(unsafe); await page.locator('#login-job-detail').filter({ hasText: '授权链接暂不可用' }).waitFor();
     assert.equal(await page.locator('.login-auth-link').count(), 0);
     rejectNextAction = true; await page.locator('[data-login-action=cancel]').click();
-    await page.locator('#login-notice').filter({ hasText: '任务版本已变化' }).waitFor();
+    await page.locator('#login-history-feedback').filter({ hasText: '任务版本已变化' }).waitFor();
     assert(!(await page.locator('body').innerText()).includes('DO_NOT_RENDER_SERVER_SECRET'));
     assert.equal(unsafe.status, 'waiting_browser');
     await page.locator('[data-login-action=cancel]').click(); await waitStatus('已取消');
@@ -229,7 +228,7 @@ const server = http.createServer(async (req, res) => {
     await refresh(); await receivedFailure;
     await page.locator('[data-page=manual]').click(); await page.locator('[data-page=login]').click(); await ready();
     releaseFailure(); heldReads.delete(releaseFailure); await (await failedResponse).finished(); await settle();
-    assert.equal(await page.locator('#login-notice').isVisible(), false);
+    assert.equal(await page.locator('#login-notice').count(), 0);
     checks.push('A delayed read failure from an older visit cannot overwrite the current account workspace');
     let releaseDetail, detailReceived;
     const receivedDetail = new Promise(resolve => { detailReceived = resolve; });

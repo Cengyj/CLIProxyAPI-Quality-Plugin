@@ -12,6 +12,8 @@ import (
 
 // changeSet publishes a state transition only after all of its records are durable.
 type changeSet struct {
+	disposition        *CredentialDisposition
+	timers             map[string]bool
 	rules              map[string]*Rule
 	runs               map[string]*Run
 	audits             []Audit
@@ -22,10 +24,20 @@ type changeSet struct {
 
 func changes() *changeSet { return &changeSet{rules: map[string]*Rule{}, runs: map[string]*Run{}} }
 func (en *Engine) commitLocked(c *changeSet) error {
-	if len(c.rules) == 0 && len(c.runs) == 0 && len(c.audits) == 0 && c.intent == nil && c.loginPreparationID == "" {
+	if len(c.rules) == 0 && len(c.runs) == 0 && len(c.audits) == 0 && c.timers == nil && c.intent == nil && c.loginPreparationID == "" && c.disposition == nil {
 		return nil
 	}
 	err := en.store.Write(func(tx *bolt.Tx) error {
+		if c.disposition != nil {
+			if err := put(tx, "meta", dispositionPrefix+c.disposition.AuthID, c.disposition); err != nil {
+				return err
+			}
+		}
+		if c.timers != nil {
+			if err := put(tx, "meta", ruleTimersKey, c.timers); err != nil {
+				return err
+			}
+		}
 		if c.loginPreparationID != "" {
 			if err := tx.Bucket([]byte("meta")).Put([]byte("login-prepare:"+c.loginPreparationID), c.loginPreparation); err != nil {
 				return err
@@ -58,6 +70,15 @@ func (en *Engine) commitLocked(c *changeSet) error {
 		}
 		return en.fault
 	}
+	if c.timers != nil {
+		en.timers = c.timers
+	}
+	if c.disposition != nil {
+		if en.managed == nil {
+			en.managed = map[string]*CredentialDisposition{}
+		}
+		en.managed[c.disposition.AuthID] = c.disposition
+	}
 	for id, r := range c.rules {
 		if old := en.rules[id]; old != nil {
 			*old = *r
@@ -67,6 +88,9 @@ func (en *Engine) commitLocked(c *changeSet) error {
 	}
 	for id, r := range c.runs {
 		if old := en.runs[id]; old != nil {
+			if old.Status == "queued" && r.CompletedAt != nil {
+				en.finishRuleChildLocked(r.Config)
+			}
 			*old = *r
 		} else {
 			en.runs[id] = r
@@ -196,15 +220,9 @@ func (en *Engine) haltChangesLocked(c *changeSet, authID, exceptRun, reason stri
 		if old.CancelRequested && old.BlockReason == reason {
 			continue
 		}
-		r := cloneRun(old)
-		r.CancelRequested = true
+		r := en.cancelledRunLocked(old, "blocked")
 		r.BlockReason = reason
 		r.ActionStatus = "awaiting_release"
-		if r.Status == "queued" {
-			r.Status = "blocked"
-			now := en.now()
-			r.CompletedAt = &now
-		}
 		c.runs[id] = r
 	}
 }
@@ -218,22 +236,52 @@ func (en *Engine) cancelRuleChangesLocked(c *changeSet, id, reason string) {
 		if old.Config.RuleID != id || (old.Status != "queued" && old.Status != "running") {
 			continue
 		}
-		r := cloneRun(old)
-		r.CancelRequested = true
+		r := en.cancelledRunLocked(old, "blocked")
 		r.BlockReason = reason
-		if r.Status == "queued" {
-			r.Status = "blocked"
-			now := en.now()
-			r.CompletedAt = &now
-		}
 		c.runs[runID] = r
 	}
 }
 
+// The worker finishes running tasks. A queued task has no worker to finish it.
+func (en *Engine) cancelledRunLocked(old *Run, queuedStatus string) *Run {
+	r := cloneRun(old)
+	r.CancelRequested = true
+	if r.Status == "queued" {
+		r.Status = queuedStatus
+		now := en.now()
+		r.CompletedAt = &now
+	}
+	return r
+}
+
 // checkExecution repeats admission after queue waits and before each subject, control, or judge call.
-func (en *Engine) checkExecution(ctx context.Context, runID string) error {
+func (en *Engine) checkExecution(ctx context.Context, runID string, f Frozen) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	var targets []Target
+	var err error
+	if host, ok := en.host.(interface {
+		pinnedTarget(context.Context, string, string) (Target, error)
+	}); ok && f.ScopeBatchID != "" {
+		var t Target
+		t, err = host.pinnedTarget(ctx, f.AuthID, f.SubjectIndex)
+		targets = []Target{t}
+	} else {
+		targets, err = en.host.Targets(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("unavailable: credential status cannot be verified")
+	}
+	if expected := f.ManagedProbe; expected != nil {
+		h, ok := en.host.(managedHost)
+		if !ok || !en.Capabilities().ManagementSession {
+			return fmt.Errorf("management_session_required: reconnect the authenticated plugin panel")
+		}
+		current, err := h.CredentialSnapshot(ctx, expected.AuthID, expected.AuthIndex)
+		if err != nil || !sameSnapshot(current, *expected) {
+			return fmt.Errorf("blocked: credential changed after dispatch")
+		}
 	}
 	en.mu.Lock()
 	defer en.mu.Unlock()
@@ -252,10 +300,13 @@ func (en *Engine) checkExecution(ctx context.Context, runID string) error {
 		if en.unsupportedRule(rule) {
 			return unsupportedQuality()
 		}
+		if r.Config.Scheduled && !en.timerAllowed(rule) {
+			return fmt.Errorf("blocked: scheduling disabled")
+		}
 	}
-	targets, err := en.host.Targets(ctx)
+	targets, err = en.checkManagedRunLocked(r, targets)
 	if err != nil {
-		return fmt.Errorf("unavailable: credential status cannot be verified")
+		return err
 	}
 	if paused := pausedTarget(r.Config.RunConfig, targets); paused != "" {
 		if err = en.haltCredentialLocked(paused, "", "quality_paused"); err != nil {
@@ -267,6 +318,21 @@ func (en *Engine) checkExecution(ctx context.Context, runID string) error {
 	}
 	if err = frozenIdentityError(r.Config, targets); err != nil {
 		return err
+	}
+	if r.Config.ScopeBatchID != "" {
+		for _, t := range targets {
+			if t.AuthID != r.Config.AuthID {
+				continue
+			}
+			if !eligibleForScope(t) || t.AuthIndex != r.Config.SubjectIndex || t.Provider != r.Config.Provider {
+				return fmt.Errorf("blocked: scoped target changed")
+			}
+			for _, m := range r.Config.Models {
+				if !contains(t.Models, m) {
+					return fmt.Errorf("blocked: scoped model no longer registered")
+				}
+			}
+		}
 	}
 	return ctx.Err()
 }

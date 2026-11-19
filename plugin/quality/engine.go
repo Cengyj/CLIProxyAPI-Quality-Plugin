@@ -11,31 +11,41 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 type Engine struct {
-	mu            sync.Mutex
-	store         *Store
-	host          Host
-	cfg           Config
-	runs          map[string]*Run
-	rules         map[string]*Rule
-	active        map[string]context.CancelFunc
-	busyAuth      map[string]struct{}
-	queue         chan string
-	events        chan UsageEvent
-	dropped       atomic.Uint64
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
-	closed        bool
-	closeDone     chan struct{}
-	closeErr      error
-	queueChanged  chan struct{}
-	fault         error
-	now           func() time.Time
-	budget        Budget
-	budgetPending map[string]int
+	managed        map[string]*CredentialDisposition
+	mu             sync.Mutex
+	store          *Store
+	host           Host
+	cfg            Config
+	runs           map[string]*Run
+	rules          map[string]*Rule
+	timers         map[string]bool
+	active         map[string]context.CancelFunc
+	busyAuth       map[string]struct{}
+	queue          chan string
+	scopeBatches   map[string][]string
+	finishedRules  map[string]bool
+	roundRemaining map[string]int
+	roundEnded     chan struct{}
+	scanning       map[string]bool
+	snapshotSlots  chan struct{}
+	events         chan UsageEvent
+	dropped        atomic.Uint64
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	closed         bool
+	closeDone      chan struct{}
+	closeErr       error
+	queueChanged   chan struct{}
+	fault          error
+	now            func() time.Time
+	budget         Budget
+	budgetPending  map[string]int
 }
 
 func ID() string {
@@ -55,6 +65,7 @@ func New(c Config, h Host) (*Engine, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	en := &Engine{store: s, host: h, cfg: c, runs: map[string]*Run{}, rules: map[string]*Rule{}, active: map[string]context.CancelFunc{}, busyAuth: map[string]struct{}{}, queue: make(chan string, c.Queue), events: make(chan UsageEvent, 256), ctx: ctx, cancel: cancel, now: func() time.Time { return time.Now().UTC() }}
+	en.roundEnded = make(chan struct{}, 1)
 	if e = en.load(); e != nil {
 		cancel()
 		return nil, errors.Join(e, s.Close())
@@ -67,11 +78,15 @@ func New(c Config, h Host) (*Engine, error) {
 		en.wg.Add(1)
 		go en.worker()
 	}
-	en.wg.Add(1)
+	en.wg.Add(2)
 	go en.background()
+	go en.watchFinishedRounds()
 	return en, nil
 }
 func (en *Engine) load() error {
+	if err := en.loadDispositions(); err != nil {
+		return err
+	}
 	var inputHash string
 	if err := en.store.Get("meta", "config_input", &inputHash); (err == nil && inputHash == fingerprint(en.cfg)) || en.store.migrated {
 		var saved Config
@@ -94,14 +109,22 @@ func (en *Engine) load() error {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	} else {
-		if err = en.store.Put("meta", "config_input", fingerprint(en.cfg)); err != nil {
-			return err
-		}
-		if err = en.store.Put("meta", "settings", en.cfg); err != nil {
+		if err = en.store.Write(func(tx *bolt.Tx) error {
+			if err := tx.Bucket([]byte("meta")).Delete([]byte(ruleTimersKey)); err != nil {
+				return err
+			}
+			if err := put(tx, "meta", "config_input", fingerprint(en.cfg)); err != nil {
+				return err
+			}
+			return put(tx, "meta", "settings", en.cfg)
+		}); err != nil {
 			return err
 		}
 	}
 
+	if err := en.store.Get("meta", ruleTimersKey, &en.timers); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if e := en.store.All("rules", func(raw []byte) error {
 		var r Rule
 		if e := json.Unmarshal(raw, &r); e != nil {
@@ -135,6 +158,7 @@ func (en *Engine) load() error {
 		if e := en.store.Put("runs", r.ID, r); e != nil {
 			return e
 		}
+		en.noteRoundEndLocked(r.Config.RuleID)
 	}
 	if e := en.store.Get("meta", "budget", &en.budget); e != nil && !errors.Is(e, os.ErrNotExist) {
 		return e
@@ -206,7 +230,7 @@ func (en *Engine) UpdateConfig(c Config) error {
 	if c.DataDir != en.cfg.DataDir || c.Workers != en.cfg.Workers || c.Queue != en.cfg.Queue {
 		return fmt.Errorf("data_dir/workers/queue require host reconfiguration")
 	}
-	if e := en.store.Put("meta", "settings", c); e != nil {
+	if e := en.writeScheduleSettings(c, en.cfg.SchedulingEnabled && !c.SchedulingEnabled); e != nil {
 		return e
 	}
 	en.cfg = c

@@ -19,6 +19,7 @@ func classifyError(err error) (string, int) {
 		"unavailable":      http.StatusServiceUnavailable,
 		"gone":             http.StatusGone,
 		"invalid_request":  http.StatusBadRequest,
+		"invalid_cron":     http.StatusBadRequest,
 	}
 	aliases := map[string]string{
 		"action_conflict": "conflict", "identity_conflict": "conflict", "action_already_released": "conflict", "rule_already_owns_pause": "conflict",

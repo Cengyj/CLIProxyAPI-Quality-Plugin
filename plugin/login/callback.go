@@ -1,7 +1,6 @@
 package login
 
 import (
-	"errors"
 	"net/url"
 	"strconv"
 
@@ -10,32 +9,45 @@ import (
 )
 
 func validateCallback(raw, state string) (string, error) {
+	return validateCallbackFor(raw, state, codex.RedirectURI)
+}
+
+func callbackFailure(code, reason string) error {
+	return &runtimeDiagnosticError{code: code, stage: "callback", reason: reason}
+}
+
+// Accept optional provider metadata as the reference client does. Only the code
+// is passed to token exchange; unknown parameters never affect binding or storage.
+func validateCallbackFor(raw, state, redirect string) (string, error) {
 	if len(raw) > 8192 {
-		return "", errors.New("invalid_callback")
+		return "", callbackFailure("invalid_callback", "callback_url_invalid")
 	}
 	u, err := url.Parse(raw)
-	want, _ := url.Parse(codex.RedirectURI)
-	if err != nil || u.Scheme != want.Scheme || u.Host != want.Host || u.Path != want.Path || u.RawPath != "" || u.Fragment != "" || u.User != nil || u.Opaque != "" {
-		return "", errors.New("invalid_callback")
+	want, targetErr := url.Parse(redirect)
+	if err != nil || targetErr != nil || want.Scheme == "" || want.Host == "" || u.Scheme != want.Scheme || u.Host != want.Host || u.Path != want.Path || u.RawPath != "" || u.Fragment != "" || u.User != nil || u.Opaque != "" {
+		return "", callbackFailure("invalid_callback", "callback_url_invalid")
 	}
 	q, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
-		return "", errors.New("invalid_callback")
+		return "", callbackFailure("invalid_callback", "callback_parameters_invalid")
 	}
-	for k, v := range q {
-		if len(v) != 1 || (k != "state" && k != "code" && k != "scope" && k != "session_state" && k != "error" && k != "error_description") {
-			return "", errors.New("invalid_callback")
+	for _, name := range []string{"state", "code", "scope", "session_state", "error", "error_description"} {
+		if len(q[name]) > 1 {
+			return "", callbackFailure("invalid_callback", "callback_parameters_invalid")
 		}
 	}
-	if q.Get("state") != state || state == "" {
-		return "", errors.New("invalid_callback")
+	if len(q["state"]) != 1 || q.Get("state") != state || state == "" {
+		return "", callbackFailure("invalid_callback", "callback_state_mismatch")
 	}
-	if q.Get("error") != "" {
-		return "", errors.New("interaction_required")
+	if values, present := q["error"]; present {
+		if values[0] == "" || len(q["code"]) != 0 {
+			return "", callbackFailure("invalid_callback", "callback_parameters_invalid")
+		}
+		return "", callbackFailure("interaction_required", "callback_authorization_denied")
 	}
 	code := q.Get("code")
 	if code == "" || len(code) > 4096 {
-		return "", errors.New("invalid_callback")
+		return "", callbackFailure("invalid_callback", "callback_code_invalid")
 	}
 	return code, nil
 }

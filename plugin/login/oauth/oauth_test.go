@@ -3,7 +3,9 @@ package oauth
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,7 +41,7 @@ func TestPKCEAndSingleUseExchange(t *testing.T) {
 	}
 }
 func TestExchangeFailuresNeverExposeRemoteBodyOrRetry(t *testing.T) {
-	for _, mode := range []string{"denied", "duplicate", "fractional_expiry", "oversize", "redirect", "disconnect"} {
+	for _, mode := range []string{"denied", "limited", "unavailable", "duplicate", "fractional_expiry", "oversize", "redirect", "disconnect"} {
 		t.Run(mode, func(t *testing.T) {
 			var calls atomic.Int32
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +49,12 @@ func TestExchangeFailuresNeverExposeRemoteBodyOrRetry(t *testing.T) {
 				switch mode {
 				case "denied":
 					w.WriteHeader(401)
+					fmt.Fprint(w, "private-remote-body")
+				case "limited":
+					w.WriteHeader(429)
+					fmt.Fprint(w, "private-remote-body")
+				case "unavailable":
+					w.WriteHeader(503)
 					fmt.Fprint(w, "private-remote-body")
 				case "duplicate":
 					fmt.Fprint(w, `{"access_token":"a","access_token":"b","refresh_token":"r","id_token":"i","expires_in":1}`)
@@ -74,6 +82,27 @@ func TestExchangeFailuresNeverExposeRemoteBodyOrRetry(t *testing.T) {
 			if result != nil || e == nil || e.Error() != "exchange_failed" || calls.Load() != 1 {
 				t.Fatal("exchange failure was replayed or leaked diagnostics")
 			}
+			var diagnostic *ExchangeError
+			if !errors.As(e, &diagnostic) {
+				t.Fatal("exchange failure lost its typed safe diagnosis")
+			}
+			wantStatus := map[string]int{"denied": 401, "limited": 429, "unavailable": 503, "duplicate": 200, "fractional_expiry": 200, "oversize": 200, "redirect": 302, "disconnect": 0}[mode]
+			wantReason := map[string]string{"denied": "upstream_rejected", "limited": "upstream_rejected", "unavailable": "upstream_rejected", "duplicate": "response_invalid", "fractional_expiry": "response_invalid", "oversize": "response_too_large", "redirect": "upstream_rejected", "disconnect": ""}[mode]
+			if diagnostic.HTTPStatus != wantStatus || diagnostic.Reason != wantReason || strings.Contains(fmt.Sprintf("%+v", diagnostic), "private") {
+				t.Fatalf("incorrect or unsafe exchange diagnosis: %+v", diagnostic)
+			}
+
 		})
+	}
+}
+
+func TestExchangeTransportDiagnosticsNeverIncludeNetworkIdentity(t *testing.T) {
+	const secret = "private-proxy-token"
+	err := &net.DNSError{Err: secret, Name: secret + ".invalid", Server: secret}
+	if got := transportReason(err); got != "network_dns_failed" || strings.Contains(got, secret) {
+		t.Fatal("DNS diagnosis leaked address or private error")
+	}
+	if got := transportReason(context.DeadlineExceeded); got != "network_timeout" {
+		t.Fatal("timeout diagnosis was lost")
 	}
 }

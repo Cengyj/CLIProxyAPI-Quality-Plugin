@@ -1,6 +1,6 @@
 # OpenAI Go＋Sobek 登录运行时
 
-当前默认实现是 `login-runtime-go/`，运行时 **2.0.0**，引擎标识 **go_sobek_protocol**。宿主直接启动 `bin/login-runtime`，不加载 Node、Playwright 或 Chromium，也没有浏览器自动回退。原 `login-runtime/` 仅保留历史源码和显式回滚兼容；旧版说明见 [浏览器运行时历史](OPENAI_2FA_BROWSER_RUNTIME_CN.md)。
+当前默认实现是 `login-runtime-go/`；本文保留运行时 **2.0.0** 的基础说明，当前安装版本见 [README](../README_CN.md)，工作区选择更新见 [2.1.2 修复说明](WORKSPACE_SELECTION_CN.md)。引擎标识 **go_sobek_protocol**。宿主直接启动 `bin/login-runtime`，不加载 Node、Playwright 或 Chromium，也没有浏览器自动回退。原 `login-runtime/` 仅保留历史源码和显式回滚兼容；旧版说明见 [浏览器运行时历史](OPENAI_2FA_BROWSER_RUNTIME_CN.md)。
 
 ## 与目标项目的关系
 
@@ -8,7 +8,7 @@
 
 业务流程采用目标项目的已有账号路径：ChatGPT 首页 → providers / CSRF → signin → 密码验证 → 从真实认证响应读取 TOTP factor ID → issue_challenge → TOTP 验证 → 确认网页会话邮箱 → 同会话 OAuth → 返回回调。所有步骤共用设备标识、Cookie 和登录代理。
 
-CPA 保留自己的 PKCE、state、授权码兑换、身份核验与候选凭证提交。运行时只返回回调，不创建第二套 PKCE、不直接上传凭证。没有引入目标项目的注册、密码重置、MFA 开通/重置、手机号绑定、用量或探针逻辑。多工作区缺少明确目标时停止，不任意选择。
+CPA 保留自己的 PKCE、state、授权码兑换、身份核验与候选凭证提交。运行时只返回回调，不创建第二套 PKCE、不直接上传凭证。没有引入目标项目的注册、密码重置、MFA 开通/重置、手机号绑定、用量或探针逻辑。2.0.0 当时在多工作区缺少明确目标时停止；2.1.2 已改为明确绑定优先、未绑定时组织优先再选择首个有效工作区，详见 [新规则](WORKSPACE_SELECTION_CN.md)。
 
 `UPSTREAM_SOURCE_MANIFEST.json` 记录参考 checkout 的版本、本地改动状态及逐文件摘要；`SOURCE_MANIFEST.json` 记录适配源码。参考目录保持只读。该 checkout 没有根项目许可证，NOTICE 不将整个项目推定为 MIT；依赖声明和许可证位于 `licenses/`。
 

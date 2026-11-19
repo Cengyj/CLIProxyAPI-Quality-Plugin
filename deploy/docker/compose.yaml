@@ -1,0 +1,19 @@
+services:
+  cpa:
+    image: cliproxyapi:8.0.76-local
+    container_name: cli-proxy-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8317:8317"
+    volumes:
+      - ../../artifacts/docker-8.0.76/runtime/config:/CLIProxyAPI/config
+      - ../../artifacts/docker-8.0.76/runtime/auths:/root/.cli-proxy-api
+      - ../../artifacts/docker-8.0.76/runtime/plugins:/CLIProxyAPI/plugins
+      - ../../artifacts/docker-8.0.76/runtime/plugin-data:/CLIProxyAPI/plugin-data
+      - ../../artifacts/docker-8.0.76/runtime/logs:/CLIProxyAPI/logs
+      - ../../artifacts/docker-8.0.76/runtime/static:/CLIProxyAPI/static
+    command: ["./CLIProxyAPI", "--config", "/CLIProxyAPI/config/config.yaml", "--local-model"]
+    environment:
+      TZ: Asia/Shanghai
+      MANAGEMENT_STATIC_PATH: /CLIProxyAPI/static
+    stop_grace_period: 30s

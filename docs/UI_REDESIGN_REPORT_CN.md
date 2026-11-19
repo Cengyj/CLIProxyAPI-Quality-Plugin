@@ -11,7 +11,7 @@
 - 运维划分需要关注、检测规则、审计记录。先呈现暂停归属及凭证限制，质量通过率和覆盖率保留分母。规则与预算使用页内编辑，解除保留受保护的确认对话框。
 - 解除展示身份、归属、动作版本、整个凭证作用范围和剩余限制。409 使原预览失效；503 / 网络结果不确定时禁用再次提交，以读取核对结果。刷新或关闭过程使用预览代际隔离。解除后相关规则仍停止、旧失败证据清零，需另行显式恢复。
 
-设计方向与功能—状态—操作—反馈清单在 `.impeccable/surfaces/plugin-ui-index-html.md`。最终系统见根目录 `DESIGN.md` 与 `.impeccable/design.json`。使用说明见 `docs/UI_CN.md`。
+设计方向与功能—状态—操作—反馈清单在 `docs/UI_DESIGN_BRIEF.md`。最终系统见根目录 `DESIGN.md` 与 `docs/design-system.json`。使用说明见 `docs/UI_CN.md`。
 
 ## 颜色来源
 
@@ -33,7 +33,7 @@
 | `scripts/verify_native_ui.cjs` | 同步原生 UI 导航和解除对账流程 |
 | `docs/UI_CN.md`、`plugin/NOTICE.md` | 新界面使用方法与准确配色来源 |
 | `PRODUCT.md` | 同步当前工作区名称和本次确定的配色承诺 |
-| `DESIGN.md`、`.impeccable/design.json` | 从最终实现记录设计系统 |
+| `DESIGN.md`、`docs/design-system.json` | 从最终实现记录设计系统 |
 
 `client.js` 的内存密钥、鉴权、AbortController、连接代际隔离继续使用。未修改 Go 源码、宿主源码或业务路由；新静态文件已重新嵌入共享库。
 

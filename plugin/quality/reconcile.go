@@ -24,6 +24,9 @@ func (h *NativeHost) ActionStatus(ctx context.Context, id string) (ActionState, 
 
 // Reconcile repairs state uncertainty without ever starting a model call or resuming a rule.
 func (en *Engine) Reconcile(ctx context.Context) error {
+	if !en.Capabilities().QualityPause {
+		return nil
+	}
 	en.mu.Lock()
 	defer en.mu.Unlock()
 	if en.closed {
@@ -31,10 +34,6 @@ func (en *Engine) Reconcile(ctx context.Context) error {
 	}
 	if en.fault != nil {
 		return en.fault
-	}
-	if !en.Capabilities().QualityPause {
-		// An absent official authority cannot confirm, release, or replay a retained pause.
-		return nil
 	}
 	actions, err := en.host.Actions(ctx)
 	if err != nil {
@@ -200,6 +199,9 @@ func (en *Engine) Prune(now time.Time) error {
 	if en.closed {
 		return nil
 	}
+	if err := en.pruneResultCountsLocked("", ""); err != nil {
+		return err
+	}
 	before := now.Add(-time.Duration(en.cfg.RetentionDays) * 24 * time.Hour)
 	keep := map[string]bool{}
 	cutoffs := map[string]time.Time{}
@@ -214,7 +216,11 @@ func (en *Engine) Prune(now time.Time) error {
 	}
 	for id, r := range en.runs {
 		if rule := en.rules[r.Config.RuleID]; rule != nil {
-			cutoffs[id] = now.Add(-time.Duration(rule.RetentionDays) * 24 * time.Hour)
+			if rule.MaxResults > 0 || rule.RetentionMode == "manual" {
+				cutoffs[id] = time.Time{}
+			} else if rule.RetentionDays > 0 {
+				cutoffs[id] = now.Add(-time.Duration(rule.RetentionDays) * 24 * time.Hour)
+			}
 		}
 	}
 	if e := en.store.Prune(before, keep, cutoffs); e != nil {
@@ -234,7 +240,10 @@ func (en *Engine) Prune(now time.Time) error {
 }
 func (en *Engine) storageAdmission() error {
 	return en.store.db.View(func(tx *bolt.Tx) error {
-		if tx.Size() >= en.cfg.MaxStorageBytes {
+		// bbolt keeps released pages in the file for subsequent allocations.
+		db := tx.DB()
+		free := int64(db.Stats().FreePageN) * int64(db.Info().PageSize)
+		if tx.Size()-free >= en.cfg.MaxStorageBytes {
 			return fmt.Errorf("storage_limit: retention or archival required")
 		}
 		return nil

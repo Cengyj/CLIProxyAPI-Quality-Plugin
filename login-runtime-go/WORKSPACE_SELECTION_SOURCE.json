@@ -1,0 +1,13 @@
+{
+  "reference_root": "/Users/ceng/Downloads/toSub2-go-port-2026.11.17",
+  "reference_file": "internal/protocol/flow.go",
+  "sha256": "29bd7623654ca5e8736329334bfc31ed4637dd7a2e139bd07852421351713a24",
+  "symbol": "(*Flow).workspace",
+  "policy": [
+    "exact explicit WorkspaceID",
+    "first workspace with kind organization",
+    "first valid workspace ID"
+  ],
+  "runtime_version": "2.1.2",
+  "copied_credentials": false
+}

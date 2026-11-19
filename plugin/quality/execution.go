@@ -5,7 +5,37 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	bolt "go.etcd.io/bbolt"
 )
+
+func (en *Engine) DeleteManualRun(id string) error {
+	en.mu.Lock()
+	defer en.mu.Unlock()
+	if err := en.mutableLocked(); err != nil {
+		return err
+	}
+	if id == "" {
+		return fmt.Errorf("invalid_request: missing run ID")
+	}
+	r := en.runs[id]
+	if r == nil {
+		return nil
+	}
+	if r.Source != "manual_test" || r.Config.RuleID != "" {
+		return fmt.Errorf("conflict: only manual tests can be removed here")
+	}
+	if r.CompletedAt == nil || en.active[id] != nil || r.Status == "queued" || r.Status == "running" || r.Status == "cancelling" {
+		return fmt.Errorf("conflict: test has not finished")
+	}
+	if err := en.store.Write(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte("runs")).Delete([]byte(id))
+	}); err != nil {
+		return err
+	}
+	delete(en.runs, id)
+	return nil
+}
 
 func (en *Engine) Cancel(id string) error {
 	en.mu.Lock()
@@ -20,15 +50,8 @@ func (en *Engine) Cancel(id string) error {
 	if r.Status != "queued" && r.Status != "running" {
 		return nil
 	}
-	next := cloneRun(r)
-	next.CancelRequested = true
-	if next.Status == "queued" {
-		next.Status = "cancelled"
-		now := en.now()
-		next.CompletedAt = &now
-	}
 	c := changes()
-	c.runs[id] = next
+	c.runs[id] = en.cancelledRunLocked(r, "cancelled")
 	return en.commitLocked(c)
 }
 func (en *Engine) Review(id string, index int, verdict, note string) error {
@@ -44,9 +67,10 @@ func (en *Engine) Review(id string, index int, verdict, note string) error {
 		return err
 	}
 	r := en.runs[id]
-	if r == nil || index < 0 || index >= len(r.Samples) {
+	if r == nil || index < r.PrunedSamples || index-r.PrunedSamples >= len(r.Samples) {
 		return fmt.Errorf("not_found: sample")
 	}
+	index -= r.PrunedSamples
 	next := cloneRun(r)
 	next.Samples[index].Review = verdict
 	next.Samples[index].ReviewNote = note
@@ -62,13 +86,10 @@ func (en *Engine) executeTask(task *executionTask) {
 		for _, authID := range task.authIDs {
 			delete(en.busyAuth, authID)
 		}
+		en.finishRuleChildLocked(f)
 		en.notifyWorkersLocked()
 		en.mu.Unlock()
 	}()
-	if err := en.checkExecution(ctx, id); err != nil {
-		en.finish(id, err)
-		return
-	}
 	phases := []bool{false}
 	if f.ControlAuthID != "" {
 		phases = []bool{true, false}
@@ -109,7 +130,7 @@ func (en *Engine) executeTask(task *executionTask) {
 	en.finish(id, ctx.Err())
 }
 func (en *Engine) evaluate(ctx context.Context, runID string, f Frozen, authID, provider, model, source string) (Sample, error) {
-	if err := en.checkExecution(ctx, runID); err != nil {
+	if err := en.checkExecution(ctx, runID, f); err != nil {
 		return Sample{}, err
 	}
 	day, err := en.reserve(f.Parameters.MaxTokens)
@@ -119,10 +140,10 @@ func (en *Engine) evaluate(ctx context.Context, runID string, f Frozen, authID, 
 	en.mu.Lock()
 	responseLimit := en.cfg.MaxResponseBytes
 	en.mu.Unlock()
-	s := en.host.Execute(ctx, Execution{ResponseLimit: responseLimit, AuthID: authID, Provider: provider, Model: model, Prompt: f.Question.Prompt, Source: source, Parameters: f.Parameters})
+	s := en.host.Execute(ctx, Execution{ManagedProbe: f.ManagedProbe, ResponseLimit: responseLimit, AuthID: authID, Provider: provider, Model: model, Prompt: f.Question.Prompt, Source: source, Parameters: f.Parameters})
 	s.Model = model
 	s.QualityVerdict = "unknown"
-	if !en.Capabilities().VerifiedEvidence {
+	if !en.Capabilities().VerifiedEvidence && f.ManagedProbe == nil {
 		s.Evidence.Verified = false
 		s.Evidence.Reason = "official_host_evidence_unavailable"
 	}
@@ -137,7 +158,7 @@ func (en *Engine) evaluate(ctx context.Context, runID string, f Frozen, authID, 
 		case "manual":
 			s.Reason = "manual assessment required"
 		case "llm":
-			if err := en.checkExecution(ctx, runID); err != nil {
+			if err := en.checkExecution(ctx, runID, f); err != nil {
 				return s, err
 			}
 			if judgeDay, err := en.reserve(512); err != nil {
@@ -164,7 +185,7 @@ func (en *Engine) finish(id string, err error) {
 	en.mu.Lock()
 	defer en.mu.Unlock()
 	r := cloneRun(en.runs[id])
-	delete(en.active, id)
+	defer delete(en.active, id)
 	if r == nil {
 		return
 	}
@@ -194,6 +215,11 @@ func (en *Engine) finish(id string, err error) {
 		return
 	}
 	en.decideLocked(en.runs[id])
+	if rule := en.rules[r.Config.RuleID]; rule != nil && rule.MaxResults > 0 {
+		if err := en.pruneResultCountsLocked(rule.ID, r.Config.AuthID); err != nil {
+			en.persistFailure(err)
+		}
+	}
 }
 func scrubError(e error) string {
 	if e == nil {

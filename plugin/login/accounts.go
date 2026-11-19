@@ -17,6 +17,8 @@ import (
 // Account contains management metadata. Its full email is populated only for a
 // response; stored records retain the complete plaintext account material.
 type Account struct {
+	PendingUploadJobID       string `json:"pending_upload_job_id,omitempty"`
+	PlanType                 string `json:"plan_type"`
 	SecurityPending          bool   `json:"security_pending"`
 	LastJobAction            string `json:"last_job_action,omitempty"`
 	LastJobSecurityStatus    string `json:"last_job_security_status,omitempty"`
@@ -40,6 +42,10 @@ type Account struct {
 	NextCheckAt              string `json:"next_check_at"`
 	LastJobID                string `json:"last_job_id"`
 	LastJobStatus            string `json:"last_job_status"`
+	LastJobCreatedAt         string `json:"last_job_created_at,omitempty"`
+	LastJobAutomatic         bool   `json:"last_job_automatic"`
+	LastJobPhase             string `json:"last_job_phase,omitempty"`
+	LastJobIntent            string `json:"last_job_intent,omitempty"`
 	LastJobAutoCommit        bool   `json:"last_job_auto_commit"`
 	LastJobCredentialEnabled bool   `json:"last_job_credential_enabled"`
 	LastJobErrorCode         string `json:"last_job_error_code,omitempty"`
@@ -64,15 +70,17 @@ type AccountUpdate struct {
 	ProxyURL    *string
 }
 type AccountSettings struct {
-	Revision           uint64 `json:"revision"`
-	InspectionEnabled  bool   `json:"inspection_enabled"`
-	AutoReloginEnabled bool   `json:"auto_relogin_enabled"`
-	IntervalMinutes    int    `json:"interval_minutes"`
-	LoginProxyURL      string `json:"login_proxy_url"`
+	CPAUploadExcludedPlans []string `json:"cpa_upload_excluded_plans"`
+	Revision               uint64   `json:"revision"`
+	InspectionEnabled      bool     `json:"inspection_enabled"`
+	AutoReloginEnabled     bool     `json:"auto_relogin_enabled"`
+	IntervalMinutes        int      `json:"interval_minutes"`
+	LoginProxyURL          string   `json:"login_proxy_url"`
 }
 type storedAccount struct {
 	View                 Account
 	EmailHash, Principal string
+	WorkspaceID          string
 	SecretRevision       uint64
 	Credentials          Credentials
 	Evidence             string
@@ -115,6 +123,12 @@ func (s *Service) initAccounts() error {
 	if s.accountSettings.IntervalMinutes < 5 || s.accountSettings.IntervalMinutes > 1440 {
 		return errors.New("storage_unavailable")
 	}
+	plans, err := normalizeExcludedPlans(s.accountSettings.CPAUploadExcludedPlans)
+	if err != nil {
+		return errors.New("storage_unavailable")
+	}
+	s.accountSettings.CPAUploadExcludedPlans = plans
+	s.uploadExcludedPlans.Store(append([]string{}, plans...))
 	s.accountAutomation.Store(s.accountSettings.InspectionEnabled && s.accountSettings.AutoReloginEnabled)
 	s.accountGeneration.Store(s.accountSettings.Revision)
 	s.loginProxy.Store(s.accountSettings.LoginProxyURL)
@@ -140,6 +154,8 @@ func (s *Service) saveAccountLocked(a storedAccount) error {
 	a.View.Email, a.View.CredentialsError = "", ""
 	a.View.EffectiveProxyURL, a.View.ProxySource, a.View.ProxyError = "", "", ""
 	a.View.LastJobErrorCode, a.View.LastJobErrorStage, a.View.LastJobErrorReason = "", "", ""
+	a.View.LastJobCreatedAt, a.View.LastJobPhase, a.View.LastJobIntent = "", "", ""
+	a.View.LastJobAutomatic = false
 	if err := s.journal.capacity(true); err != nil {
 		return s.accountStorageFailure()
 	}
@@ -165,7 +181,7 @@ func validateAccountCredentials(c Credentials) (Credentials, error) {
 		return Credentials{}, err
 	}
 	defer clear(raw)
-	r, err := Object(raw, "email", "password", "totp_secret")
+	r, err := Object(raw, "email", "password", "totp_secret", "totp_factor_id")
 	if err != nil {
 		return Credentials{}, err
 	}
@@ -195,17 +211,28 @@ func (s *Service) accountViewsLocked(id string) []Account {
 
 func (s *Service) accountView(a storedAccount) Account {
 	v := a.View
+	v.PlanType = s.accountPlanType(a)
 	var proxyErr error
 	v.EffectiveProxyURL, v.ProxySource, proxyErr = s.effectiveLoginProxy(v.ProxyURL, v.AuthID)
 	v.ProxyError = SafeCode(proxyErr)
-	if v.LastJobID != "" {
-		if job, err := s.Detail(v.LastJobID); err == nil {
-			v.LastJobErrorCode, v.LastJobErrorStage, v.LastJobErrorReason = job.ErrorCode, job.ErrorStage, job.ErrorReason
-			v.LastJobAutoCommit, v.LastJobCredentialEnabled = job.AutoCommit, job.CredentialEnabled
-			v.LastJobAction, v.LastJobSecurityStatus = job.Action, job.SecurityStatus
-			v.LastJobTOTPReset, v.LastJobDevicesLoggedOut = job.TOTPReset, job.DevicesLoggedOut
+	job := s.visibleAccountJob(v.ID, v.LastJobID)
+	v.LastJobID, v.LastJobStatus = job.ID, job.Status
+	v.LastJobCreatedAt, v.LastJobAutomatic = job.CreatedAt, job.Automatic
+	v.LastJobPhase, v.LastJobIntent = job.Phase, job.Intent
+	v.LastJobErrorCode, v.LastJobErrorStage, v.LastJobErrorReason = job.ErrorCode, job.ErrorStage, job.ErrorReason
+	v.LastJobAutoCommit, v.LastJobCredentialEnabled = job.AutoCommit, job.CredentialEnabled
+	v.LastJobAction, v.LastJobSecurityStatus = job.Action, job.SecurityStatus
+	if terminal(job.Status) && !a.View.SecurityPending {
+		s.mu.Lock()
+		for _, pending := range s.jobs {
+			if pending.record.View.AccountID == v.ID && pending.record.View.Status == "awaiting_commit" {
+				v.PendingUploadJobID = pending.record.View.ID
+				break
+			}
 		}
+		s.mu.Unlock()
 	}
+	v.LastJobTOTPReset, v.LastJobDevicesLoggedOut = job.TOTPReset, job.DevicesLoggedOut
 	c, err := s.accountCredentials(a)
 	if err != nil {
 		v.Email = ""
@@ -327,14 +354,27 @@ func (s *Service) ImportAccountsWithProxy(entries []Credentials, proxyURL string
 	return out, nil
 }
 func (s *Service) accountBusyLocked(a storedAccount) bool {
+	return s.accountOperationBusyLocked(a, false)
+}
+func (s *Service) accountOperationBusyLocked(a storedAccount, allowPendingUpload bool) bool {
 	if a.View.SecurityPending {
 		return true
 	}
-	if a.View.LastJobID == "" {
-		return false
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		v := j.record.View
+		if v.AccountID != a.View.ID || j.record.HistoryDeleted {
+			continue
+		}
+		if v.Status == "awaiting_commit" && allowPendingUpload {
+			continue
+		}
+		if !terminal(v.Status) || (v.ID == a.View.LastJobID && (v.Status == "commit_unknown" || v.Status == "saved_not_adopted")) {
+			return true
+		}
 	}
-	job, err := s.Detail(a.View.LastJobID)
-	return err == nil && (!terminal(job.Status) || job.Status == "commit_unknown" || job.Status == "saved_not_adopted")
+	return false
 }
 func (s *Service) UpdateAccount(r AccountUpdate) (Account, error) {
 	s.accountMu.Lock()
@@ -410,7 +450,14 @@ func (s *Service) DeleteAccount(id string, revision uint64) error {
 	if a.View.Revision != revision || s.accountBusyLocked(a) {
 		return errors.New("conflict")
 	}
-	if err := s.journal.db.Update(func(tx *bolt.Tx) error { return tx.Bucket([]byte("accounts")).Delete([]byte(id)) }); err != nil {
+	if err := s.journal.db.Update(func(tx *bolt.Tx) error {
+		if b := tx.Bucket([]byte("account-authorizations")); b != nil {
+			if err := b.Delete([]byte(id)); err != nil {
+				return err
+			}
+		}
+		return tx.Bucket([]byte("accounts")).Delete([]byte(id))
+	}); err != nil {
 		return s.accountStorageFailure()
 	}
 	s.accountPermits[id].Store(false)
@@ -424,7 +471,7 @@ func (s *Service) AccountSettings() (AccountSettings, error) {
 	if err := s.accountReady(); err != nil {
 		return AccountSettings{}, err
 	}
-	return s.accountSettings, nil
+	return cloneAccountSettings(s.accountSettings), nil
 }
 func (s *Service) UpdateAccountSettings(next AccountSettings) (AccountSettings, error) {
 	s.accountMu.Lock()
@@ -441,6 +488,11 @@ func (s *Service) UpdateAccountSettings(next AccountSettings) (AccountSettings, 
 	if next.AutoReloginEnabled && !next.InspectionEnabled {
 		return AccountSettings{}, errors.New("invalid_request")
 	}
+	plans, err := normalizeExcludedPlans(next.CPAUploadExcludedPlans)
+	if err != nil {
+		return AccountSettings{}, err
+	}
+	next.CPAUploadExcludedPlans = plans
 	proxyURL, err := NormalizeLoginProxy(next.LoginProxyURL)
 	if err != nil {
 		return AccountSettings{}, err
@@ -470,14 +522,24 @@ func (s *Service) UpdateAccountSettings(next AccountSettings) (AccountSettings, 
 	}); err != nil {
 		return AccountSettings{}, s.accountStorageFailure()
 	}
+	// Upload exclusions have their own live commit gate. Editing only that
+	// list must not invalidate an otherwise unchanged automatic repair policy.
+	automaticPolicyChanged := next.InspectionEnabled != s.accountSettings.InspectionEnabled || next.AutoReloginEnabled != s.accountSettings.AutoReloginEnabled || next.IntervalMinutes != s.accountSettings.IntervalMinutes || next.LoginProxyURL != s.accountSettings.LoginProxyURL
 	s.accountSettings = next
 	s.accounts = updated
 	s.accountAutomation.Store(next.InspectionEnabled && next.AutoReloginEnabled)
-	s.accountGeneration.Store(next.Revision)
+	if automaticPolicyChanged {
+		s.accountGeneration.Store(next.Revision)
+	}
 	s.loginProxy.Store(next.LoginProxyURL)
-	return next, nil
+	s.uploadExcludedPlans.Store(append([]string{}, next.CPAUploadExcludedPlans...))
+	return cloneAccountSettings(next), nil
 }
 func (s *Service) StartAccount(id string, revision uint64, targetAuthID string) (Job, error) {
+	return s.startManualAccount(id, revision, targetAuthID, true)
+}
+
+func (s *Service) startManualAccount(id string, revision uint64, targetAuthID string, upload bool) (Job, error) {
 	s.accountMu.Lock()
 	defer s.accountMu.Unlock()
 	if err := s.accountReady(); err != nil {
@@ -496,28 +558,39 @@ func (s *Service) StartAccount(id string, revision uint64, targetAuthID string) 
 	if a.View.AuthID != "" && targetAuthID != "" && targetAuthID != a.View.AuthID {
 		return Job{}, errors.New("identity_conflict")
 	}
-	return s.startAccountLocked(a, targetAuthID, false, "")
+	return s.startAccountOperationLocked(a, targetAuthID, false, "", "", false, false, upload)
 }
 func (s *Service) startAccountLocked(a storedAccount, target string, automatic bool, evidence string) (Job, error) {
-	return s.startAccountOperationLocked(a, target, automatic, evidence, "", false, false)
+	return s.startAccountOperationLocked(a, target, automatic, evidence, "", false, false, true)
 }
-func (s *Service) startAccountOperationLocked(a storedAccount, target string, automatic bool, evidence, action string, logoutAll, reauthorize bool) (Job, error) {
-	if s.accountBusyLocked(a) {
+func (s *Service) startAccountOperationLocked(a storedAccount, target string, automatic bool, evidence, action string, logoutAll, reauthorize, upload bool) (Job, error) {
+	manualLogin := !automatic && action == ""
+	if s.accountOperationBusyLocked(a, manualLogin) {
 		return Job{}, errors.New("conflict")
 	}
 	c, err := s.accountCredentials(a)
 	if err != nil {
 		return Job{}, err
 	}
+	r := StartRequest{securityAction: action, logoutAllDevices: logoutAll, reauthorize: reauthorize, ConsumerPlugin: "model-quality", Method: "password_totp", Intent: "import", Credentials: c, ProxyURL: a.View.ProxyURL, accountID: a.View.ID, automatic: automatic, autoEvidence: evidence, autoCommit: upload, enableCredential: action == "" || reauthorize}
+	r.accountSequence = a.View.Revision
+	if action != "" || manualLogin && (target == "" || target == a.View.AuthID) {
+		r.workspaceID = a.WorkspaceID
+		r.knownPlans = []string{a.View.PlanType}
+		if manualLogin || reauthorize {
+			r.securityBinding = auth.LoginSnapshot{AuthID: a.View.AuthID, IdentityVersion: a.View.IdentityVersion, Principal: a.Principal}
+		}
+		return s.start(r, &a)
+	}
 	if a.View.AuthID != "" {
 		target = a.View.AuthID
 	}
-	r := StartRequest{securityAction: action, logoutAllDevices: logoutAll, reauthorize: reauthorize, ConsumerPlugin: "model-quality", Method: "password_totp", Intent: "import", Credentials: c, ProxyURL: a.View.ProxyURL, accountID: a.View.ID, automatic: automatic, autoEvidence: evidence, autoCommit: true, enableCredential: true}
-	if action != "" {
-		r.autoCommit, r.enableCredential = reauthorize, reauthorize
-	}
+	r.knownPlans = []string{a.View.PlanType, s.accountPlanType(a)}
 	if target != "" {
 		snapshot, err := s.opts.Manager.LoginSnapshot(target)
+		if SafeCode(err) == "not_found" {
+			return Job{}, errors.New("cpa_credential_missing")
+		}
 		if err != nil {
 			return Job{}, err
 		}
@@ -526,7 +599,7 @@ func (s *Service) startAccountOperationLocked(a storedAccount, target string, au
 		}
 		current, ok := s.opts.Manager.GetByID(target)
 		if !ok {
-			return Job{}, errors.New("not_found")
+			return Job{}, errors.New("policy_changed")
 		}
 		principal, err := auth.LoginPrincipalFromAuth(current)
 		if err != nil || principal.Email != c.Email {
@@ -560,70 +633,51 @@ func (s *Service) startAccountOperationLocked(a storedAccount, target string, au
 		}
 	}
 	r.accountSequence = a.View.Revision
-	job, err := s.Start(r)
-	if err != nil {
-		return Job{}, err
-	}
-	a.View.LastJobID = job.ID
-	a.View.LastJobStatus = job.Status
-	a.View.SecurityPending = action != ""
-	a.View.LastJobAction = action
-	a.View.Revision++
-	if !automatic {
-		a.View.AttentionRequired = false
-		a.View.ConsecutiveFailures = 0
-		a.ConsumedEvidence = ""
-		a.NextAttempt = time.Time{}
-	}
-	if automatic {
-		a.ConsumedEvidence = evidence
-	}
-	if err = s.saveAccountLocked(a); err != nil {
-		return job, err
-	}
-	return job, nil
+	return s.start(r, &a)
 }
 
 func (s *Service) syncAccountJobsLocked() error {
 	s.mu.Lock()
-	jobs := make(map[string]Job, len(s.jobs))
-	evidence := map[string]string{}
 	adopted := map[string]storedJob{}
+	latest := map[string]storedJob{}
 	for id, j := range s.jobs {
-		jobs[id] = j.record.View
-		evidence[id] = j.record.AccountEvidence
 		adopted[id] = j.record
+		accountID := j.record.View.AccountID
+		previous, exists := latest[accountID]
+		if accountID != "" && (!exists || newerAccountJob(j.record, previous)) {
+			latest[accountID] = j.record
+		}
 	}
 	s.mu.Unlock()
 	for id, a := range s.accounts {
-		var job Job
-		if current, ok := jobs[a.View.LastJobID]; ok {
-			job = current
+		record := adopted[a.View.LastJobID]
+		if candidate, exists := latest[id]; exists && (record.View.ID == "" || newerAccountJob(candidate, record)) {
+			record = candidate
 		}
-		for _, candidate := range jobs {
-			newer := adopted[candidate.ID].AccountSequence > adopted[job.ID].AccountSequence ||
-				adopted[candidate.ID].AccountSequence == adopted[job.ID].AccountSequence && adopted[candidate.ID].Created.After(adopted[job.ID].Created)
-			if candidate.AccountID == id && (job.ID == "" || newer) {
-				job = candidate
-			}
-		}
+		job := record.View
 		if job.ID == "" || job.ID == a.View.LastJobID && job.Status == a.View.LastJobStatus {
 			continue
 		}
 		previousJob := a.View.LastJobID
 		a.View.LastJobID = job.ID
 		a.View.LastJobStatus = job.Status
+		if record.PlanObserved && job.PlanType != "" {
+			a.View.PlanType = job.PlanType
+		}
+		if record.AuthorizationSavedAt != "" {
+			a.View.LastLoginAt = record.AuthorizationSavedAt
+		}
 		a.View.LastJobAutoCommit = job.AutoCommit
 		a.View.LastJobCredentialEnabled = job.CredentialEnabled
 		a.View.LastJobAction, a.View.LastJobSecurityStatus = job.Action, job.SecurityStatus
 		a.View.LastJobTOTPReset, a.View.LastJobDevicesLoggedOut = job.TOTPReset, job.DevicesLoggedOut
 		if job.Automatic {
-			a.Evidence = evidence[job.ID]
-			a.ConsumedEvidence = evidence[job.ID]
+			a.Evidence = record.AccountEvidence
+			a.ConsumedEvidence = record.AccountEvidence
 		}
 		if job.Status == "committed" {
 			snapshot, err := s.opts.Manager.LoginSnapshot(job.TargetAuthID)
-			if err != nil || snapshot.IdentityVersion != adopted[job.ID].AdoptedIdentity || snapshot.Principal != adopted[job.ID].AdoptedPrincipal {
+			if err != nil || snapshot.IdentityVersion != record.AdoptedIdentity || snapshot.Principal != record.AdoptedPrincipal {
 				a.View.AttentionRequired = true
 				a.View.HealthReason = "identity_changed"
 			} else {
@@ -636,6 +690,7 @@ func (s *Service) syncAccountJobsLocked() error {
 					a.View.AuthID = job.TargetAuthID
 					a.View.IdentityVersion = snapshot.IdentityVersion
 					a.Principal = snapshot.Principal
+					a.WorkspaceID = principal.AccountID
 					a.View.LastLoginAt = s.opts.Now().Format(time.RFC3339)
 					a.View.HealthStatus = "unknown"
 					a.View.HealthReason = "awaiting_inspection"
@@ -646,7 +701,6 @@ func (s *Service) syncAccountJobsLocked() error {
 			}
 		} else if job.Status == "succeeded" {
 			a.View.AttentionRequired = false
-			a.View.HealthStatus, a.View.HealthReason = "unknown", "awaiting_inspection"
 		} else if terminal(job.Status) {
 			if job.Automatic {
 				a.View.ConsecutiveFailures++
@@ -660,9 +714,8 @@ func (s *Service) syncAccountJobsLocked() error {
 			} else if job.Status != "cancelled" && job.Status != "discarded" {
 				a.View.AttentionRequired = true
 			}
-			if job.ErrorCode != "" {
-				a.View.HealthReason = job.ErrorCode
-			}
+			// Task diagnostics are projected through LastJobError* by accountView.
+			// A failed login does not establish the bound credential's health.
 		} else if previousJob != job.ID {
 			a.View.AttentionRequired = false
 		}
@@ -672,6 +725,11 @@ func (s *Service) syncAccountJobsLocked() error {
 		}
 	}
 	return nil
+}
+
+func newerAccountJob(candidate, previous storedJob) bool {
+	return candidate.AccountSequence > previous.AccountSequence ||
+		candidate.AccountSequence == previous.AccountSequence && candidate.Created.After(previous.Created)
 }
 func (s *Service) checkAccountRepair(a storedAccount, evidence string) error {
 	health, err := s.opts.Manager.LoginHealth(a.View.AuthID)
@@ -720,7 +778,7 @@ func (s *Service) inspectAccountLocked(a storedAccount, automatic bool) error {
 		a.View.HealthReason = "login_required"
 	} else {
 		health, err := s.opts.Manager.LoginHealth(a.View.AuthID)
-		if err != nil {
+		if err != nil && SafeCode(err) != "not_found" {
 			a.View.HealthStatus = "unknown"
 			a.View.HealthReason = SafeCode(err)
 		} else {

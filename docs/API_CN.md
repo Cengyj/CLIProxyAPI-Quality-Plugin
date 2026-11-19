@@ -1,3 +1,5 @@
+> 当前官方 CPA：`GET /v0/management/plugins/model-quality/rules/question-preview?id=logic-candy` 在管理鉴权后只读返回固定题的 ID、版本、题面和参考答案；未知、随机、自定义或视觉题返回 404。一般 `/questions` 列表仍不含参考答案。规则范围、Cron、保留条数及官方能力限制以[质量观察说明](QUALITY_SCOPE_CN.md)为准；下文 v8 业务路由表是早期补丁宿主的历史记录。
+>
 > 0.15.0 新增鉴权账号安全操作和本地完成接口，见 [重置 2FA 与退出设备](OPENAI_ACCOUNT_SECURITY_CN.md)。
 
 > 2026-11-17：官方兼容版已改为独立插件，详见 [官方单插件方案](OFFICIAL_PLUGIN_CN.md)。本文保留补丁宿主的历史实现/部署记录；本机 8317 已按用户确认更新为官方 CPA + 插件 0.14.0，详见 [本机升级记录](LOCAL_OFFICIAL_UPGRADE_CN.md)。
@@ -57,6 +59,8 @@
 可选 control_auth_id/control_provider 与 seed 用于随机题有效对照。judge mode为 deterministic/manual/llm；LLM 需要独立 auth_id/provider/model。任何依赖被质量暂停都会阻止整个运行。答案仅提供给独立 judge，不发送给被测模型。
 
 规则增加 name、action（observe_only或pause_credential）、enabled、scheduling_enabled、automatic_pause、interval_seconds或cron、timezone、fail_threshold、retention_days。默认失败门槛3，范围1..100；间隔60..2678400秒；保留1..365天。规则 status为 detecting/paused/awaiting_release，由服务端状态导出，不能由客户端修改来绕过限制。
+
+官方宿主插件 0.25.0 的观察规则表单使用 `activation`：`keep` 保留既有授权（新建时仅手动），`start` 为本条规则授权定时检测，`stop` 撤销其定时检测。它与规则字段在同一次存储事务中提交，不修改实例级定时许可。响应中的 `timer_active` 表示该规则当前是否获准定时运行，并非是否存在匹配凭证。旧客户端不传 `activation` 时仍沿用旧字段。显式调用原实例级停止接口会一并撤销逐条定时授权。
 
 automatic_recovery、pass_threshold、pass_count、retest_seconds 不再是新 API 的可配置能力。旧数据库/旧宿主 YAML 在迁移时忽略其运行意义；新 JSON 设置不接受这些已移除参数。action_id、归属、身份与计数由服务端维护，编辑仍保留既有动作归属并执行 revision 检查。
 

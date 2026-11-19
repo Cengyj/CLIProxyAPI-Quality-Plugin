@@ -145,6 +145,8 @@ func TestErrorsAndPanicsUseClosedIdentityBoundDiagnostics(t *testing.T) {
 		{name: "private-transport-error", code: "transport_error", err: errors.New(privateFixture)},
 		{name: "unknown-typed-error", code: "transport_error", err: &login.Error{Code: privateFixture, Stage: privateFixture, Reason: privateFixture}},
 		{name: "known-typed-error", code: "totp_rejected", stage: "totp", reason: "upstream_rejected", err: &login.Error{Code: "totp_rejected", Stage: "totp", Reason: "upstream_rejected"}},
+		{name: "proxy-auth-rejected", code: "transport_error", stage: "session", reason: "proxy_auth_rejected", err: &login.Error{Code: "transport_error", Stage: "session", Reason: "proxy_auth_rejected"}},
+		{name: "container-proxy", code: "transport_error", stage: "session", reason: "proxy_loopback_unreachable", err: &login.Error{Code: "transport_error", Stage: "session", Reason: "proxy_loopback_unreachable"}},
 		{name: "cancellation", code: "cancelled", err: context.Canceled},
 		{name: "deadline", code: "timeout", err: context.DeadlineExceeded},
 		{name: "panic", code: "runtime_unavailable", panicValue: privateFixture},
@@ -304,5 +306,32 @@ func TestInvalidSecurityIPCStopsBeforeRunner(t *testing.T) {
 				t.Fatal("invalid operation reached runner")
 			}
 		})
+	}
+}
+
+func TestRequestDiagnosticLimitPreservesFinalResult(t *testing.T) {
+	var output bytes.Buffer
+	input := login.Input{JobID: "fixture-job", Attempt: 3}
+	count := 0
+	event := login.RequestDiagnostic{Phase: "session", RequestKind: "auth_providers", Method: "GET", HTTPStatus: 200, DurationMS: 125}
+	for range 300 {
+		if err := emitRequestDiagnostic(&output, input, event, &count); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := emit(&output, map[string]any{"version": 1, "job_id": input.JobID, "attempt": input.Attempt, "error_code": "timeout", "error_stage": "session"}); err != nil {
+		t.Fatal(err)
+	}
+	events := outputEvents(t, output.String())
+	if len(events) != 130 || events[128]["event"] != "request_log_limit" || events[129]["error_code"] != "timeout" {
+		t.Fatal("request log limit hid its truncation or prevented final failure")
+	}
+	for _, event := range events[:128] {
+		if event["job_id"] != "fixture-job" || event["attempt"] != float64(3) || event["http_status"] != float64(200) || event["duration_ms"] != float64(125) {
+			t.Fatal("request diagnostic lost safe correlation or timing")
+		}
+	}
+	if output.Len() >= 64<<10 {
+		t.Fatal("request diagnostic output exceeded its bounded stream budget")
 	}
 }

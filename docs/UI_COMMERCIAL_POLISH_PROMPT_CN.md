@@ -4,7 +4,7 @@
 
 ---
 
-请使用 `$impeccable`，重新检查当前 Model Quality 插件，并完成以 CLIProxyAPI 宿主管理中心为视觉基准的组件重构、整体排版和商用交付。交付实际代码、可运行界面、验证证据与本地候选安装包。
+请重新检查当前 Model Quality 插件，并完成以 CLIProxyAPI 宿主管理中心为视觉基准的组件重构、整体排版和商用交付。交付实际代码、可运行界面、验证证据与本地候选安装包。
 
 工作区：`/Users/ceng/Downloads/CLIProxyAPI-Quality-Plugin`。
 
@@ -16,19 +16,19 @@
 
 模式为 Operate。精美体现为一致、准确、清楚、稳定：每种控件都有固定角色，所有主题都自然，长时间阅读舒适，复杂状态易于判断。范围不包含团队系统、商业计费、营销页、额外探针或新业务模块。
 
-**主要视觉样板：CPA 的插件管理页 + 共享 UI 组件。** 不混搭宿主每个功能页的特例。ProviderTabs 用于局部导航，Table 用于表格，SectionCard 提供长表单分组参考。不要因为使用 Impeccable 而另选新视觉风格。
+**主要视觉样板：CPA 的插件管理页 + 共享 UI 组件。** 不混搭宿主每个功能页的特例。ProviderTabs 用于局部导航，Table 用于表格，SectionCard 提供长表单分组参考。保持已确定的宿主视觉风格。
 
 ## 2. 先核实源码与视觉证据
 
 读取以下材料，以本次直接指令和当前源码消解历史冲突：
 
-- `AGENTS.md`、`PRODUCT.md`、`DESIGN.md`、`.impeccable/design.json`、`.impeccable/surfaces/plugin-ui-index-html.md`。
+- `AGENTS.md`、`PRODUCT.md`、`DESIGN.md`、`docs/design-system.json`、`docs/UI_DESIGN_BRIEF.md`。
 - `PROMPT_CN.md` 顶部覆盖说明、`docs/RESEARCH_CN.md`、`docs/API_CN.md`、`docs/UI_CN.md`、`docs/UI_HOST_ALIGNMENT_ANALYSIS_CN.md`。
 - `plugin/ui/index.html`、`style.css`、`app.js`、`view.js`、`client.js`、`embed.go`；`plugin/quality/types.go` 中的后端版本。
 - `scripts/build_ui.sh`、`scripts/test_question_test.mjs`、`scripts/verify_question_test.py`、`scripts/verify_ui.cjs`、`scripts/verify_native_ui.cjs`。
 - `scripts/record_verification.py`、`scripts/release_support.py`、`scripts/package_release.py`、`scripts/smoke_candidate.py`、`docs/CANDIDATE_RELEASE_CN.md`、`docs/INSTALL_CN.md`。
 
-使用 `/Users/ceng/.codex/skills/impeccable/SKILL.md`。新会话按技能执行 context，同一会话不重复；宿主视觉方向已经确定。按实际需要加载布局、排版、交互加固和响应式指导，UI 编辑前读取 craft-floor。用户已明确允许采用宿主已有组件语言，不另行进行配色投票。
+以 `AGENTS.md`、`PRODUCT.md`、`DESIGN.md` 和当前实现为依据，核查布局、排版、交互加固和响应式行为。宿主视觉方向已经确定；用户已明确允许采用宿主已有组件语言，不另行进行配色投票。
 
 先检查 Git 状态、当前提交、UI/插件版本与输入哈希，保留已有修改。不得假定仍停留在上述版本，也不得为制造基线擅自提交或重置文件。
 
@@ -139,9 +139,9 @@
 4. 重点验证主题跟随及回退、内嵌工具栏避让、键盘行为、浮层焦点、轮询保留草稿与阅读状态；纯间距微调不写镜像实现的测试。
 5. 同批检查浅色/纯白/深色，独立与内嵌，桌面 1440×900、1280×800、平板 768px、手机 390px/360px；内嵌按实际 iframe 宽度验收，加入用户实际视口、侧栏两种状态和 200% 缩放。超长输入/结果、空状态、错误、忙碌、暂停、冲突与结果不确定覆盖适用布局。
 6. 截图包含宿主相邻功能页与插件内嵌页，并提供相同数据/主题/视口的前后对照。注明版本、尺寸和数据来源，检查文件确实展示声称的状态。
-7. 按 Impeccable 适用流程完成检测与最终视觉复核，机械通过不能代替渲染和交互判断。记录未解决问题与范围。
+7. 完成界面检查与最终视觉复核，机械通过不能代替渲染和交互判断。记录未解决问题与范围。
 
-完成后，按实际实现更新/合并 `PRODUCT.md` 的视觉约定、`DESIGN.md`、`.impeccable/design.json`、surface brief、`docs/UI_CN.md` 和 `plugin/NOTICE.md`；保留产品约束、历史证据及来源。本文已明确授权将旧“只借颜色、独立组件”约定改为宿主组件基准，不继续保留相互冲突的现行规则。中文新文档使用 `_CN.md`，代码注释使用英文。
+完成后，按实际实现更新/合并 `PRODUCT.md` 的视觉约定、`DESIGN.md`、`docs/design-system.json`、surface brief、`docs/UI_CN.md` 和 `plugin/NOTICE.md`；保留产品约束、历史证据及来源。本文已明确授权将旧“只借颜色、独立组件”约定改为宿主组件基准，不继续保留相互冲突的现行规则。中文新文档使用 `_CN.md`，代码注释使用英文。
 
 重建后核对源码、静态输出、动态库实际返回资源。使用独立构建标识和证据目录生成本地候选安装包，核对版本、哈希、源码集合、构建输出与报告；适配现有打包器的报告结构要求，保留验证门槛。旧 4.1 候选与 4.2 历史报告不能直接证明本次改造。
 

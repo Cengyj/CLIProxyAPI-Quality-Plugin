@@ -31,6 +31,10 @@ func (en *Engine) PrepareCredentialLogin(ctx context.Context, request Credential
 		en.mu.Unlock()
 		return reply, err
 	}
+	if activeDisposition(en.managed[request.AuthID]) {
+		en.mu.Unlock()
+		return reply, errors.New("blocked: credential handling must be resolved before account authorization")
+	}
 	if !en.Capabilities().QualityPause && en.localPause(RunConfig{AuthID: request.AuthID}) != "" {
 		en.mu.Unlock()
 		return reply, unsupportedQuality()
@@ -73,14 +77,8 @@ func (en *Engine) PrepareCredentialLogin(ctx context.Context, request Credential
 			if !usesCredential(old.Config.RunConfig, request.AuthID) || (old.Status != "running" && old.Status != "queued") {
 				continue
 			}
-			r := cloneRun(old)
-			r.CancelRequested = true
+			r := en.cancelledRunLocked(old, "cancelled")
 			r.BlockReason = "credential_authorization_changed"
-			if r.Status == "queued" {
-				r.Status = "cancelled"
-				now := en.now()
-				r.CompletedAt = &now
-			}
 			c.runs[id] = r
 		}
 		c.audits = append(c.audits, en.audit("credential_login_prepare", "", "", request.PreparationID, "Dependent rules stopped; credential restrictions preserved"))

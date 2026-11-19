@@ -18,7 +18,7 @@ import (
 	"github.com/grafana/sobek"
 )
 
-const version = "2.1.0"
+const version = "2.2.1"
 const engine = "go_sobek_protocol"
 const inputLimit = 16 << 10
 
@@ -141,10 +141,60 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer, runner
 	var progressMu sync.Mutex
 	last, count := "", 0
 	var outputErr error
+	requestCount := 0
+	ctx = login.WithRequestDiagnostics(ctx, func(event login.RequestDiagnostic) {
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		if outputErr != nil {
+			return
+		}
+		outputErr = emitRequestDiagnostic(out, input, event, &requestCount)
+		if outputErr != nil {
+			cancel()
+		}
+	})
+	if descriptor := os.Getenv("MQ_LOGIN_COMMIT_FD"); descriptor != "" {
+		if descriptor != "4" {
+			return finishError(out, identity, errors.New("invalid commit descriptor"))
+		}
+		ack := os.NewFile(4, "login-local-commit")
+		if ack == nil {
+			return finishError(out, identity, errors.New("missing commit descriptor"))
+		}
+		defer ack.Close()
+		info, err := ack.Stat()
+		if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+			return finishError(out, identity, errors.New("invalid commit pipe"))
+		}
+		stop := context.AfterFunc(ctx, func() { _ = ack.Close() })
+		defer stop()
+		barrier := func(ctx context.Context, kind, factor string) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			fields := map[string]any{"version": 1, "type": kind, "job_id": input.JobID, "attempt": input.Attempt}
+			if factor != "" {
+				fields["factor_id"] = factor
+			}
+			progressMu.Lock()
+			err := emit(out, fields)
+			progressMu.Unlock()
+			if err != nil {
+				return err
+			}
+			var result [1]byte
+			if _, err := io.ReadFull(ack, result[:]); err != nil || result[0] != 1 {
+				return errors.New("local commit not acknowledged")
+			}
+			return ctx.Err()
+		}
+		ctx = login.WithSecurityCommit(ctx, func(ctx context.Context) error { return barrier(ctx, "security_commit", "") })
+		ctx = login.WithFactorVerified(ctx, func(ctx context.Context, id string) error { return barrier(ctx, "factor_verified", id) })
+	}
 	callback, err := runner(ctx, input, func(phase string) {
 		progressMu.Lock()
 		defer progressMu.Unlock()
-		if !allowed(phase, "runtime_start", "session", "authorization", "email", "password", "totp", "oauth", "callback", "browser_verification", "consent", "workspace", "security_check", "totp_disable", "totp_enroll", "totp_activate", "totp_saved", "logout_all", "reauthorization", "security_complete") || phase == last || outputErr != nil {
+		if !allowed(phase, "runtime_start", "session", "authorization", "email", "password", "totp", "oauth", "callback", "browser_verification", "consent", "workspace", "security_check", "totp_disable", "totp_enroll", "totp_activate", "totp_commit", "totp_saved", "logout_all", "reauthorization", "security_complete") || phase == last || outputErr != nil {
 			return
 		}
 		if count >= 64 {
@@ -179,6 +229,27 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer, runner
 	return 0
 }
 
+// Diagnostic limits only reduce detail; they must not cancel an otherwise valid
+// login or prevent the final result from reaching the parent process.
+func emitRequestDiagnostic(out io.Writer, input login.Input, event login.RequestDiagnostic, count *int) error {
+	if *count > 128 {
+		return nil
+	}
+	*count++
+	fields := map[string]any{"version": 1, "type": "diagnostic", "job_id": input.JobID, "attempt": input.Attempt, "phase": event.Phase}
+	if *count == 129 {
+		fields["event"] = "request_log_limit"
+	} else {
+		fields["event"] = "request"
+		fields["request_kind"], fields["method"] = event.RequestKind, event.Method
+		fields["http_status"], fields["duration_ms"], fields["failed"] = event.HTTPStatus, event.DurationMS, event.Failed
+		if event.ErrorReason != "" {
+			fields["error_reason"] = event.ErrorReason
+		}
+	}
+	return emit(out, fields)
+}
+
 func finishError(out io.Writer, identity map[string]any, err error) int {
 	code := "transport_error"
 	var failure *login.Error
@@ -186,10 +257,10 @@ func finishError(out io.Writer, identity map[string]any, err error) int {
 		if allowed(failure.Code, "invalid_input", "invalid_totp_secret", "unsupported_totp_parameters", "runtime_unavailable", "transport_error", "timeout", "cancelled", "interaction_required", "password_rejected", "totp_rejected", "authorization_denied", "rate_limited", "service_error", "callback_invalid", "callback_state_mismatch", "workspace_mismatch", "proxy_unsupported", "security_storage_failed", "security_identity_mismatch", "security_state_unconfirmed", "security_outcome_unknown", "security_rejected") {
 			code = failure.Code
 		}
-		if allowed(failure.Stage, "runtime_start", "session", "authorization", "email", "password", "totp", "oauth", "callback", "browser_verification", "consent", "workspace", "security_check", "totp_disable", "totp_enroll", "totp_activate", "totp_saved", "logout_all", "reauthorization", "security_complete") {
+		if allowed(failure.Stage, "runtime_start", "session", "authorization", "email", "password", "totp", "oauth", "callback", "browser_verification", "consent", "workspace", "security_check", "totp_disable", "totp_enroll", "totp_activate", "totp_commit", "totp_saved", "logout_all", "reauthorization", "security_complete") {
 			identity["error_stage"] = failure.Stage
 		}
-		if allowed(failure.Reason, "human_verification", "browser_verification_timeout", "browser_verification_required", "email_verification", "phone_verification", "unsupported_request", "unsupported_navigation", "totp_method_unconfirmed", "workspace_selection", "account_selection", "unsupported_page", "upstream_rejected", "proxy_connection_failed", "session_unconfirmed", "authentication_not_advanced", "totp_factor_missing", "sentinel_unavailable", "journal_unavailable") {
+		if allowed(failure.Reason, "human_verification", "browser_verification_timeout", "browser_verification_required", "email_verification", "phone_verification", "unsupported_request", "unsupported_navigation", "totp_method_unconfirmed", "workspace_selection", "account_selection", "unsupported_page", "upstream_rejected", "proxy_connection_failed", "proxy_auth_rejected", "proxy_loopback_unreachable", "proxy_tls_failed", "proxy_dns_failed", "network_dns_failed", "proxy_connection_refused", "network_connection_refused", "proxy_connection_timeout", "network_timeout", "network_tls_failed", "session_unconfirmed", "authentication_not_advanced", "totp_factor_missing", "sentinel_unavailable", "journal_unavailable") {
 			identity["error_reason"] = failure.Reason
 		}
 	} else if errors.Is(err, context.Canceled) {
@@ -262,6 +333,8 @@ func decodeInput(raw []byte) (login.Input, error) {
 					in.Credentials.Password = v.String()
 				case "totp_secret":
 					in.Credentials.TOTPSecret = v.String()
+				case "totp_factor_id":
+					in.Credentials.TOTPFactorID = v.String()
 				default:
 					valid = false
 				}

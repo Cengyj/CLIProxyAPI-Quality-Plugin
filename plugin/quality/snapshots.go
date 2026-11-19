@@ -19,6 +19,7 @@ func cloneConfig(config RunConfig) RunConfig {
 
 func cloneFrozen(frozen Frozen) Frozen {
 	frozen.RunConfig = cloneConfig(frozen.RunConfig)
+	frozen.ManagedProbe = cloneValue(frozen.ManagedProbe)
 	return frozen
 }
 
@@ -50,5 +51,6 @@ func cloneRule(rule *Rule) *Rule {
 	}
 	out := *rule
 	out.RunConfig = cloneConfig(rule.RunConfig)
+	out.LastManualSkips = slices.Clone(rule.LastManualSkips)
 	return &out
 }

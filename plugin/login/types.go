@@ -6,14 +6,18 @@ import (
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	auth "github.com/cliproxyapi-plugins/model-quality/login/account"
 )
 
 type Credentials struct {
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	TOTPSecret string `json:"totp_secret"`
+	Email        string `json:"email"`
+	Password     string `json:"password"`
+	TOTPSecret   string `json:"totp_secret"`
+	TOTPFactorID string `json:"totp_factor_id,omitempty"`
 }
 type RuntimeRequest struct {
+	commitSecurity      func() error
+	factorVerified      func(string) error
 	Operation           string      `json:"operation,omitempty"`
 	LogoutAfterReset    bool        `json:"logout_after_reset,omitempty"`
 	Reauthorize         bool        `json:"reauthorize,omitempty"`
@@ -29,6 +33,9 @@ type RuntimeRequest struct {
 	WorkspaceID         string      `json:"workspace_id,omitempty"`
 }
 type StartRequest struct {
+	knownPlans              []string
+	securityBinding         auth.LoginSnapshot
+	workspaceID             string
 	securityAction          string
 	logoutAllDevices        bool
 	reauthorize             bool
@@ -50,6 +57,10 @@ type StartRequest struct {
 	UseSavedCredentials     bool
 }
 type Job struct {
+	CanDelete         bool   `json:"can_delete,omitempty"`
+	HTTPStatus        int    `json:"http_status,omitempty"`
+	RuntimeCode       string `json:"runtime_code,omitempty"`
+	PlanType          string `json:"plan_type"`
 	Action            string `json:"action,omitempty"`
 	SecurityStatus    string `json:"security_status,omitempty"`
 	TOTPReset         bool   `json:"totp_reset"`
@@ -80,6 +91,7 @@ type Job struct {
 	VaultError        string `json:"vault_error,omitempty"`
 }
 type Candidate struct {
+	PlanType        string   `json:"plan_type"`
 	ID              string   `json:"id"`
 	JobID           string   `json:"job_id"`
 	Revision        uint64   `json:"revision"`
@@ -138,7 +150,7 @@ func stringField(r ojson.Result, k string) (string, error) {
 }
 func DecodeCredentials(r ojson.Result) (Credentials, error) {
 	var c Credentials
-	obj, err := Object([]byte(r.Raw), "email", "password", "totp_secret")
+	obj, err := Object([]byte(r.Raw), "email", "password", "totp_secret", "totp_factor_id")
 	if err != nil {
 		return c, err
 	}
@@ -154,6 +166,12 @@ func DecodeCredentials(r ojson.Result) (Credentials, error) {
 	c.Email = strings.ToLower(strings.TrimSpace(c.Email))
 	if len(c.Email) > 254 || len(c.Password) > 4096 || len(c.TOTPSecret) > 1024 || !strings.Contains(c.Email, "@") || strings.ContainsAny(c.Email, "\r\n\x00") || c.Password == "" || c.TOTPSecret == "" {
 		return Credentials{}, errors.New("invalid_credentials")
+	}
+	if v := obj.Get("totp_factor_id"); v.Exists() {
+		if v.Type != ojson.String || v.String() != "" && (!validSecurityBinding(v.String()) || len(v.String()) > 512) {
+			return Credentials{}, errors.New("invalid_credentials")
+		}
+		c.TOTPFactorID = v.String()
 	}
 	if !validTOTPSecret(c.TOTPSecret) {
 		return Credentials{}, errors.New("invalid_credentials")
@@ -225,7 +243,12 @@ func SafeCode(err error) string {
 		return ""
 	}
 	s := err.Error()
+	if strings.HasPrefix(s, "conversion_") && runtimeDiagnostic(s, []string{"conversion_invalid_json", "conversion_unsupported_version", "conversion_unsupported_format", "conversion_account_limit", "conversion_unsupported_provider", "conversion_unsupported_type", "conversion_missing_access_token", "conversion_missing_account_id", "conversion_invalid_token", "conversion_invalid_expiry", "conversion_expired_without_refresh"}) {
+		return s
+	}
 	switch s {
+	case "cpa_credential_missing", "cpa_credential_unavailable":
+		return s
 	case "credential_login_pending":
 		return "login_commit_pending"
 	case "login_snapshot_conflict", "login_source_conflict":
@@ -240,7 +263,7 @@ func SafeCode(err error) string {
 	if strings.HasPrefix(s, "security_") && runtimeDiagnostic(s, []string{"security_uncertain", "security_pending", "security_failed", "security_journal_invalid", "security_unavailable"}) {
 		return s
 	}
-	if s == "storage_capacity" || s == "quality_authority_unavailable" || s == "credential_enable_conflict" || s == "interrupted" || s == "invalid_proxy" || s == "proxy_auth_unsupported" {
+	if s == "cpa_plan_excluded" || s == "storage_capacity" || s == "quality_authority_unavailable" || s == "credential_enable_conflict" || s == "interrupted" || s == "invalid_proxy" || s == "proxy_auth_unsupported" {
 		return s
 	}
 	for _, v := range []string{"duplicate_account", "account_not_linked", "automation_disabled", "invalid_request", "invalid_credentials", "not_found", "conflict", "duplicate_identity", "identity_conflict", "identity_unverifiable", "identity_changed", "policy_changed", "login_commit_pending", "unsupported_login_target", "unsupported_login_store", "home_controlled", "interaction_required", "credentials_rejected", "totp_rejected", "runtime_unavailable", "runtime_invalid", "runtime_failed", "runtime_timeout", "runtime_protocol_error", "queue_full", "rate_limited", "cancelled", "expired", "plugin_unavailable", "exchange_failed", "storage_unavailable", "vault_unavailable", "vault_not_initialized", "vault_conflict", "vault_corrupt", "vault_identity_changed", "idempotency_conflict", "idempotency_unknown", "invalid_callback", "already_consumed", "commit_unknown", "saved_not_adopted"} {

@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -22,7 +21,7 @@ import (
 
 const runtimeInputLimit = 16 << 10
 const runtimeOutputLimit = 12 << 10
-const runtimeStreamLimit = 64 << 10
+const runtimeStreamLimit = 128 << 10
 const runtimeProgressLimit = 64
 const runtimeManifestLimit = 512 << 10
 
@@ -42,7 +41,7 @@ type runtimeManifest struct {
 func runtimeError(code string) error { return errors.New(code) }
 
 type runtimeDiagnosticError struct {
-	code, stage, reason string
+	code, stage, reason, runtimeCode string
 }
 
 func (e *runtimeDiagnosticError) Error() string { return e.code }
@@ -56,12 +55,19 @@ func runtimeDiagnostic(value string, allowed []string) bool {
 	return false
 }
 
+func runtimeErrorCode(value string) string {
+	return map[string]string{"invalid_input": "runtime_protocol_error", "proxy_unsupported": "proxy_auth_unsupported", "invalid_totp_secret": "invalid_credentials", "unsupported_totp_parameters": "invalid_credentials", "runtime_unavailable": "runtime_unavailable", "browser_unavailable": "runtime_unavailable", "browser_failed": "runtime_failed", "transport_error": "runtime_failed", "timeout": "runtime_timeout", "cancelled": "cancelled", "interaction_required": "interaction_required", "password_rejected": "credentials_rejected", "totp_rejected": "totp_rejected", "authorization_denied": "interaction_required", "rate_limited": "rate_limited", "service_error": "runtime_failed", "callback_invalid": "invalid_callback", "callback_state_mismatch": "invalid_callback", "workspace_mismatch": "identity_conflict", "security_failed": "security_failed", "security_uncertain": "security_uncertain", "security_journal_invalid": "security_journal_invalid", "security_storage_failed": "storage_unavailable", "security_identity_mismatch": "identity_conflict", "security_state_unconfirmed": "security_failed", "security_outcome_unknown": "security_uncertain", "security_rejected": "security_failed"}[value]
+}
+
 func runtimeStage(value string) bool {
-	return runtimeDiagnostic(value, []string{"security_login", "security_check", "totp_disable", "totp_enroll", "totp_activate", "totp_saved", "logout_all", "reauthorization", "security_complete", "runtime_start", "browser_start", "session", "authorization", "email", "password", "totp", "oauth", "callback", "browser_verification", "consent", "workspace"})
+	return runtimeDiagnostic(value, []string{"security_login", "security_check", "totp_disable", "totp_enroll", "totp_activate", "totp_commit", "totp_saved", "logout_all", "reauthorization", "security_complete", "runtime_start", "browser_start", "session", "authorization", "email", "password", "totp", "oauth", "callback", "browser_verification", "consent", "workspace"})
 }
 
 func runtimeReason(value string) bool {
-	return runtimeDiagnostic(value, []string{"journal_unavailable", "human_verification", "browser_verification_timeout", "browser_verification_required", "email_verification", "phone_verification", "unsupported_request", "unsupported_navigation", "submit_unavailable", "totp_method_unconfirmed", "workspace_selection", "account_selection", "unexpected_dialog", "unexpected_download", "unsupported_page", "upstream_rejected", "proxy_connection_failed", "session_unconfirmed", "authentication_not_advanced", "totp_factor_missing", "sentinel_unavailable"})
+	if runtimeDiagnostic(value, []string{"callback_url_invalid", "callback_parameters_invalid", "callback_state_mismatch", "callback_code_invalid", "callback_authorization_denied"}) {
+		return true
+	}
+	return runtimeDiagnostic(value, []string{"response_invalid", "response_too_large", "response_read_failed", "journal_unavailable", "human_verification", "browser_verification_timeout", "browser_verification_required", "email_verification", "phone_verification", "unsupported_request", "unsupported_navigation", "submit_unavailable", "totp_method_unconfirmed", "workspace_selection", "account_selection", "unexpected_dialog", "unexpected_download", "unsupported_page", "upstream_rejected", "proxy_connection_failed", "proxy_auth_rejected", "proxy_loopback_unreachable", "proxy_tls_failed", "proxy_dns_failed", "network_dns_failed", "proxy_connection_refused", "network_connection_refused", "proxy_connection_timeout", "network_timeout", "network_tls_failed", "session_unconfirmed", "authentication_not_advanced", "totp_factor_missing", "sentinel_unavailable"})
 }
 
 func (r *Runtime) Capabilities() error {
@@ -133,7 +139,7 @@ func (r *Runtime) verify() (runtimeManifest, error) {
 	}
 	var executable string
 	var required []string
-	if manifest.Get("schema_version").Raw != "2" || (version != "2.0.0" && version != "2.0.1" && version != "2.1.0") || manifest.Get("engine").String() != "go_sobek_protocol" || manifest.Get("entrypoint").String() != "bin/login-runtime" || manifest.Get("node").Exists() || manifest.Get("browser").Exists() {
+	if manifest.Get("schema_version").Raw != "2" || (version != "2.0.0" && version != "2.0.1" && version != "2.1.0" && version != "2.1.1" && version != "2.1.2" && version != "2.1.3" && version != "2.2.0" && version != "2.2.1") || manifest.Get("engine").String() != "go_sobek_protocol" || manifest.Get("entrypoint").String() != "bin/login-runtime" || manifest.Get("node").Exists() || manifest.Get("browser").Exists() {
 		return out, runtimeError("runtime_invalid")
 	}
 	executable = "bin/login-runtime"
@@ -229,16 +235,20 @@ func (b *limitedRuntimeOutput) Write(p []byte) (int, error) {
 // runtimeProgressOutput accepts only fixed, identity-bound progress events and
 // one final response. Its bounded buffer never retains previous progress lines.
 type runtimeProgressOutput struct {
-	mu       sync.Mutex
-	pending  []byte
-	final    []byte
-	total    int
-	count    int
-	ended    bool
-	err      error
-	failed   chan error
-	request  RuntimeRequest
-	progress func(string) error
+	mu              sync.Mutex
+	pending         []byte
+	final           []byte
+	total           int
+	count           int
+	ended           bool
+	err             error
+	failed          chan error
+	request         RuntimeRequest
+	progress        func(string) error
+	diagnostic      func(LogEntry) error
+	diagnosticCount int
+	acknowledge     func() error
+	barrierCount    int
 }
 
 func (b *runtimeProgressOutput) reject(err error) {
@@ -268,9 +278,57 @@ func (b *runtimeProgressOutput) line(raw []byte) {
 		b.reject(runtimeError("runtime_protocol_error"))
 		return
 	}
-	result, err := Object(raw, "version", "type", "job_id", "attempt", "phase", "callback_url", "error_code", "error_stage", "error_reason", "security_complete")
+	result, err := Object(raw, "version", "type", "job_id", "attempt", "phase", "callback_url", "error_code", "error_stage", "error_reason", "security_complete", "factor_id", "event", "request_kind", "method", "http_status", "duration_ms", "failed")
 	if err != nil || !runtimeIdentity(result, b.request) {
 		b.reject(runtimeError("runtime_protocol_error"))
+		return
+	}
+	kind := result.Get("type").String()
+	if kind == "security_commit" || kind == "factor_verified" {
+		b.barrierCount++
+		if b.barrierCount > 16 || b.acknowledge == nil {
+			b.reject(runtimeError("runtime_protocol_error"))
+			return
+		}
+		if _, err := Object(raw, "version", "type", "job_id", "attempt", "factor_id"); err != nil {
+			b.reject(err)
+			return
+		}
+		var err error
+		if kind == "security_commit" {
+			if result.Get("factor_id").Exists() || b.request.Operation != "reset_totp" || b.request.commitSecurity == nil {
+				b.reject(runtimeError("runtime_protocol_error"))
+				return
+			}
+			err = b.request.commitSecurity()
+		} else {
+			id := result.Get("factor_id")
+			if id.Type != ojson.String || !validSecurityBinding(id.String()) || len(id.String()) > 512 || b.request.factorVerified == nil {
+				b.reject(runtimeError("runtime_protocol_error"))
+				return
+			}
+			err = b.request.factorVerified(id.String())
+		}
+		if err == nil {
+			err = b.acknowledge()
+		}
+		if err != nil {
+			b.reject(err)
+		}
+		return
+	}
+	if result.Get("type").String() == "diagnostic" {
+		entry, err := parseRuntimeDiagnostic(raw)
+		b.diagnosticCount++
+		if err != nil || b.diagnosticCount > 129 {
+			b.reject(runtimeError("runtime_protocol_error"))
+			return
+		}
+		if b.diagnostic != nil {
+			if err := b.diagnostic(entry); err != nil {
+				b.reject(err)
+			}
+		}
 		return
 	}
 	if result.Get("type").Exists() {
@@ -349,6 +407,10 @@ func (r *Runtime) Run(ctx context.Context, request RuntimeRequest) (string, erro
 }
 
 func (r *Runtime) RunWithProgress(ctx context.Context, request RuntimeRequest, progress func(string) error) (string, error) {
+	return r.RunWithDiagnostics(ctx, request, progress, nil)
+}
+
+func (r *Runtime) RunWithDiagnostics(ctx context.Context, request RuntimeRequest, progress func(string) error, diagnostic func(LogEntry) error) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", runtimeError("cancelled")
 	}
@@ -381,7 +443,16 @@ func (r *Runtime) RunWithProgress(ctx context.Context, request RuntimeRequest, p
 	}
 	defer ownerRead.Close()
 	defer ownerWrite.Close()
-	cmd.ExtraFiles = []*os.File{ownerRead}
+	commitRead, commitWrite, err := os.Pipe()
+	if err != nil {
+		return "", runtimeError("runtime_unavailable")
+	}
+	defer commitRead.Close()
+	defer commitWrite.Close()
+	cmd.ExtraFiles = []*os.File{ownerRead, commitRead}
+	cmd.Env = append(cmd.Env, "MQ_LOGIN_COMMIT_FD=4")
+	stopCommit := context.AfterFunc(ctx, func() { _ = commitWrite.Close() })
+	defer stopCommit()
 	cmd.Env = append(cmd.Env, "MQ_LOGIN_OWNER_FD=3")
 	stopOwner := context.AfterFunc(ctx, func() { _ = ownerWrite.Close() })
 	defer stopOwner()
@@ -391,7 +462,7 @@ func (r *Runtime) RunWithProgress(ctx context.Context, request RuntimeRequest, p
 	stderr := &limitedRuntimeOutput{limit: runtimeOutputLimit, overflow: overflow}
 	defer func() { clear(stdout.data.Bytes()); clear(stderr.data.Bytes()) }()
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	stream := &runtimeProgressOutput{failed: make(chan error, 1), request: RuntimeRequest{Version: request.Version, JobID: request.JobID, Attempt: request.Attempt}, progress: progress}
+	stream := &runtimeProgressOutput{failed: make(chan error, 1), request: request, acknowledge: func() error { _, err := commitWrite.Write([]byte{1}); return err }, progress: progress, diagnostic: diagnostic}
 	if manifest.progress {
 		cmd.Stdout = stream
 	}
@@ -404,6 +475,7 @@ func (r *Runtime) RunWithProgress(ctx context.Context, request RuntimeRequest, p
 		return "", runtimeError("runtime_unavailable")
 	}
 	_ = ownerRead.Close()
+	_ = commitRead.Close()
 	defer killRuntimeProcess(cmd, true)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -464,8 +536,7 @@ func runtimeResponse(raw []byte, request RuntimeRequest, runErr error) (string, 
 		if result.Get("error_code").Type != ojson.String || result.Get("callback_url").Exists() {
 			return "", runtimeError("runtime_protocol_error")
 		}
-		codes := map[string]string{"invalid_input": "runtime_protocol_error", "proxy_unsupported": "proxy_auth_unsupported", "invalid_totp_secret": "invalid_credentials", "unsupported_totp_parameters": "invalid_credentials", "runtime_unavailable": "runtime_unavailable", "browser_unavailable": "runtime_unavailable", "browser_failed": "runtime_failed", "transport_error": "runtime_failed", "timeout": "runtime_timeout", "cancelled": "cancelled", "interaction_required": "interaction_required", "password_rejected": "credentials_rejected", "totp_rejected": "totp_rejected", "authorization_denied": "interaction_required", "rate_limited": "rate_limited", "service_error": "runtime_failed", "callback_invalid": "invalid_callback", "callback_state_mismatch": "invalid_callback", "workspace_mismatch": "identity_conflict", "security_failed": "security_failed", "security_uncertain": "security_uncertain", "security_journal_invalid": "security_journal_invalid", "security_storage_failed": "storage_unavailable", "security_identity_mismatch": "identity_conflict", "security_state_unconfirmed": "security_failed", "security_outcome_unknown": "security_uncertain", "security_rejected": "security_failed"}
-		code := codes[result.Get("error_code").String()]
+		code := runtimeErrorCode(result.Get("error_code").String())
 		if code == "" {
 			code = "runtime_protocol_error"
 		}
@@ -476,8 +547,8 @@ func runtimeResponse(raw []byte, request RuntimeRequest, runErr error) (string, 
 		if reason.Exists() && (reason.Type != ojson.String || !runtimeReason(reason.String())) {
 			return "", runtimeError("runtime_protocol_error")
 		}
-		if stage.Exists() || reason.Exists() {
-			return "", &runtimeDiagnosticError{code: code, stage: stage.String(), reason: reason.String()}
+		if runtimeErrorCode(result.Get("error_code").String()) != "" {
+			return "", &runtimeDiagnosticError{code: code, stage: stage.String(), reason: reason.String(), runtimeCode: result.Get("error_code").String()}
 		}
 		return "", runtimeError(code)
 	}
@@ -498,14 +569,8 @@ func runtimeResponse(raw []byte, request RuntimeRequest, runErr error) (string, 
 		return "", runtimeError("runtime_protocol_error")
 	}
 	callback := result.Get("callback_url").String()
-	value, err := url.Parse(callback)
-	target, targetErr := url.Parse(request.RedirectURI)
-	if err != nil || targetErr != nil || len(callback) > 8192 || value.Scheme != target.Scheme || value.Host != target.Host || value.Path != target.Path || value.User != nil || value.Fragment != "" {
-		return "", runtimeError("invalid_callback")
-	}
-	query, err := url.ParseQuery(value.RawQuery)
-	if err != nil || len(query["state"]) != 1 || query.Get("state") != request.State || len(query["code"]) != 1 || query.Get("code") == "" || len(query.Get("code")) > 4096 || len(query["error"]) != 0 {
-		return "", runtimeError("invalid_callback")
+	if _, err := validateCallbackFor(callback, request.State, request.RedirectURI); err != nil {
+		return "", err
 	}
 	return callback, nil
 }

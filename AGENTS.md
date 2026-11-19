@@ -39,6 +39,23 @@ must never be replayed on retries, restart, inspection, or local completion.
 Deployment and routine verification do not authorize executing these operations
 against real accounts. Keep the official host unchanged.
 
+## Credential handling requested on 2026-11-19
+
+The latest user request adds opt-in `disable_credential` and `delete_credential`
+policies using the existing CPA v8 management APIs without changing the host.
+These policies are distinct from historical independent `pause_credential`
+ownership. Keep historical ownership and its restrictions intact. Default to
+observation. Only complete, explicitly judged rounds may trigger handling;
+network errors, refusal, truncation, cancellation and unknown answers do not.
+An owned disabled credential can be probed through the existing management
+API-call channel. Optional recovery requires every selected model and sample to
+pass and the stored credential snapshot to remain unchanged. Never temporarily
+enable a credential for testing. Management authorization stays in process memory;
+never hardcode or persist the panel key. Uncertain mutations are not replayed.
+Document CPA's lack of atomic conditional status/delete operations. Verification
+uses only isolated fake credentials and upstreams; deploying this plugin does not
+authorize real-account actions or model calls.
+
 ## Task specification
 
 Read `PROMPT_CN.md` for the complete implementation task and `docs/RESEARCH_CN.md` for verified source findings. The latest direct user instruction takes precedence over these files.

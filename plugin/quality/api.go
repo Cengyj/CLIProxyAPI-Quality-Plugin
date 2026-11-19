@@ -11,6 +11,11 @@ import (
 )
 
 func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
+	if strings.HasPrefix(req.Path, "/v0/management/plugins/model-quality/") {
+		if h, ok := en.host.(*NativeHost); ok && h.Management != nil {
+			h.Management.authorize(req.Headers)
+		}
+	}
 	path := strings.TrimPrefix(req.Path, "/v0/management/plugins/model-quality")
 	var result any
 	var err error
@@ -18,19 +23,43 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 	switch req.Method + " " + path {
 	case "GET /targets":
 		var items []Target
-		items, err = en.host.Targets(ctx)
-		result = page(items, req)
-		result.(map[string]any)["capabilities"] = en.Capabilities()
+		items, err = en.visibleTargets(ctx)
+		rows := page(items, req)
+		if h, ok := en.host.(*NativeHost); ok && h.Management != nil && h.Management.ready() {
+			h.Management.addModelReasoning(ctx, rows["items"].([]Target))
+		}
+		rows["capabilities"] = en.Capabilities()
+		result = rows
 	case "GET /questions":
 		items := Questions()
 		for i := range items {
 			items[i].Answer = ""
 		}
 		result = page(items, req)
+	case "GET /rules/question-preview":
+		// Only fixed rule questions have a reference that exists before dispatch.
+		for _, q := range Questions() {
+			if q.ID == req.Query.Get("id") && q.Kind == "logic" {
+				result = q
+				break
+			}
+		}
+		if result == nil {
+			err = fmt.Errorf("not_found: fixed question reference")
+		}
 	case "GET /runs":
 		result, err = en.QueryRuns(req.Query)
 	case "GET /runs/detail":
 		result, err = en.Run(req.Query.Get("id"))
+	case "DELETE /rules/run-history":
+		result, err = en.clearRuleHistory()
+	case "DELETE /runs":
+		var body struct {
+			ID string `json:"id"`
+		}
+		if err = DecodeStrict(req.Body, &body); err == nil {
+			err = en.DeleteManualRun(body.ID)
+		}
 	case "POST /runs":
 		var c RunConfig
 		if err = DecodeStrict(req.Body, &c); err == nil {
@@ -59,22 +88,65 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 			err = en.Review(body.ID, body.SampleIndex, body.Verdict, body.Note)
 		}
 	case "GET /rules":
-		result = page(en.Rules(), req)
-	case "POST /rules", "PUT /rules":
-		var body Rule
+		result = en.queryRules(req.Query)
+	case "POST /rules/handling/acknowledge":
+		var body struct {
+			RuleID   string `json:"rule_id"`
+			AuthID   string `json:"auth_id"`
+			ActionID string `json:"action_id"`
+		}
 		if err = DecodeStrict(req.Body, &body); err == nil {
-			result, err = en.SaveRule(ctx, body, req.Method == "PUT")
+			err = en.acknowledgeHandling(ctx, body.RuleID, body.AuthID, body.ActionID)
+		}
+	case "POST /rules", "PUT /rules":
+		update := req.Method == "PUT"
+		var body ruleWrite
+		if body, err = decodeRuleWrite(req.Body, update); err == nil {
+			var r *Rule
+			if r, err = en.saveRule(ctx, body.Rule, update, body.Activation); err == nil {
+				result = viewRule(*r)
+			}
 		}
 	case "POST /rules/run":
 		var body struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			Revision uint64 `json:"revision"`
 		}
 		if err = DecodeStrict(req.Body, &body); err == nil {
-			var run *Run
-			run, err = en.RunRule(ctx, body.ID)
-			if run != nil {
-				result = map[string]string{"run_id": run.ID}
+			var receipt ruleDispatch
+			receipt, err = en.dispatchRule(ctx, body.ID, body.Revision, false)
+			result = receipt
+			if err == nil && receipt.Count > 0 {
 				status = 202
+			}
+		}
+	case "PUT /rules/scheduling":
+		var body struct {
+			Expected *bool `json:"expected"`
+			Enabled  *bool `json:"enabled"`
+		}
+		if err = DecodeStrict(req.Body, &body); err == nil {
+			if body.Expected == nil || body.Enabled == nil {
+				err = fmt.Errorf("invalid_request: expected and enabled required")
+			} else {
+				err = en.setScheduling(*body.Expected, *body.Enabled)
+				result = map[string]bool{"scheduling_enabled": *body.Enabled}
+			}
+		}
+	case "PUT /rules/timer":
+		var body struct {
+			ID       string `json:"id"`
+			Revision uint64 `json:"revision"`
+			Enabled  *bool  `json:"enabled"`
+		}
+		if err = DecodeStrict(req.Body, &body); err == nil {
+			if body.Enabled == nil || body.ID == "" || body.Revision == 0 {
+				err = fmt.Errorf("invalid_request: id, revision and enabled required")
+			} else {
+				var r *Rule
+				if r, err = en.setRuleTimer(ctx, body.ID, body.Revision, *body.Enabled); err == nil {
+					result = viewRule(*r)
+				}
 			}
 		}
 	case "POST /rules/pause":

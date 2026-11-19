@@ -1,0 +1,803 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-14T18:36:24.805597+00:00",
+  "title": "Design System: Model Quality",
+  "extensions": {
+    "colorMeta": {
+      "page": {
+        "role": "neutral",
+        "displayName": "Page"
+      },
+      "card": {
+        "role": "neutral",
+        "displayName": "Card"
+      },
+      "input": {
+        "role": "neutral",
+        "displayName": "Input"
+      },
+      "floating": {
+        "role": "neutral",
+        "displayName": "Floating",
+        "tonalRamp": [
+          "oklch(15% 0.0017 84.6)",
+          "oklch(27% 0.0034 84.6)",
+          "oklch(39% 0.0048 84.6)",
+          "oklch(51% 0.0057 84.6)",
+          "oklch(63% 0.0057 84.6)",
+          "oklch(75% 0.0048 84.6)",
+          "oklch(87% 0.0031 84.6)",
+          "oklch(95% 0.0011 84.6)"
+        ]
+      },
+      "hover": {
+        "role": "neutral",
+        "displayName": "Hover"
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "tonalRamp": [
+          "oklch(15% 0.0025 75.2)",
+          "oklch(27% 0.0050 75.2)",
+          "oklch(39% 0.0071 75.2)",
+          "oklch(51% 0.0084 75.2)",
+          "oklch(63% 0.0084 75.2)",
+          "oklch(75% 0.0071 75.2)",
+          "oklch(87% 0.0046 75.2)",
+          "oklch(95% 0.0017 75.2)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted",
+        "tonalRamp": [
+          "oklch(15% 0.0040 71.8)",
+          "oklch(27% 0.0080 71.8)",
+          "oklch(39% 0.0113 71.8)",
+          "oklch(51% 0.0133 71.8)",
+          "oklch(63% 0.0133 71.8)",
+          "oklch(75% 0.0113 71.8)",
+          "oklch(87% 0.0073 71.8)",
+          "oklch(95% 0.0027 71.8)"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Border",
+        "tonalRamp": [
+          "oklch(15% 0.0030 87.5)",
+          "oklch(27% 0.0060 87.5)",
+          "oklch(39% 0.0085 87.5)",
+          "oklch(51% 0.0100 87.5)",
+          "oklch(63% 0.0100 87.5)",
+          "oklch(75% 0.0085 87.5)",
+          "oklch(87% 0.0055 87.5)",
+          "oklch(95% 0.0020 87.5)"
+        ]
+      },
+      "control-border": {
+        "role": "neutral",
+        "displayName": "Control Border",
+        "tonalRamp": [
+          "oklch(15% 0.0047 74.3)",
+          "oklch(27% 0.0094 74.3)",
+          "oklch(39% 0.0133 74.3)",
+          "oklch(51% 0.0157 74.3)",
+          "oklch(63% 0.0157 74.3)",
+          "oklch(75% 0.0133 74.3)",
+          "oklch(87% 0.0086 74.3)",
+          "oklch(95% 0.0031 74.3)"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Accent"
+      },
+      "accent-hover": {
+        "role": "primary",
+        "displayName": "Accent Hover"
+      },
+      "on-accent": {
+        "role": "primary",
+        "displayName": "On Accent",
+        "tonalRamp": [
+          "oklch(15% 0.0000 89.9)",
+          "oklch(27% 0.0000 89.9)",
+          "oklch(39% 0.0000 89.9)",
+          "oklch(51% 0.0000 89.9)",
+          "oklch(63% 0.0000 89.9)",
+          "oklch(75% 0.0000 89.9)",
+          "oklch(87% 0.0000 89.9)",
+          "oklch(95% 0.0000 89.9)"
+        ]
+      },
+      "focus": {
+        "role": "primary",
+        "displayName": "Focus"
+      },
+      "good": {
+        "role": "semantic",
+        "displayName": "Good",
+        "tonalRamp": [
+          "oklch(15% 0.0259 166.9)",
+          "oklch(27% 0.0519 166.9)",
+          "oklch(39% 0.0735 166.9)",
+          "oklch(51% 0.0865 166.9)",
+          "oklch(63% 0.0865 166.9)",
+          "oklch(75% 0.0735 166.9)",
+          "oklch(87% 0.0476 166.9)",
+          "oklch(95% 0.0173 166.9)"
+        ]
+      },
+      "good-bg": {
+        "role": "semantic",
+        "displayName": "Good Bg",
+        "tonalRamp": [
+          "oklch(15% 0.0067 160.2)",
+          "oklch(27% 0.0134 160.2)",
+          "oklch(39% 0.0190 160.2)",
+          "oklch(51% 0.0223 160.2)",
+          "oklch(63% 0.0223 160.2)",
+          "oklch(75% 0.0190 160.2)",
+          "oklch(87% 0.0123 160.2)",
+          "oklch(95% 0.0045 160.2)"
+        ]
+      },
+      "warn": {
+        "role": "semantic",
+        "displayName": "Warn",
+        "tonalRamp": [
+          "oklch(15% 0.0333 50.4)",
+          "oklch(27% 0.0666 50.4)",
+          "oklch(39% 0.0943 50.4)",
+          "oklch(51% 0.1110 50.4)",
+          "oklch(63% 0.1110 50.4)",
+          "oklch(75% 0.0943 50.4)",
+          "oklch(87% 0.0610 50.4)",
+          "oklch(95% 0.0222 50.4)"
+        ]
+      },
+      "warn-bg": {
+        "role": "semantic",
+        "displayName": "Warn Bg",
+        "tonalRamp": [
+          "oklch(15% 0.0102 84.6)",
+          "oklch(27% 0.0204 84.6)",
+          "oklch(39% 0.0290 84.6)",
+          "oklch(51% 0.0341 84.6)",
+          "oklch(63% 0.0341 84.6)",
+          "oklch(75% 0.0290 84.6)",
+          "oklch(87% 0.0187 84.6)",
+          "oklch(95% 0.0068 84.6)"
+        ]
+      },
+      "bad": {
+        "role": "semantic",
+        "displayName": "Bad",
+        "tonalRamp": [
+          "oklch(15% 0.0360 30.6)",
+          "oklch(27% 0.0721 30.6)",
+          "oklch(39% 0.1021 30.6)",
+          "oklch(51% 0.1201 30.6)",
+          "oklch(63% 0.1201 30.6)",
+          "oklch(75% 0.1021 30.6)",
+          "oklch(87% 0.0660 30.6)",
+          "oklch(95% 0.0240 30.6)"
+        ]
+      },
+      "bad-bg": {
+        "role": "semantic",
+        "displayName": "Bad Bg",
+        "tonalRamp": [
+          "oklch(15% 0.0059 37.0)",
+          "oklch(27% 0.0119 37.0)",
+          "oklch(39% 0.0168 37.0)",
+          "oklch(51% 0.0198 37.0)",
+          "oklch(63% 0.0198 37.0)",
+          "oklch(75% 0.0168 37.0)",
+          "oklch(87% 0.0109 37.0)",
+          "oklch(95% 0.0040 37.0)"
+        ]
+      },
+      "danger": {
+        "role": "semantic",
+        "displayName": "Danger",
+        "tonalRamp": [
+          "oklch(15% 0.0409 29.5)",
+          "oklch(27% 0.0818 29.5)",
+          "oklch(39% 0.1159 29.5)",
+          "oklch(51% 0.1364 29.5)",
+          "oklch(63% 0.1364 29.5)",
+          "oklch(75% 0.1159 29.5)",
+          "oklch(87% 0.0750 29.5)",
+          "oklch(95% 0.0273 29.5)"
+        ]
+      },
+      "on-danger": {
+        "role": "semantic",
+        "displayName": "On Danger",
+        "tonalRamp": [
+          "oklch(15% 0.0000 89.9)",
+          "oklch(27% 0.0000 89.9)",
+          "oklch(39% 0.0000 89.9)",
+          "oklch(51% 0.0000 89.9)",
+          "oklch(63% 0.0000 89.9)",
+          "oklch(75% 0.0000 89.9)",
+          "oklch(87% 0.0000 89.9)",
+          "oklch(95% 0.0000 89.9)"
+        ]
+      },
+      "white-page": {
+        "role": "neutral",
+        "displayName": "White Page",
+        "tonalRamp": [
+          "oklch(15% 0.0000 89.9)",
+          "oklch(27% 0.0000 89.9)",
+          "oklch(39% 0.0000 89.9)",
+          "oklch(51% 0.0000 89.9)",
+          "oklch(63% 0.0000 89.9)",
+          "oklch(75% 0.0000 89.9)",
+          "oklch(87% 0.0000 89.9)",
+          "oklch(95% 0.0000 89.9)"
+        ]
+      },
+      "white-card": {
+        "role": "neutral",
+        "displayName": "White Card",
+        "tonalRamp": [
+          "oklch(15% 0.0000 89.9)",
+          "oklch(27% 0.0000 89.9)",
+          "oklch(39% 0.0000 89.9)",
+          "oklch(51% 0.0000 89.9)",
+          "oklch(63% 0.0000 89.9)",
+          "oklch(75% 0.0000 89.9)",
+          "oklch(87% 0.0000 89.9)",
+          "oklch(95% 0.0000 89.9)"
+        ]
+      },
+      "white-input": {
+        "role": "neutral",
+        "displayName": "White Input"
+      },
+      "white-floating": {
+        "role": "neutral",
+        "displayName": "White Floating",
+        "tonalRamp": [
+          "oklch(15% 0.0000 89.9)",
+          "oklch(27% 0.0000 89.9)",
+          "oklch(39% 0.0000 89.9)",
+          "oklch(51% 0.0000 89.9)",
+          "oklch(63% 0.0000 89.9)",
+          "oklch(75% 0.0000 89.9)",
+          "oklch(87% 0.0000 89.9)",
+          "oklch(95% 0.0000 89.9)"
+        ]
+      },
+      "white-hover": {
+        "role": "neutral",
+        "displayName": "White Hover"
+      },
+      "white-border": {
+        "role": "neutral",
+        "displayName": "White Border",
+        "tonalRamp": [
+          "oklch(15% 0.0000 89.9)",
+          "oklch(27% 0.0000 89.9)",
+          "oklch(39% 0.0000 89.9)",
+          "oklch(51% 0.0000 89.9)",
+          "oklch(63% 0.0000 89.9)",
+          "oklch(75% 0.0000 89.9)",
+          "oklch(87% 0.0000 89.9)",
+          "oklch(95% 0.0000 89.9)"
+        ]
+      },
+      "dark-page": {
+        "role": "neutral",
+        "displayName": "Dark Page",
+        "tonalRamp": [
+          "oklch(15% 0.0013 84.6)",
+          "oklch(27% 0.0026 84.6)",
+          "oklch(39% 0.0036 84.6)",
+          "oklch(51% 0.0043 84.6)",
+          "oklch(63% 0.0043 84.6)",
+          "oklch(75% 0.0036 84.6)",
+          "oklch(87% 0.0023 84.6)",
+          "oklch(95% 0.0009 84.6)"
+        ]
+      },
+      "dark-card": {
+        "role": "neutral",
+        "displayName": "Dark Card"
+      },
+      "dark-input": {
+        "role": "neutral",
+        "displayName": "Dark Input"
+      },
+      "dark-floating": {
+        "role": "neutral",
+        "displayName": "Dark Floating"
+      },
+      "dark-hover": {
+        "role": "neutral",
+        "displayName": "Dark Hover"
+      },
+      "dark-ink": {
+        "role": "neutral",
+        "displayName": "Dark Ink",
+        "tonalRamp": [
+          "oklch(15% 0.0014 78.3)",
+          "oklch(27% 0.0027 78.3)",
+          "oklch(39% 0.0039 78.3)",
+          "oklch(51% 0.0045 78.3)",
+          "oklch(63% 0.0045 78.3)",
+          "oklch(75% 0.0039 78.3)",
+          "oklch(87% 0.0025 78.3)",
+          "oklch(95% 0.0009 78.3)"
+        ]
+      },
+      "dark-muted": {
+        "role": "neutral",
+        "displayName": "Dark Muted",
+        "tonalRamp": [
+          "oklch(15% 0.0039 75.3)",
+          "oklch(27% 0.0078 75.3)",
+          "oklch(39% 0.0110 75.3)",
+          "oklch(51% 0.0129 75.3)",
+          "oklch(63% 0.0129 75.3)",
+          "oklch(75% 0.0110 75.3)",
+          "oklch(87% 0.0071 75.3)",
+          "oklch(95% 0.0026 75.3)"
+        ]
+      },
+      "dark-border": {
+        "role": "neutral",
+        "displayName": "Dark Border",
+        "tonalRamp": [
+          "oklch(15% 0.0033 67.4)",
+          "oklch(27% 0.0067 67.4)",
+          "oklch(39% 0.0095 67.4)",
+          "oklch(51% 0.0112 67.4)",
+          "oklch(63% 0.0112 67.4)",
+          "oklch(75% 0.0095 67.4)",
+          "oklch(87% 0.0061 67.4)",
+          "oklch(95% 0.0022 67.4)"
+        ]
+      },
+      "dark-control-border": {
+        "role": "neutral",
+        "displayName": "Dark Control Border",
+        "tonalRamp": [
+          "oklch(15% 0.0048 74.3)",
+          "oklch(27% 0.0096 74.3)",
+          "oklch(39% 0.0136 74.3)",
+          "oklch(51% 0.0160 74.3)",
+          "oklch(63% 0.0160 74.3)",
+          "oklch(75% 0.0136 74.3)",
+          "oklch(87% 0.0088 74.3)",
+          "oklch(95% 0.0032 74.3)"
+        ]
+      },
+      "dark-accent": {
+        "role": "primary",
+        "displayName": "Dark Accent"
+      },
+      "dark-accent-hover": {
+        "role": "primary",
+        "displayName": "Dark Accent Hover",
+        "tonalRamp": [
+          "oklch(15% 0.0043 74.4)",
+          "oklch(27% 0.0087 74.4)",
+          "oklch(39% 0.0123 74.4)",
+          "oklch(51% 0.0144 74.4)",
+          "oklch(63% 0.0144 74.4)",
+          "oklch(75% 0.0123 74.4)",
+          "oklch(87% 0.0079 74.4)",
+          "oklch(95% 0.0029 74.4)"
+        ]
+      },
+      "dark-on-accent": {
+        "role": "primary",
+        "displayName": "Dark On Accent",
+        "tonalRamp": [
+          "oklch(15% 0.0019 78.2)",
+          "oklch(27% 0.0039 78.2)",
+          "oklch(39% 0.0055 78.2)",
+          "oklch(51% 0.0065 78.2)",
+          "oklch(63% 0.0065 78.2)",
+          "oklch(75% 0.0055 78.2)",
+          "oklch(87% 0.0036 78.2)",
+          "oklch(95% 0.0013 78.2)"
+        ]
+      },
+      "dark-focus": {
+        "role": "primary",
+        "displayName": "Dark Focus",
+        "tonalRamp": [
+          "oklch(15% 0.0039 75.3)",
+          "oklch(27% 0.0078 75.3)",
+          "oklch(39% 0.0110 75.3)",
+          "oklch(51% 0.0129 75.3)",
+          "oklch(63% 0.0129 75.3)",
+          "oklch(75% 0.0110 75.3)",
+          "oklch(87% 0.0071 75.3)",
+          "oklch(95% 0.0026 75.3)"
+        ]
+      },
+      "dark-good": {
+        "role": "semantic",
+        "displayName": "Dark Good",
+        "tonalRamp": [
+          "oklch(15% 0.0390 165.0)",
+          "oklch(27% 0.0780 165.0)",
+          "oklch(39% 0.1105 165.0)",
+          "oklch(51% 0.1299 165.0)",
+          "oklch(63% 0.1299 165.0)",
+          "oklch(75% 0.1105 165.0)",
+          "oklch(87% 0.0715 165.0)",
+          "oklch(95% 0.0260 165.0)"
+        ]
+      },
+      "dark-good-bg": {
+        "role": "semantic",
+        "displayName": "Dark Good Bg",
+        "tonalRamp": [
+          "oklch(15% 0.0148 170.0)",
+          "oklch(27% 0.0296 170.0)",
+          "oklch(39% 0.0419 170.0)",
+          "oklch(51% 0.0493 170.0)",
+          "oklch(63% 0.0493 170.0)",
+          "oklch(75% 0.0419 170.0)",
+          "oklch(87% 0.0271 170.0)",
+          "oklch(95% 0.0099 170.0)"
+        ]
+      },
+      "dark-warn": {
+        "role": "semantic",
+        "displayName": "Dark Warn",
+        "tonalRamp": [
+          "oklch(15% 0.0460 91.6)",
+          "oklch(27% 0.0921 91.6)",
+          "oklch(39% 0.1304 91.6)",
+          "oklch(51% 0.1534 91.6)",
+          "oklch(63% 0.1534 91.6)",
+          "oklch(75% 0.1304 91.6)",
+          "oklch(87% 0.0844 91.6)",
+          "oklch(95% 0.0307 91.6)"
+        ]
+      },
+      "dark-warn-bg": {
+        "role": "semantic",
+        "displayName": "Dark Warn Bg",
+        "tonalRamp": [
+          "oklch(15% 0.0116 78.7)",
+          "oklch(27% 0.0231 78.7)",
+          "oklch(39% 0.0328 78.7)",
+          "oklch(51% 0.0385 78.7)",
+          "oklch(63% 0.0385 78.7)",
+          "oklch(75% 0.0328 78.7)",
+          "oklch(87% 0.0212 78.7)",
+          "oklch(95% 0.0077 78.7)"
+        ]
+      },
+      "dark-bad": {
+        "role": "semantic",
+        "displayName": "Dark Bad",
+        "tonalRamp": [
+          "oklch(15% 0.0234 28.7)",
+          "oklch(27% 0.0468 28.7)",
+          "oklch(39% 0.0663 28.7)",
+          "oklch(51% 0.0780 28.7)",
+          "oklch(63% 0.0780 28.7)",
+          "oklch(75% 0.0663 28.7)",
+          "oklch(87% 0.0429 28.7)",
+          "oklch(95% 0.0156 28.7)"
+        ]
+      },
+      "dark-bad-bg": {
+        "role": "semantic",
+        "displayName": "Dark Bad Bg",
+        "tonalRamp": [
+          "oklch(15% 0.0134 36.7)",
+          "oklch(27% 0.0269 36.7)",
+          "oklch(39% 0.0381 36.7)",
+          "oklch(51% 0.0448 36.7)",
+          "oklch(63% 0.0448 36.7)",
+          "oklch(75% 0.0381 36.7)",
+          "oklch(87% 0.0246 36.7)",
+          "oklch(95% 0.0090 36.7)"
+        ]
+      },
+      "dark-danger": {
+        "role": "semantic",
+        "displayName": "Dark Danger",
+        "tonalRamp": [
+          "oklch(15% 0.0228 30.0)",
+          "oklch(27% 0.0456 30.0)",
+          "oklch(39% 0.0645 30.0)",
+          "oklch(51% 0.0759 30.0)",
+          "oklch(63% 0.0759 30.0)",
+          "oklch(75% 0.0645 30.0)",
+          "oklch(87% 0.0418 30.0)",
+          "oklch(95% 0.0152 30.0)"
+        ]
+      },
+      "dark-on-danger": {
+        "role": "semantic",
+        "displayName": "Dark On Danger",
+        "tonalRamp": [
+          "oklch(15% 0.0134 36.7)",
+          "oklch(27% 0.0269 36.7)",
+          "oklch(39% 0.0381 36.7)",
+          "oklch(51% 0.0448 36.7)",
+          "oklch(63% 0.0448 36.7)",
+          "oklch(75% 0.0381 36.7)",
+          "oklch(87% 0.0246 36.7)",
+          "oklch(95% 0.0090 36.7)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Available headline role; current task H1 is screen-reader-only because primary navigation already names the task."
+      },
+      "headline-mobile": {
+        "displayName": "Headline Mobile",
+        "purpose": "Available mobile headline role; duplicate visible task titles are omitted in the compact workspace."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Shared interface hierarchy."
+      },
+      "section": {
+        "displayName": "Section",
+        "purpose": "Shared interface hierarchy."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Shared interface hierarchy."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Shared interface hierarchy."
+      },
+      "supporting": {
+        "displayName": "Supporting",
+        "purpose": "Shared interface hierarchy."
+      },
+      "metadata": {
+        "displayName": "Metadata",
+        "purpose": "Supporting metadata, never the sole carrier of a consequential state."
+      },
+      "status": {
+        "displayName": "Status",
+        "purpose": "Shared interface hierarchy."
+      },
+      "answer": {
+        "displayName": "Answer",
+        "purpose": "Escaped prose output; original content is retained."
+      },
+      "answer-code": {
+        "displayName": "Answer Code",
+        "purpose": "Escaped code, HTML or SVG output."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "Shared interface hierarchy."
+      },
+      "metric": {
+        "displayName": "Metric",
+        "purpose": "Secondary compact 24px statistics, below actionable restrictions."
+      },
+      "brand": {
+        "displayName": "Brand",
+        "purpose": "Compact standalone identity, hidden within the CPA shell."
+      }
+    },
+    "shadows": [
+      {
+        "name": "light-card",
+        "value": "none",
+        "purpose": "A fine border defines the working surface without a second elevation treatment."
+      },
+      {
+        "name": "white-card",
+        "value": "none",
+        "purpose": "A fine border defines the working surface without a second elevation treatment."
+      },
+      {
+        "name": "dark-card",
+        "value": "none",
+        "purpose": "A fine border defines the working surface without a second elevation treatment."
+      },
+      {
+        "name": "light-dialog",
+        "value": "0 16px 48px rgb(45 42 38 / 18%)",
+        "purpose": "Floating dialogs and bounded action menus."
+      },
+      {
+        "name": "dark-dialog",
+        "value": "0 16px 48px rgb(0 0 0 / 40%)",
+        "purpose": "Floating dialogs and bounded action menus."
+      }
+    ],
+    "motion": [
+      {
+        "name": "control-feedback",
+        "value": "150ms",
+        "purpose": "Color, border and field feedback."
+      },
+      {
+        "name": "switch-and-progress",
+        "value": "200ms ease-out",
+        "purpose": "Switch thumb movement and task progress."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "none",
+        "purpose": "Disable animations and transitions when requested."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "bounded-workspace-min-width",
+        "value": "801px"
+      },
+      {
+        "name": "bounded-workspace-min-height",
+        "value": "600px"
+      },
+      {
+        "name": "editor-title-compact",
+        "value": "1100px"
+      },
+      {
+        "name": "question-stack",
+        "value": "800px"
+      },
+      {
+        "name": "phone",
+        "value": "600px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Shared CPA button dimensions with a distinct action role.",
+      "html": "<button type=\"button\" class=\"ds-button ds-primary\">开始测试</button>",
+      "css": ".ds-button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:10px 14px;border:1px solid transparent;border-radius:8px;font-weight:600;cursor:pointer;transition:background-color 150ms,border-color 150ms,color 150ms;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;}.ds-button:focus-visible{outline:2px solid var(--focus,#59564f);outline-offset:3px}.ds-button:active{filter:brightness(.94)}.ds-button:disabled{opacity:.5;cursor:not-allowed}.ds-button[aria-busy=\"true\"]{opacity:.75;cursor:progress}@media(max-width:600px){.ds-button{min-height:44px}}@media(prefers-reduced-motion:reduce){.ds-button{transition:none}}.ds-primary{background:var(--accent,#59564f);border-color:var(--accent,#59564f);color:var(--on-accent,#ffffff)}.ds-primary:hover{background:var(--accent-hover,#45423c);border-color:var(--accent-hover,#45423c)}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Shared CPA button dimensions with a distinct action role.",
+      "html": "<button type=\"button\" class=\"ds-button ds-secondary\">下载结果</button>",
+      "css": ".ds-button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:10px 14px;border:1px solid transparent;border-radius:8px;font-weight:600;cursor:pointer;transition:background-color 150ms,border-color 150ms,color 150ms;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;}.ds-button:focus-visible{outline:2px solid var(--focus,#59564f);outline-offset:3px}.ds-button:active{filter:brightness(.94)}.ds-button:disabled{opacity:.5;cursor:not-allowed}.ds-button[aria-busy=\"true\"]{opacity:.75;cursor:progress}@media(max-width:600px){.ds-button{min-height:44px}}@media(prefers-reduced-motion:reduce){.ds-button{transition:none}}.ds-secondary{background:var(--card,#fffdf9);border-color:var(--control-border,#8e877e);color:var(--ink,#2d2a26)}.ds-secondary:hover{background:var(--hover,#f0ede6)}"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Shared CPA button dimensions with a distinct action role.",
+      "html": "<button type=\"button\" class=\"ds-button ds-ghost\">返回配置</button>",
+      "css": ".ds-button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:10px 14px;border:1px solid transparent;border-radius:8px;font-weight:600;cursor:pointer;transition:background-color 150ms,border-color 150ms,color 150ms;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;}.ds-button:focus-visible{outline:2px solid var(--focus,#59564f);outline-offset:3px}.ds-button:active{filter:brightness(.94)}.ds-button:disabled{opacity:.5;cursor:not-allowed}.ds-button[aria-busy=\"true\"]{opacity:.75;cursor:progress}@media(max-width:600px){.ds-button{min-height:44px}}@media(prefers-reduced-motion:reduce){.ds-button{transition:none}}.ds-ghost{background:transparent;color:var(--muted,#68625b)}.ds-ghost:hover{background:var(--hover,#f0ede6);color:var(--ink,#2d2a26)}"
+    },
+    {
+      "name": "Consequential Confirmation",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Shared CPA button dimensions with a distinct action role.",
+      "html": "<button type=\"button\" class=\"ds-button ds-danger\">确认解除，保持检测停止</button>",
+      "css": ".ds-button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:10px 14px;border:1px solid transparent;border-radius:8px;font-weight:600;cursor:pointer;transition:background-color 150ms,border-color 150ms,color 150ms;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;}.ds-button:focus-visible{outline:2px solid var(--focus,#59564f);outline-offset:3px}.ds-button:active{filter:brightness(.94)}.ds-button:disabled{opacity:.5;cursor:not-allowed}.ds-button[aria-busy=\"true\"]{opacity:.75;cursor:progress}@media(max-width:600px){.ds-button{min-height:44px}}@media(prefers-reduced-motion:reduce){.ds-button{transition:none}}.ds-danger{background:var(--danger,#a33e32);border-color:var(--danger,#a33e32);color:var(--on-danger,#ffffff)}.ds-danger:hover{filter:brightness(.94)}"
+    },
+    {
+      "name": "Native Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Visible label, native credential-scoped model selector and host-style focus ring.",
+      "html": "<label class=\"ds-field\">测试模型<select class=\"ds-input\"><option>从当前凭证的模型目录选择</option></select><span class=\"ds-hint\">模型目录随凭证更新。</span></label>",
+      "css": ".ds-field{display:block;font-weight:600;color:var(--ink,#2d2a26);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;}.ds-input{display:block;width:100%;min-height:40px;margin-top:8px;padding:10px 12px;border:1px solid var(--control-border,#8e877e);border-radius:8px;background:var(--input,#ffffff);font:inherit;font-weight:400;color:inherit}.ds-input:hover{border-color:var(--muted,#68625b)}.ds-input:focus{outline:none;border-color:var(--focus,#59564f);box-shadow:0 0 0 3px var(--focus-ring,rgb(89 86 79 / 18%)))}.ds-input::placeholder,.ds-hint{color:var(--muted,#68625b)}.ds-hint{display:block;margin-top:8px;font-size:13px;font-weight:400}@media(max-width:600px){.ds-input{font-size:16px;min-height:44px}}"
+    },
+    {
+      "name": "Task Navigation",
+      "kind": "nav",
+      "refersTo": "navigation",
+      "description": "ProviderTabs language for primary tasks and exact configuration/answers/history local views; visibility switches preserve form drafts.",
+      "html": "<nav class=\"ds-tabs\" aria-label=\"主导航\"><button class=\"ds-tab ds-active\" aria-current=\"page\">智商测试</button><button class=\"ds-tab\">质量运维</button></nav>",
+      "css": ".ds-tabs{display:flex;gap:2px;overflow-x:auto;border-bottom:1px solid var(--border,#dedbd4)}.ds-tab{position:relative;flex-shrink:0;min-height:40px;border:0;border-radius:8px 8px 0 0;padding:8px 12px 11px;background:transparent;color:var(--muted,#68625b);font-weight:550;cursor:pointer;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;}.ds-tab:after{content:\"\";position:absolute;left:10px;right:10px;bottom:0;height:2px;background:transparent}.ds-active{color:var(--ink,#2d2a26);font-weight:650}.ds-active:after{background:var(--ink,#2d2a26)}.ds-tab:hover{background:var(--hover,#f0ede6)}.ds-tab:focus-visible{outline:2px solid var(--focus,#59564f);outline-offset:-3px}.ds-tab:active{filter:brightness(.94)}@media(max-width:600px){.ds-tab{min-height:44px}}"
+    },
+    {
+      "name": "Saved Rule Switch",
+      "kind": "custom",
+      "refersTo": "switch",
+      "description": "A native checkbox presented as the host-sized switch; the form save applies its draft.",
+      "html": "<label class=\"ds-switch\"><input type=\"checkbox\" checked><span>启用定时检测</span></label>",
+      "css": ".ds-switch{display:flex;align-items:center;gap:16px;min-height:44px;color:var(--ink,#2d2a26);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;}.ds-switch input{appearance:none;position:relative;flex:0 0 44px;width:44px;height:24px;margin:0;border:1px solid var(--control-border,#8e877e);border-radius:24px;background:var(--input,#ffffff);cursor:pointer}.ds-switch input:before{content:\"\";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--muted,#68625b);transition:transform 200ms ease-out}.ds-switch input:checked{background:var(--accent,#59564f);border-color:var(--accent,#59564f)}.ds-switch input:checked:before{transform:translateX(20px);background:var(--on-accent,#ffffff)}.ds-switch input:focus-visible{outline:2px solid var(--focus,#59564f);outline-offset:3px}.ds-switch input:disabled{opacity:.5;cursor:not-allowed}@media(prefers-reduced-motion:reduce){.ds-switch input:before{transition:none}}@media(forced-colors:active){.ds-switch input{appearance:auto}.ds-switch input:before{display:none}}"
+    },
+    {
+      "name": "Named State Tags",
+      "kind": "chip",
+      "refersTo": "status-tag",
+      "description": "Execution and quality remain separate named facts.",
+      "html": "<div class=\"ds-tags\"><span class=\"ds-tag\">执行 · 已完成</span><span class=\"ds-tag ds-good\">质量 · 正确</span><span class=\"ds-tag ds-warn\">证据 · 未知</span></div>",
+      "css": ".ds-tags{display:flex;flex-wrap:wrap;gap:8px}.ds-tag{display:inline-flex;padding:2px 8px;border:1px solid transparent;border-radius:6px;background:var(--hover,#f0ede6);color:var(--muted,#68625b);font-weight:600;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;font-size:13px;line-height:1.5}.ds-good{background:var(--good-bg,#e2f3e9);color:var(--good,#065f46)}.ds-warn{background:var(--warn-bg,#fcf0d8);color:var(--warn,#85400e)}"
+    },
+    {
+      "name": "Working Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "CPA working-surface role with compact 16px padding for the first-viewport task priority.",
+      "html": "<section class=\"ds-card\"><div class=\"ds-card-header\"><h2>测试配置</h2></div><p>选择凭证与题目，显式开始测试。</p></section>",
+      "css": ".ds-card{min-width:0;padding:16px;border:1px solid var(--border,#dedbd4);border-radius:12px;background:var(--card,#fffdf9);color:var(--ink,#2d2a26);box-shadow:none;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;}.ds-card-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}.ds-card h2{margin:0;font-size:18px;font-weight:700;line-height:1.5}.ds-card p{margin:0;color:var(--muted,#68625b);line-height:1.7}@media(max-width:600px){.ds-card{padding:16px}}"
+    },
+    {
+      "name": "Frozen Conditions",
+      "kind": "custom",
+      "description": "A native disclosure separates saved execution conditions from the editable prompt draft.",
+      "html": "<details class=\"ds-details\"><summary>本次测试详情 <span>题目与执行条件</span></summary><p>此处展示执行时冻结的条件。</p></details>",
+      "css": ".ds-details{border-bottom:1px solid var(--border,#dedbd4);color:var(--ink,#2d2a26);font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:14px;line-height:1.4;}.ds-details summary{min-height:44px;padding:12px 0;font-weight:550;cursor:pointer}.ds-details summary:hover{color:var(--muted,#68625b)}.ds-details summary:focus-visible{outline:2px solid var(--focus,#59564f);outline-offset:3px}.ds-details span{margin-left:8px;color:var(--muted,#68625b);font-size:13px;font-weight:400}.ds-details p{color:var(--muted,#68625b);padding-bottom:16px}@media(max-width:600px){.ds-details span{display:block;margin-left:0}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The CPA Quality Workspace",
+    "overview": "Model Quality keeps the CPA warm light, white and dark family with lighter working surfaces, stronger primary actions, consistent navigation and status treatment. The compact manual layout preserves editor/action alignment and the header connection entry. Results, rules and operations size to content; editors and confirmations share a consistent spacing rhythm. Credential-wide pause semantics are unchanged.",
+    "keyCharacteristics": [
+      "Separate page, card, input, floating and hover roles in all three themes.",
+      "Host system type, eight-pixel controls and twelve-pixel surfaces with compact 16px card padding.",
+      "Configuration and current answers share the page by default; explicit expanded reading preserves the mounted configuration draft.",
+      "First-viewport configuration, primary actions and answer opening; local scrolling for long prompts, results and rule editor bodies.",
+      "Attention and credential restrictions share desktop columns; statistics remain secondary.",
+      "Independent labels for execution, quality, rule state and credential restrictions."
+    ],
+    "rules": [
+      {
+        "name": "The Host Component Rule",
+        "body": "Use the fixed CPA plugin-management page and shared primitives as the visual authority. Adapt contrast and responsive dimensions explicitly; preserve the host role and interaction contract.",
+        "section": "components"
+      },
+      {
+        "name": "The Separate State Rule",
+        "body": "Execution, answer quality, rule enablement and credential restrictions are different facts. Pair color with precise text and never derive one state from another.",
+        "section": "colors"
+      },
+      {
+        "name": "The Reading Continuity Rule",
+        "body": "Polling updates changed evidence without replacing stable drafts, focused controls, selections, disclosures or reading positions. Local view switches preserve the mounted configuration form.",
+        "section": "layout"
+      },
+      {
+        "name": "The Bounded Release Rule",
+        "body": "Show the exact owned pause, identity, action version, consequences and remaining restrictions together. Keep conflict and uncertain outcomes visible until reconciled.",
+        "section": "components"
+      },
+      {
+        "name": "The First Viewport Rule",
+        "body": "Keep normal desktop configuration, primary actions and the start of answers visible together. Use local scrolling for unbounded content, and restore document flow on narrow or short viewports instead of clipping controls or reducing readable type.",
+        "section": "layout"
+      }
+    ],
+    "dos": [
+      "Do use the role tokens and all three theme mappings for every shared component.",
+      "Do begin with the fixed CPA plugin-management and shared-component references when extending the interface.",
+      "Do preserve visible labels, keyboard focus, native dialogs, draft state and reduced-motion behavior.",
+      "Do keep ordinary text readable, phone input at least 16px and main touch targets at least 44px.",
+      "Do keep unknown values explicit and preserve original answers for copy and export.",
+      "Do check embedded and standalone layouts with actual iframe widths and complete data states.",
+      "Do keep configuration and primary actions in the desktop first viewport; let long content scroll locally and short or narrow windows use document flow."
+    ],
+    "donts": [
+      "Don't duplicate the host sidebar, global tools or authentication state.",
+      "Don't use the floating-surface color as an ordinary card default.",
+      "Don't turn successful completion or manual release into an unearned quality or availability claim.",
+      "Don't turn a long rule editor into a confirmation modal.",
+      "Don't repaint the whole reading surface on polling or move the reader's focus.",
+      "Don't execute model-generated content in the parent page or relax the preview sandbox.",
+      "Don't hide overflow or shrink text to claim that unlimited content fits without scrolling."
+    ]
+  }
+}

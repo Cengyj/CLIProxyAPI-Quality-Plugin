@@ -20,9 +20,10 @@ const authOrigin = "https://auth.openai.com"
 const chatOrigin = "https://chatgpt.com"
 
 type Credentials struct {
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	TOTPSecret string `json:"totp_secret"`
+	Email        string `json:"email"`
+	Password     string `json:"password"`
+	TOTPSecret   string `json:"totp_secret"`
+	TOTPFactorID string `json:"totp_factor_id,omitempty"`
 }
 
 type Input struct {
@@ -106,6 +107,9 @@ func validateInput(in Input, origin string) error {
 			}
 		}
 	}
+	if in.Credentials.TOTPFactorID != "" && !validFactorID(in.Credentials.TOTPFactorID) {
+		return failure("invalid_input", "", "")
+	}
 	if _, err := normalizeSecret(in.Credentials.TOTPSecret); err != nil {
 		return err
 	}
@@ -134,9 +138,6 @@ func normalizeProxy(raw string) (string, error) {
 	}
 	if u.User != nil && u.User.Username() == "" {
 		return "", failure("invalid_input", "runtime_start", "")
-	}
-	if u.Scheme == "socks5h" {
-		u.Scheme = "socks5"
 	}
 	return u.String(), nil
 }

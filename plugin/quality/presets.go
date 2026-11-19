@@ -36,7 +36,7 @@ func (en *Engine) SavePreset(name string, c RunConfig) (Preset, error) {
 	if name == "" || len(name) > 128 {
 		return Preset{}, fmt.Errorf("preset name requires 1..128 bytes")
 	}
-	if err := en.validate(&c); err != nil {
+	if err := en.validateManual(&c); err != nil {
 		return Preset{}, err
 	}
 	if _, err := FreezeQuestion(c); err != nil {

@@ -59,6 +59,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"unsafe"
@@ -200,7 +201,11 @@ func handle(method string, raw []byte) (any, error) {
 		if err := cfg.Validate(); err != nil {
 			return nil, err
 		}
-		native := &quality.NativeHost{Call: callback, MaxResponseBytes: cfg.MaxResponseBytes}
+		management, err := quality.NewManagementClient(os.Getenv("MODEL_QUALITY_CPA_URL"))
+		if err != nil {
+			return nil, err
+		}
+		native := &quality.NativeHost{Call: callback, MaxResponseBytes: cfg.MaxResponseBytes, Management: management}
 		if err := native.Check(); err != nil {
 			return nil, err
 		}

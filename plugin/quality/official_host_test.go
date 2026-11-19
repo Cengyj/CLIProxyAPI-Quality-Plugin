@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -12,6 +14,39 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
+
+func TestDisplayReasoningMatchesCredentialModelsAndChannel(t *testing.T) {
+	reads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v8/management/routing/model-definitions/codex" {
+			http.NotFound(w, r)
+			return
+		}
+		reads++
+		_, _ = w.Write([]byte(`{"channel":"codex","models":[{"id":"shared","thinking":{"levels":["low","max"]}},{"id":"visual"},{"id":"other","thinking":{"levels":["high"]}}]}`))
+	}))
+	defer server.Close()
+	m, err := NewManagementClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.authorize(http.Header{"Authorization": {"Bearer offline"}})
+	targets := []Target{
+		{Provider: "codex", Models: []string{"shared", "visual"}},
+		{Provider: "codex", Models: []string{"other"}},
+		{Provider: "custom", Models: []string{"shared"}},
+	}
+	m.addModelReasoning(context.Background(), targets)
+	for i, expected := range []string{`{"shared":{"levels":["low","max"]}}`, `{"other":{"levels":["high"]}}`, "null"} {
+		raw, err := json.Marshal(targets[i].Reasoning)
+		if err != nil || string(raw) != expected {
+			t.Fatalf("target %d: %s, %v", i, raw, err)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("expected one catalog read for the two Codex credentials, got %d", reads)
+	}
+}
 
 func TestOfficialTargetsUseRuntimeStateAndRegisteredModels(t *testing.T) {
 	states := map[string]pluginapi.HostAuthFileEntry{

@@ -47,7 +47,7 @@ func securityFlow(t *testing.T, mode, operation string) (*flow, *securityFake) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &flow{in: in, p: policy{auth: authOrigin, chat: chatOrigin, now: func() time.Time { return time.Unix(59, 0) }}, security: journal, device: "fixture-device", session: payload{"user": payload{"email": in.Credentials.Email}, "account": payload{"id": "account-fixture"}, "accessToken": "offline-token"}}
+	f := &flow{in: in, p: policy{auth: authOrigin, chat: chatOrigin, commit: func(context.Context) error { return nil }, pause: func(context.Context, int) error { return nil }, now: func() time.Time { return time.Unix(59, 0) }}, security: journal, device: "fixture-device", session: payload{"user": payload{"email": in.Credentials.Email}, "account": payload{"id": "account-fixture"}, "accessToken": "offline-token"}}
 	mock := &securityFake{t: t, f: f, mode: mode}
 	f.client = NewClient(mock, nil, "chrome146")
 	return f, mock
@@ -108,7 +108,7 @@ func (s *securityFake) Do(ctx context.Context, r transport.Request) (*transport.
 		}
 		return response(factor("old-factor")), nil
 	case disableEndpoint:
-		if j.DisableStatus != "pending" || j.OldFactorID != "old-factor" {
+		if j.DisableStatus != "pending" || (j.OldFactorID != "old-factor" && j.OldFactorID != "factor-fixture") {
 			s.t.Error("disable preceded durable identity/intent")
 		}
 		if s.mode == "disable-unknown" || s.mode == "disable-unknown-resolved" {
@@ -131,7 +131,7 @@ func (s *securityFake) Do(ctx context.Context, r transport.Request) (*transport.
 		}
 		return response(payload{"message": "Factor disabled", "passkey_credential_manager_sync": nil}), nil
 	case enrollEndpoint:
-		if j.DisableStatus != "succeeded" || j.EnrollStatus != "pending" {
+		if j.DisableStatus != "succeeded" && j.InitialEnrollStatus != "pending" || j.EnrollStatus != "pending" {
 			s.t.Error("enroll preceded confirmed removal")
 		}
 		if s.mode == "enroll-disconnect" {
@@ -213,11 +213,11 @@ func TestSecurityResetUncertainNeverReplays(t *testing.T) {
 		reads, posts      int
 		success           bool
 	}{
-		{"disable-unknown", "totp_disable", "unknown", 4, 1, false}, {"disable-unknown-resolved", "security_complete", "succeeded", 2, 3, true},
-		{"disable-rejected", "totp_disable", "failed", 1, 1, false}, {"disable-http-rejected", "totp_disable", "failed", 1, 1, false}, {"disable-challenge", "totp_disable", "unknown", 4, 1, false}, {"enroll-disconnect", "totp_enroll", "unknown", 1, 2, false},
+		{"disable-unknown", "totp_disable", "unknown", 5, 1, false}, {"disable-unknown-resolved", "security_complete", "succeeded", 2, 3, true},
+		{"disable-rejected", "totp_disable", "failed", 1, 1, false}, {"disable-http-rejected", "totp_disable", "failed", 1, 1, false}, {"disable-challenge", "totp_disable", "unknown", 5, 1, false}, {"enroll-disconnect", "totp_enroll", "unknown", 1, 2, false},
 		{"enroll-truncated", "totp_enroll", "unknown", 1, 2, false}, {"enroll-same-factor", "totp_enroll", "unknown", 1, 2, false},
-		{"activation-unknown-resolved", "security_complete", "succeeded", 2, 3, true}, {"activation-wrong-factor", "totp_activate", "unknown", 4, 3, false},
-		{"activation-rejected", "totp_activate", "failed", 1, 3, false}, {"multiple-factors", "security_check", "failed", 1, 0, false}, {"blank-factor", "security_check", "failed", 1, 0, false}, {"blank-enrollment", "totp_enroll", "unknown", 1, 2, false},
+		{"activation-unknown-resolved", "security_complete", "succeeded", 2, 3, true}, {"activation-wrong-factor", "totp_activate", "unknown", 2, 3, false},
+		{"activation-rejected", "totp_activate", "failed", 1, 3, false}, {"multiple-factors", "security_check", "failed", 1, 0, false}, {"blank-factor", "security_complete", "succeeded", 4, 2, true}, {"blank-enrollment", "totp_enroll", "unknown", 1, 2, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
@@ -318,6 +318,7 @@ func TestNativeSecurityFlowAndFreshReauthorization(t *testing.T) {
 	for _, operation := range []string{"reset_totp", "reset_totp_reauthorize", "logout_all"} {
 		t.Run(operation, func(t *testing.T) {
 			fixture := newLoginFixture(t, "")
+			fixture.p.commit = func(context.Context) error { return nil }
 			op := strings.TrimSuffix(operation, "_reauthorize")
 			in := securityInput(t, op)
 			fixture.in.Operation = op
@@ -331,6 +332,16 @@ func TestNativeSecurityFlowAndFreshReauthorization(t *testing.T) {
 				if r.URL.Path == "/api/auth/signin/openai" {
 					signins++
 				}
+				if r.URL.Path == "/api/accounts/password/verify" && operation == "reset_totp_reauthorize" && signins > 1 {
+					w.Header().Set("Content-Type", "application/json")
+					raw, _ := encodePayload(payload{"page": payload{"type": "mfa_challenge"}, "continue_url": fixture.server.URL + "/mfa-challenge/new-factor", "oai-client-auth-session": payload{"mfa_challenge_factors": []any{payload{"id": "new-factor", "factor_type": "totp"}}}})
+					_, _ = w.Write(raw)
+					return
+				}
+				if r.URL.Path == "/api/accounts/mfa/issue_challenge" && operation == "reset_totp_reauthorize" && signins > 1 {
+					_, _ = w.Write([]byte(`{}`))
+					return
+				}
 				if r.URL.Path == "/api/accounts/mfa/verify" && operation == "reset_totp_reauthorize" && signins > 1 {
 					raw, _ := io.ReadAll(r.Body)
 					var body payload
@@ -339,6 +350,23 @@ func TestNativeSecurityFlowAndFreshReauthorization(t *testing.T) {
 						t.Error("reauthorization did not use confirmed new seed")
 					}
 					response, _ := encodePayload(payload{"continue_url": fixture.server.URL + "/api/auth/callback/openai?code=web-code"})
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(response)
+					return
+				}
+				if r.URL.Path == "/api/accounts/session/select" {
+					response, _ := encodePayload(payload{"page": payload{"type": "workspace"}, "continue_url": fixture.server.URL + "/workspace", "oai-client-auth-session": payload{"workspaces": []any{payload{"id": "other-organization", "kind": "organization"}, payload{"id": "account-fixture", "kind": "personal"}}}})
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(response)
+					return
+				}
+				if r.URL.Path == "/api/accounts/workspace/select" {
+					raw, _ := io.ReadAll(r.Body)
+					var body payload
+					if json.Unmarshal(raw, &body) != nil || body["workspace_id"] != "account-fixture" {
+						t.Error("reauthorization switched away from the verified security workspace")
+					}
+					response, _ := encodePayload(payload{"continue_url": fixture.in.RedirectURI + "?code=fixture-code&state=" + fixture.in.State})
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write(response)
 					return
@@ -364,6 +392,7 @@ func TestNativeSecurityFlowAndFreshReauthorization(t *testing.T) {
 						w.WriteHeader(500)
 						return
 					}
+					response.Body = []byte(strings.ReplaceAll(string(response.Body), "old-factor", "factor-fixture"))
 					for key, values := range response.Header {
 						w.Header()[key] = values
 					}
@@ -401,6 +430,7 @@ func TestNativeSecurityFlowAndFreshReauthorization(t *testing.T) {
 
 func TestNativeSecurityLoginFailurePreservesUnsentEvidence(t *testing.T) {
 	fixture := newLoginFixture(t, "password-rejected")
+	fixture.p.commit = func(context.Context) error { return nil }
 	in := securityInput(t, "reset_totp")
 	fixture.in.Operation = in.Operation
 	fixture.in.SecurityJournalPath = in.SecurityJournalPath

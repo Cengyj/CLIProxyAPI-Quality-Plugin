@@ -15,6 +15,7 @@ import (
 	auth "github.com/cliproxyapi-plugins/model-quality/login/account"
 	codex "github.com/cliproxyapi-plugins/model-quality/login/oauth"
 	"github.com/google/uuid"
+	bolt "go.etcd.io/bbolt"
 )
 
 type Owner struct {
@@ -40,6 +41,7 @@ type Options struct {
 	Now      func() time.Time
 }
 type session struct {
+	knownPlans        []string
 	displayEmail      string
 	autoGuard         func() error
 	record            storedJob
@@ -50,32 +52,34 @@ type session struct {
 	state, url, proxy string
 	workspace         string
 	expected          auth.LoginSnapshot
+	securityBinding   auth.LoginSnapshot
 	credentials       Credentials
 	remember          bool
 	candidate         *auth.Auth
 	consumed          bool
 }
 type Service struct {
-	accountMu         sync.Mutex
-	accounts          map[string]storedAccount
-	accountPermits    map[string]*atomic.Bool
-	accountSettings   AccountSettings
-	accountAutomation atomic.Bool
-	accountGeneration atomic.Uint64
-	loginProxy        atomic.Value
-	mu                sync.Mutex
-	journal           *journal
-	vault             *vault
-	opts              Options
-	jobs              map[string]*session
-	ctx               context.Context
-	cancel            context.CancelFunc
-	wg                sync.WaitGroup
-	slot              chan struct{}
-	closed            bool
-	fault             bool
-	lastPrune         time.Time
-	ownsManager       bool
+	accountMu           sync.Mutex
+	accounts            map[string]storedAccount
+	accountPermits      map[string]*atomic.Bool
+	accountSettings     AccountSettings
+	accountAutomation   atomic.Bool
+	accountGeneration   atomic.Uint64
+	loginProxy          atomic.Value
+	uploadExcludedPlans atomic.Value
+	mu                  sync.Mutex
+	journal             *journal
+	vault               *vault
+	opts                Options
+	jobs                map[string]*session
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	wg                  sync.WaitGroup
+	slot                chan struct{}
+	closed              bool
+	fault               bool
+	lastPrune           time.Time
+	ownsManager         bool
 }
 
 func New(opts Options) (*Service, error) {
@@ -144,7 +148,7 @@ func New(opts Options) (*Service, error) {
 				v.AdoptedIdentity = receipt.IdentityVersion
 				v.AdoptedPrincipal = receipt.Principal
 				v.View.ErrorCode = ""
-				if v.View.Status == "commit_unknown" || v.View.Status == "saved_not_adopted" {
+				if v.View.Status == "commit_unknown" || v.View.Status == "saved_not_adopted" || v.View.Status == "interrupted" {
 					v.View.ErrorCode = v.View.Status
 				}
 			} else {
@@ -155,6 +159,9 @@ func New(opts Options) (*Service, error) {
 					v.View.Status = "interrupted"
 					v.View.ErrorCode = "interrupted"
 				}
+			}
+			if v.View.ErrorCode != "" && v.View.ErrorStage == "" && logStage(v.View.Phase) {
+				v.View.ErrorStage = v.View.Phase
 			}
 			v.View.Revision++
 			v.View.Phase = ""
@@ -189,6 +196,8 @@ func reconcileStatus(status string) string {
 		return status
 	case "aborted":
 		return "failed"
+	case "upload_excluded":
+		return "interrupted"
 	default:
 		return "commit_unknown"
 	}
@@ -228,9 +237,9 @@ func (s *Service) Close() error {
 	}
 	return err
 }
-func (s *Service) persistLocked(j *session) error {
+func (s *Service) persistLocked(j *session, diagnostic ...LogEntry) error {
 	j.record.Updated = s.opts.Now()
-	if err := s.journal.save(j.record); err != nil {
+	if err := s.journal.save(j.record, diagnostic...); err != nil {
 		s.fault = true
 		s.cancel()
 		return errors.New("storage_unavailable")
@@ -241,11 +250,15 @@ func (s *Service) transitionLocked(j *session, status, phase, code string) error
 	if j.record.View.Status == status && j.record.View.Phase == phase && j.record.View.ErrorCode == code {
 		return nil
 	}
+	if code != "" && j.record.View.ErrorStage == "" && logStage(j.record.View.Phase) {
+		j.record.View.ErrorStage = j.record.View.Phase
+	}
 	j.record.View.Status = status
 	j.record.View.Phase = phase
 	j.record.View.ErrorCode = code
 	if code == "" {
-		j.record.View.ErrorStage, j.record.View.ErrorReason = "", ""
+		j.record.View.HTTPStatus = 0
+		j.record.View.ErrorStage, j.record.View.ErrorReason, j.record.View.RuntimeCode = "", "", ""
 	}
 	j.record.View.Revision++
 	if terminal(status) {
@@ -260,6 +273,11 @@ func (s *Service) transitionLocked(j *session, status, phase, code string) error
 }
 func (s *Service) viewLocked(j *session) Job {
 	v := j.record.View
+	if v.Status == "failed" && v.ErrorCode == "runtime_failed" && v.RuntimeCode == "service_error" && v.HTTPStatus == 0 {
+		v.HTTPStatus = serviceHTTPStatus(j.record.LogEntries, v.ErrorStage)
+	}
+	v.CanDelete = canDeleteJob(j.record)
+	v.PlanType, _ = auth.ParsePlan(v.PlanType)
 	v.Email = j.displayEmail
 	if v.Email == "" {
 		v.Email = j.credentials.Email
@@ -292,7 +310,7 @@ func (s *Service) Detail(id string) (Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j := s.jobs[id]
-	if j == nil {
+	if j == nil || j.record.HistoryDeleted {
 		return Job{}, errors.New("not_found")
 	}
 	return s.viewLocked(j), nil
@@ -300,17 +318,55 @@ func (s *Service) Detail(id string) (Job, error) {
 func (s *Service) Jobs() []Job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := []Job{}
+	items, _ := s.jobsPageLocked("", 200)
+	return items
+}
+
+// JobsPage filters account ownership before applying the bounded result limit.
+func (s *Service) JobsPage(accountID string, limit int) ([]Job, bool, error) {
+	if limit < 1 || limit > 200 || len(accountID) > 512 {
+		return nil, false, errors.New("invalid_request")
+	}
+	if accountID != "" {
+		s.accountMu.Lock()
+		defer s.accountMu.Unlock()
+		if _, ok := s.accounts[accountID]; !ok {
+			return nil, false, errors.New("not_found")
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.fault {
+		return nil, false, errors.New("storage_unavailable")
+	}
+	items, more := s.jobsPageLocked(accountID, limit)
+	return items, more, nil
+}
+
+func (s *Service) jobsPageLocked(accountID string, limit int) ([]Job, bool) {
+	matched := make([]*session, 0, len(s.jobs))
 	for _, j := range s.jobs {
+		if !j.record.HistoryDeleted && (accountID == "" || j.record.View.AccountID == accountID) {
+			matched = append(matched, j)
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].record.Created.Equal(matched[j].record.Created) {
+			return matched[i].record.View.ID > matched[j].record.View.ID
+		}
+		return matched[i].record.Created.After(matched[j].record.Created)
+	})
+	more := len(matched) > limit
+	if more {
+		matched = matched[:limit]
+	}
+	out := make([]Job, 0, len(matched))
+	for _, j := range matched {
 		v := s.viewLocked(j)
 		v.AuthorizationURL = ""
 		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
-	if len(out) > 200 {
-		out = out[:200]
-	}
-	return out
+	return out, more
 }
 func (s *Service) Capabilities() any {
 	owner, err := s.opts.Owner()
@@ -318,7 +374,8 @@ func (s *Service) Capabilities() any {
 	s.mu.Lock()
 	ready := !s.closed && !s.fault
 	s.mu.Unlock()
-	available := ready && err == nil && owner.Valid != nil && owner.Valid() && capabilityErr == nil
+	ownerReady := ready && err == nil && owner.Valid != nil && owner.Valid()
+	available := ownerReady && capabilityErr == nil
 	reason := ""
 	if !available {
 		reason = "plugin_unavailable"
@@ -330,7 +387,10 @@ func (s *Service) Capabilities() any {
 		}
 	}
 	runtimeErr := s.opts.Runtime.Capabilities()
-	result := map[string]any{"security_actions": map[string]bool{"reset_totp": available && runtimeErr == nil && s.securityAvailable(), "logout_all": available && runtimeErr == nil && s.securityAvailable()}, "available": available, "version": 1, "automatic_commit": true, "commit_mode": "account_auto_commit", "manual_oauth_commit": true, "reason": reason, "methods": map[string]any{"browser": map[string]any{"available": available}, "password_totp": map[string]any{"available": available && runtimeErr == nil, "reason": SafeCode(runtimeErr)}}, "vault": s.vault.status("")}
+	securityReady := ownerReady && runtimeErr == nil && s.securityAvailable()
+	result := map[string]any{"security_actions": map[string]bool{"reset_totp": securityReady, "logout_all": securityReady}, "available": available, "version": 1, "automatic_commit": true, "commit_mode": "account_auto_commit", "manual_oauth_commit": true, "reason": reason, "methods": map[string]any{"browser": map[string]any{"available": available}, "password_totp": map[string]any{"available": available && runtimeErr == nil, "reason": SafeCode(runtimeErr)}}, "vault": s.vault.status("")}
+	result["account_login_available"] = ownerReady && runtimeErr == nil
+	result["credential_conversion"] = available
 	if metadata, ok := s.opts.Runtime.(interface {
 		Metadata() (map[string]string, error)
 	}); ok && runtimeErr == nil {
@@ -354,8 +414,16 @@ func (s *Service) Targets() []map[string]any {
 	return out
 }
 func (s *Service) Start(r StartRequest) (Job, error) {
-	if err := s.opts.Manager.LoginCapability(); err != nil {
-		return Job{}, err
+	return s.start(r, nil)
+}
+
+// Account callers hold accountMu until admission has durably bound the job.
+func (s *Service) start(r StartRequest, account *storedAccount) (Job, error) {
+	manualLogin := account != nil && !r.automatic && r.securityAction == ""
+	if r.securityAction == "" && !manualLogin {
+		if err := s.opts.Manager.LoginCapability(); err != nil {
+			return Job{}, err
+		}
 	}
 	owner, err := s.opts.Owner()
 	if err != nil || owner.Valid == nil || !owner.Valid() {
@@ -370,7 +438,7 @@ func (s *Service) Start(r StartRequest) (Job, error) {
 		}
 	}
 	var expected auth.LoginSnapshot
-	workspace := ""
+	workspace := r.workspaceID
 	proxy, _, err := s.effectiveLoginProxy(r.ProxyURL, r.TargetAuthID)
 	if err != nil {
 		return Job{}, err
@@ -378,18 +446,27 @@ func (s *Service) Start(r StartRequest) (Job, error) {
 	if r.Intent == "reauthorize" {
 		expected, err = s.opts.Manager.LoginSnapshot(r.TargetAuthID)
 		if err != nil {
+			if SafeCode(err) == "not_found" {
+				return Job{}, errors.New("cpa_credential_missing")
+			}
 			return Job{}, err
 		}
 		if expected.IdentityVersion != r.ExpectedIdentityVersion {
 			return Job{}, errors.New("identity_changed")
 		}
-		if a, ok := s.opts.Manager.GetByID(r.TargetAuthID); ok {
-			principal, principalErr := auth.LoginPrincipalFromAuth(a)
-			if principalErr != nil {
-				return Job{}, principalErr
-			}
-			workspace = principal.AccountID
+		a, ok := s.opts.Manager.GetByID(r.TargetAuthID)
+		if !ok {
+			return Job{}, errors.New("identity_changed")
 		}
+		principal, principalErr := auth.LoginPrincipalFromAuth(a)
+		if principalErr != nil {
+			return Job{}, principalErr
+		}
+		if principal.Key() != expected.Principal {
+			return Job{}, errors.New("identity_changed")
+		}
+		workspace = principal.AccountID
+		r.knownPlans = append(r.knownPlans, auth.LoginPlanTypes(a)...)
 	}
 	if r.UseSavedCredentials {
 		r.Credentials, err = s.vault.read(r.TargetAuthID)
@@ -442,6 +519,9 @@ func (s *Service) Start(r StartRequest) (Job, error) {
 			return Job{}, errors.New("security_pending")
 		}
 		if !terminal(j.record.View.Status) {
+			if manualLogin && j.record.View.AccountID == r.accountID && j.record.View.Status == "awaiting_commit" {
+				continue
+			}
 			if r.securityAction != "" && j.candidate != nil {
 				if p, err := auth.LoginPrincipalFromAuth(j.candidate); err == nil && s.journal.fingerprint(p.Email) == key {
 					return Job{}, errors.New("conflict")
@@ -453,6 +533,9 @@ func (s *Service) Start(r StartRequest) (Job, error) {
 			}
 		}
 		if j.record.RateKey == key && now.Sub(j.record.Created) < time.Hour {
+			if manualLogin && j.record.View.AccountID == r.accountID && completedAccountAuthorization(j.record) {
+				continue
+			}
 			attempts++
 		}
 	}
@@ -464,7 +547,8 @@ func (s *Service) Start(r StartRequest) (Job, error) {
 	}
 	id := uuid.NewString()
 	ctx, cancel := context.WithDeadline(s.ctx, now.Add(15*time.Minute))
-	j := &session{displayEmail: r.Credentials.Email, autoGuard: r.autoGuard, record: storedJob{SecurityAccountID: workspace, AccountEvidence: r.autoEvidence, AccountSequence: r.accountSequence, View: Job{Action: r.securityAction, LogoutAllDevices: r.logoutAllDevices, Reauthorize: r.reauthorize, AccountID: r.accountID, Automatic: r.automatic, AutoCommit: r.autoCommit, EnableCredential: r.enableCredential, ID: id, Revision: 1, Method: r.Method, Intent: r.Intent, Status: "queued", Phase: "queued", MaskedEmail: Mask(r.Credentials.Email), TargetAuthID: r.TargetAuthID, CreatedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(15 * time.Minute).Format(time.RFC3339)}, Created: now, Updated: now, RateKey: key}, owner: owner, ctx: ctx, cancel: cancel, pkce: pkce, state: state, url: authURL, proxy: proxy, workspace: workspace, expected: expected, credentials: r.Credentials, remember: r.RememberCredentials}
+	j := &session{knownPlans: append([]string{}, r.knownPlans...), displayEmail: r.Credentials.Email, autoGuard: r.autoGuard, record: storedJob{SecurityAccountID: workspace, AccountEvidence: r.autoEvidence, AccountSequence: r.accountSequence, View: Job{PlanType: "unknown", Action: r.securityAction, LogoutAllDevices: r.logoutAllDevices, Reauthorize: r.reauthorize, AccountID: r.accountID, Automatic: r.automatic, AutoCommit: r.autoCommit, EnableCredential: r.enableCredential, ID: id, Revision: 1, Method: r.Method, Intent: r.Intent, Status: "queued", Phase: "queued", MaskedEmail: Mask(r.Credentials.Email), TargetAuthID: r.TargetAuthID, CreatedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(15 * time.Minute).Format(time.RFC3339)}, Created: now, Updated: now, RateKey: key}, owner: owner, ctx: ctx, cancel: cancel, pkce: pkce, state: state, url: authURL, proxy: proxy, workspace: workspace, expected: expected, credentials: r.Credentials, remember: r.RememberCredentials}
+	j.securityBinding = r.securityBinding
 	if r.securityAction != "" {
 		j.record.View.SecurityStatus = "pending"
 		if _, err = s.securityJournalPath(id, true); err != nil {
@@ -472,7 +556,35 @@ func (s *Service) Start(r StartRequest) (Job, error) {
 			return Job{}, err
 		}
 	}
-	if err = s.persistLocked(j); err != nil {
+	if account == nil {
+		err = s.persistLocked(j)
+	} else {
+		bound := *account
+		bound.View.LastJobID, bound.View.LastJobStatus = id, j.record.View.Status
+		bound.View.SecurityPending, bound.View.LastJobAction = r.securityAction != "", r.securityAction
+		bound.View.Revision++
+		if !r.automatic {
+			bound.View.AttentionRequired = false
+			bound.View.ConsecutiveFailures = 0
+			bound.ConsumedEvidence = ""
+			bound.NextAttempt = time.Time{}
+		}
+		// Neither a helper nor a durable orphan job can precede account binding.
+		err = s.journal.db.Update(func(tx *bolt.Tx) error {
+			if err := s.journal.saveTx(tx, j.record); err != nil {
+				return err
+			}
+			return putGob(tx, "accounts", bound.View.ID, bound)
+		})
+		if err != nil {
+			s.fault = true
+			s.cancel()
+			err = errors.New("storage_unavailable")
+		} else {
+			s.accounts[bound.View.ID] = bound
+		}
+	}
+	if err != nil {
 		cancel()
 		return Job{}, err
 	}
@@ -484,6 +596,67 @@ func (s *Service) Start(r StartRequest) (Job, error) {
 		go s.run(j)
 	}
 	return s.viewLocked(j), err
+}
+func completedAccountAuthorization(j storedJob) bool {
+	if j.AuthorizationSavedAt != "" {
+		return true
+	}
+	switch j.View.Status {
+	case "committed", "succeeded":
+		return true
+	case "discarded", "expired":
+		return j.PlanObserved
+	}
+	return false
+}
+
+// Only the most recent verified grant is retained per account. Replace it and
+// retire the preceding upload candidate together, after token exchange succeeds.
+func (s *Service) saveAccountAuthorization(j *session) error {
+	id := j.record.View.AccountID
+	raw, err := Encode(j.candidate.Metadata)
+	if err != nil {
+		return errors.New("storage_unavailable")
+	}
+	now := s.opts.Now()
+	record := j.record
+	record.AuthorizationSavedAt = now.Format(time.RFC3339Nano)
+	var previous *session
+	var discarded storedJob
+	for _, other := range s.jobs {
+		if other != j && other.record.View.AccountID == id && other.record.View.Status == "awaiting_commit" {
+			previous = other
+			discarded = other.record
+			discarded.View.Status, discarded.View.Phase, discarded.View.CandidateID = "discarded", "", ""
+			discarded.View.ErrorCode, discarded.View.ErrorStage = "", ""
+			discarded.View.Revision++
+			discarded.Updated = now
+			break
+		}
+	}
+	if err := s.journal.db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("account-authorizations"))
+		if err != nil {
+			return err
+		}
+		if err := b.Put([]byte(id), raw); err != nil {
+			return err
+		}
+		if previous != nil {
+			if err := s.journal.saveTx(tx, discarded); err != nil {
+				return err
+			}
+		}
+		return s.journal.saveTx(tx, record)
+	}); err != nil {
+		return errors.New("storage_unavailable")
+	}
+	j.record = record
+	if previous != nil {
+		previous.cancel()
+		previous.record, previous.candidate, previous.credentials = discarded, nil, Credentials{}
+	}
+	return nil
 }
 func (s *Service) checkAutomaticExecution(j *session) error {
 	if j.autoGuard != nil {
@@ -539,6 +712,9 @@ func (s *Service) run(j *session) {
 			return
 		}
 	}
+	initialCredentials := req.Credentials
+	req.commitSecurity = func() error { return s.commitSecuritySeed(j) }
+	req.factorVerified = func(id string) error { return s.bindVerifiedFactor(j, initialCredentials, id) }
 	if req.ProxyURL == "direct" {
 		req.ProxyURL = ""
 	}
@@ -548,7 +724,11 @@ func (s *Service) run(j *session) {
 	s.mu.Unlock()
 	var callback string
 	var err error
-	if progressive, ok := s.opts.Runtime.(interface {
+	if detailed, ok := s.opts.Runtime.(interface {
+		RunWithDiagnostics(context.Context, RuntimeRequest, func(string) error, func(LogEntry) error) (string, error)
+	}); ok {
+		callback, err = detailed.RunWithDiagnostics(j.ctx, req, func(phase string) error { return s.runtimeProgress(j, phase) }, func(entry LogEntry) error { return s.runtimeDiagnostic(j, entry) })
+	} else if progressive, ok := s.opts.Runtime.(interface {
 		RunWithProgress(context.Context, RuntimeRequest, func(string) error) (string, error)
 	}); ok {
 		callback, err = progressive.RunWithProgress(j.ctx, req, func(phase string) error { return s.runtimeProgress(j, phase) })
@@ -557,6 +737,22 @@ func (s *Service) run(j *session) {
 	}
 	req.Credentials = Credentials{}
 	if req.Operation != "" {
+		if err != nil {
+			s.mu.Lock()
+			// Reconciliation may quarantine an uncertain mutation before the
+			// terminal error handler runs. Preserve its runtime diagnosis first.
+			if !terminal(j.record.View.Status) {
+				j.record.View.ErrorStage = j.record.View.Phase
+				var diagnostic *runtimeDiagnosticError
+				if errors.As(err, &diagnostic) {
+					if diagnostic.stage != "" {
+						j.record.View.ErrorStage = diagnostic.stage
+					}
+					j.record.View.ErrorReason, j.record.View.RuntimeCode = diagnostic.reason, diagnostic.runtimeCode
+				}
+			}
+			s.mu.Unlock()
+		}
 		securityReconciled = true
 		if reconcileErr := s.reconcileSecurity(j); reconcileErr != nil && (err == nil || reconcileErr.Error() != "security_failed") {
 			s.finishError(j, reconcileErr)
@@ -614,10 +810,25 @@ func (s *Service) finishError(j *session, err error) {
 	if code == "interaction_required" {
 		status = code
 	}
-	j.record.View.ErrorStage, j.record.View.ErrorReason = "", ""
+	j.record.View.ErrorStage, j.record.View.ErrorReason, j.record.View.RuntimeCode = "", "", ""
+	j.record.View.HTTPStatus = 0
+	var exchangeError *codex.ExchangeError
+	if errors.As(err, &exchangeError) && status != "cancelled" && status != "expired" {
+		if exchangeError.HTTPStatus >= 100 && exchangeError.HTTPStatus <= 599 {
+			j.record.View.HTTPStatus = exchangeError.HTTPStatus
+		}
+		if runtimeReason(exchangeError.Reason) {
+			j.record.View.ErrorReason = exchangeError.Reason
+		}
+	}
 	var diagnostic *runtimeDiagnosticError
 	if errors.As(err, &diagnostic) && status != "cancelled" && status != "expired" {
-		j.record.View.ErrorStage, j.record.View.ErrorReason = diagnostic.stage, diagnostic.reason
+		j.record.View.ErrorStage, j.record.View.ErrorReason, j.record.View.RuntimeCode = diagnostic.stage, diagnostic.reason, diagnostic.runtimeCode
+		if diagnostic.runtimeCode == "service_error" {
+			if logs, readErr := s.journal.logs(j.record.View.ID); readErr == nil {
+				j.record.View.HTTPStatus = serviceHTTPStatus(logs.Entries, diagnostic.stage)
+			}
+		}
 	}
 	_ = s.transitionLocked(j, status, "", code)
 	if j.cancel != nil {
@@ -627,7 +838,7 @@ func (s *Service) finishError(j *session, err error) {
 func (s *Service) Callback(id, callback string) (Job, error) {
 	s.mu.Lock()
 	j := s.jobs[id]
-	if j == nil {
+	if j == nil || j.record.HistoryDeleted {
 		s.mu.Unlock()
 		return Job{}, errors.New("not_found")
 	}
@@ -709,15 +920,24 @@ func (s *Service) Callback(id, callback string) (Job, error) {
 			_ = s.transitionLocked(j, "conflict", "", "identity_conflict")
 			return
 		}
-		existing, listErr := s.opts.Manager.ListChecked()
-		if listErr != nil {
-			_ = s.transitionLocked(j, "failed", "", SafeCode(listErr))
+		manualLogin := j.record.View.AccountID != "" && j.record.View.Action == "" && !j.record.View.Automatic
+		if manualLogin && j.securityBinding.Principal != "" && p.Key() != j.securityBinding.Principal {
+			_ = s.transitionLocked(j, "conflict", "", "identity_conflict")
 			return
 		}
-		for _, a := range existing {
-			other, e := auth.LoginPrincipalFromAuth(a)
-			if e == nil && other.Key() == p.Key() && a.ID != j.expected.AuthID {
-				_ = s.transitionLocked(j, "conflict", "", "duplicate_identity")
+		if j.record.View.Action != "" && (!validSecurityBinding(j.record.SecurityAccountID) || p.AccountID != j.record.SecurityAccountID) {
+			_ = s.transitionLocked(j, "conflict", "", "identity_conflict")
+			return
+		}
+		if !manualLogin {
+			if err := s.prepareGrantDestination(j, p); err != nil {
+				j.record.View.ErrorStage = "saving"
+				code := SafeCode(err)
+				status := "failed"
+				if code == "identity_conflict" || code == "identity_changed" {
+					status = "conflict"
+				}
+				_ = s.transitionLocked(j, status, "", code)
 				return
 			}
 		}
@@ -729,17 +949,45 @@ func (s *Service) Callback(id, callback string) (Job, error) {
 		candidate.FileName = candidate.ID
 		candidate.ProxyURL = j.proxy
 		j.candidate = candidate
+		j.record.View.PlanType = auth.LoginPlanType(candidate)
+		j.record.PlanObserved = true
 		j.displayEmail = p.Email
 		j.record.View.MaskedEmail = Mask(p.Email)
 		j.record.View.ExpiresAt = s.opts.Now().Add(5 * time.Minute).Format(time.RFC3339)
+		if manualLogin {
+			if err := s.saveAccountAuthorization(j); err != nil {
+				_ = s.transitionLocked(j, "failed", "", SafeCode(err))
+				return
+			}
+		}
 		if j.record.View.AutoCommit {
-			_ = s.beginCommitLocked(j)
+			if err := s.beginCommitLocked(j); err != nil {
+				j.record.View.ErrorStage = "saving"
+				j.record.View.CandidateID = id + ":candidate"
+				_ = s.transitionLocked(j, "awaiting_commit", "review", SafeCode(err))
+			}
 		} else {
 			j.record.View.CandidateID = id + ":candidate"
 			_ = s.transitionLocked(j, "awaiting_commit", "review", "")
 		}
 	}()
 	return s.Detail(id)
+}
+func (s *Service) prepareGrantDestination(j *session, p auth.LoginPrincipal) error {
+	if err := s.resolveSecurityCredential(j, p); err != nil {
+		return err
+	}
+	existing, err := s.opts.Manager.ListChecked()
+	if err != nil {
+		return err
+	}
+	for _, a := range existing {
+		other, err := auth.LoginPrincipalFromAuth(a)
+		if err == nil && other.Key() == p.Key() && a.ID != j.expected.AuthID {
+			return errors.New("duplicate_identity")
+		}
+	}
+	return nil
 }
 func (s *Service) Candidate(id string) (Candidate, error) {
 	s.mu.Lock()
@@ -763,13 +1011,16 @@ func (s *Service) Candidate(id string) (Candidate, error) {
 		}
 		restrictions = append(restrictions, t.UnavailableReasons...)
 	}
-	return Candidate{ID: id, JobID: jobID, Revision: j.record.View.Revision, Email: p.Email, AccountID: p.AccountID, UserID: p.UserID, MaskedEmail: Mask(p.Email), AccountIDMasked: Mask(p.AccountID), TargetAuthID: j.candidate.ID, Restrictions: restrictions, Intent: j.record.View.Intent}, nil
+	if err := s.checkUploadPlans(j.candidate, j.expected, j.knownPlans); err != nil && err.Error() == "cpa_plan_excluded" {
+		restrictions = append(restrictions, "cpa_plan_excluded")
+	}
+	return Candidate{PlanType: auth.LoginPlanType(j.candidate), ID: id, JobID: jobID, Revision: j.record.View.Revision, Email: p.Email, AccountID: p.AccountID, UserID: p.UserID, MaskedEmail: Mask(p.Email), AccountIDMasked: Mask(p.AccountID), TargetAuthID: j.candidate.ID, Restrictions: restrictions, Intent: j.record.View.Intent}, nil
 }
 func (s *Service) Cancel(id string, discard bool) (Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j := s.jobs[id]
-	if j == nil {
+	if j == nil || j.record.HistoryDeleted {
 		return Job{}, errors.New("not_found")
 	}
 	if terminal(j.record.View.Status) || j.record.View.Status == "committing" {
@@ -791,7 +1042,7 @@ func (s *Service) Cancel(id string, discard bool) (Job, error) {
 func (s *Service) Commit(ctx context.Context, id, candidateID string, revision uint64) (Job, error) {
 	s.mu.Lock()
 	j := s.jobs[id]
-	if j == nil {
+	if j == nil || j.record.HistoryDeleted {
 		s.mu.Unlock()
 		return Job{}, errors.New("not_found")
 	}
@@ -834,17 +1085,46 @@ func (s *Service) beginCommitLocked(j *session) error {
 	if err != nil {
 		return err
 	}
+	nextSequence := j.record.AccountSequence
 	for _, other := range s.jobs {
+		if other != j && j.record.View.AccountID != "" && other.record.View.AccountID == j.record.View.AccountID && !terminal(other.record.View.Status) && other.record.View.Status != "awaiting_commit" {
+			return errors.New("conflict")
+		}
+		if j.record.View.AccountID != "" && other.record.View.AccountID == j.record.View.AccountID && newerAccountJob(other.record, j.record) {
+			if other.record.View.Status == "saved_not_adopted" || other.record.View.Status == "commit_unknown" {
+				return errors.New("conflict")
+			}
+			if other.record.AccountSequence >= nextSequence {
+				nextSequence = other.record.AccountSequence + 1
+			}
+		}
 		if other != j && securityBlocks(other.record) && other.record.RateKey == s.journal.fingerprint(principal.Email) {
 			return errors.New("security_pending")
 		}
 	}
+	if j.record.View.AccountID != "" && j.record.View.Action == "" && !j.record.View.Automatic {
+		if err := s.prepareGrantDestination(j, principal); err != nil {
+			return err
+		}
+		if j.expected.AuthID != "" {
+			j.candidate.ID, j.candidate.FileName = j.expected.AuthID, j.expected.Name
+		}
+	}
 	candidate := j.candidate.Clone()
 	expected := j.expected
+	previous := j.securityBinding
+	replacing := previous.AuthID != "" && expected.AuthID == ""
+	knownPlans := append([]string{}, j.knownPlans...)
 	owner := j.owner
 	id := j.record.View.ID
 	enableCredential := j.record.View.EnableCredential
 	accountID := j.record.View.AccountID
+	if err := s.checkUploadPlans(candidate, expected, knownPlans); err != nil && err.Error() == "cpa_plan_excluded" {
+		j.record.View.CandidateID = id + ":candidate"
+		return s.transitionLocked(j, "awaiting_commit", "review", "cpa_plan_excluded")
+	}
+	// A manual upload after a later failed login is the newest account action.
+	j.record.AccountSequence = nextSequence
 	if err := s.transitionLocked(j, "committing", "saving", ""); err != nil {
 		return err
 	}
@@ -864,12 +1144,30 @@ func (s *Service) beginCommitLocked(j *session) error {
 			if !owner.Valid() {
 				return errors.New("plugin_unavailable")
 			}
+			if err := s.checkUploadPlans(candidate, expected, knownPlans); err != nil {
+				return err
+			}
+			if replacing {
+				_, err := s.opts.Manager.LoginSnapshot(previous.AuthID)
+				if err == nil {
+					return errors.New("policy_changed")
+				}
+				if SafeCode(err) != "not_found" {
+					return err
+				}
+			}
 			return s.checkAutomaticExecution(j)
 		}
 		result, err := s.opts.Manager.CommitLoginCandidate(commitCtx, auth.LoginCommitRequest{CommitID: id, Candidate: candidate, Expected: expected, EnableCredential: enableCredential, Guard: guard, Prepare: func(ctx context.Context, authID, identity string) error {
+			if replacing {
+				if err := owner.Prepare(ctx, previous.AuthID, previous.IdentityVersion, id); err != nil {
+					return err
+				}
+			}
 			return owner.Prepare(ctx, authID, identity, id)
 		}})
 		status := result.State
+		excluded := err != nil && err.Error() == "cpa_plan_excluded" && (status == "aborted" || status == "upload_excluded")
 		if status == "" {
 			status = "failed"
 		}
@@ -877,6 +1175,17 @@ func (s *Service) beginCommitLocked(j *session) error {
 			status = "failed"
 		}
 		s.mu.Lock()
+		if excluded {
+			j.record.View.CandidateID = id + ":candidate"
+			_ = s.transitionLocked(j, "awaiting_commit", "review", "cpa_plan_excluded")
+			s.mu.Unlock()
+			if accountID != "" {
+				s.accountMu.Lock()
+				_ = s.syncAccountJobsLocked()
+				s.accountMu.Unlock()
+			}
+			return
+		}
 		if status == "committed" && j.remember {
 			if e := s.vault.save(result.AuthID, 0, j.credentials, true); e != nil {
 				j.record.View.VaultError = SafeCode(e)
@@ -966,7 +1275,14 @@ func (s *Service) Idempotent(key, path string, body []byte, fn func() (any, erro
 		}
 	}
 	if value.Get("method").Exists() {
-		if job, err := s.Detail(value.Get("id").String()); err == nil {
+		id := value.Get("id").String()
+		s.mu.Lock()
+		deleted := s.jobs[id] != nil && s.jobs[id].record.HistoryDeleted
+		s.mu.Unlock()
+		if deleted {
+			return nil, errors.New("not_found")
+		}
+		if job, err := s.Detail(id); err == nil {
 			_ = d.Set("email", job.Email)
 		}
 	}
@@ -1008,5 +1324,6 @@ func validateBundle(bundle *codex.CodexAuthBundle, now time.Time) (*auth.Auth, e
 	}
 	a.Metadata["account_id"] = p.AccountID
 	a.Metadata["email"] = p.Email
+	a.Metadata["plan_type"] = auth.LoginPlanType(a)
 	return a, nil
 }

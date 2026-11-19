@@ -4,39 +4,114 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
-	"github.com/robfig/cron/v3"
 	bolt "go.etcd.io/bbolt"
 )
 
 func (en *Engine) Rules() []Rule {
 	en.mu.Lock()
 	defer en.mu.Unlock()
-	items := []Rule{}
-	for _, r := range en.rules {
-		next := cloneRule(r)
-		if en.unsupportedRule(next) {
-			next.Enabled = false
-			next.Status = "unsupported"
-			next.NextRun = time.Time{}
-		}
-		items = append(items, *next)
+	items := make([]Rule, 0, len(en.rules))
+	for _, id := range en.sortedRuleIDsLocked() {
+		items = append(items, en.ruleForDisplayLocked(en.rules[id]))
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	return items
 }
+
+func (en *Engine) sortedRuleIDsLocked() []string {
+	ids := make([]string, 0, len(en.rules))
+	for id := range en.rules {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (en *Engine) ruleForDisplayLocked(r *Rule) Rule {
+	next := cloneRule(r)
+	if en.unsupportedRule(next) {
+		next.Enabled = false
+		next.Status = "unsupported"
+		next.NextRun = time.Time{}
+	}
+	next.timerActive = ruleScheduled(next) && en.timerAllowed(next)
+	return *next
+}
 func (en *Engine) SaveRule(ctx context.Context, in Rule, update bool) (*Rule, error) {
+	return en.saveRule(ctx, in, update, "")
+}
+
+func (en *Engine) saveRule(ctx context.Context, in Rule, update bool, activation string) (*Rule, error) {
 	en.mu.Lock()
 	defer en.mu.Unlock()
+	return en.saveRuleLocked(ctx, in, update, activation)
+}
+
+func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, activation string) (*Rule, error) {
 	if en.closed || en.fault != nil {
 		return nil, fmt.Errorf("unavailable")
 	}
 	if en.unsupportedRule(&in) {
 		return nil, unsupportedQuality()
 	}
-	if e := en.validate(&in.RunConfig); e != nil {
+	old := en.rules[in.ID]
+	if activation != "" {
+		if en.Capabilities().QualityPause || (in.Action != "" && in.Action != "observe_only" && !managedRule(&in)) || in.AutomaticPause || (update && old != nil && en.unsupportedRule(old)) {
+			return nil, unsupportedQuality()
+		}
+		in.Enabled, in.SchedulingEnabled = true, false
+		if update && old != nil {
+			in.Enabled, in.SchedulingEnabled = old.Enabled, old.SchedulingEnabled
+		}
+		switch activation {
+		case "keep":
+		case "start":
+			if old != nil && (old.BlockedAuthID != "" || old.ActionID != "") {
+				return nil, unsupportedQuality()
+			}
+			in.Enabled, in.SchedulingEnabled = true, true
+		case "stop":
+			in.SchedulingEnabled = false
+		default:
+			return nil, fmt.Errorf("invalid_request: unknown timer activation")
+		}
+	}
+	if !en.Capabilities().QualityPause && in.TargetScope == "" && in.AuthID == "" && in.Provider == "" && (!update || old != nil && dynamicScope(old.TargetScope)) {
+		in.TargetScope = scopeAll
+		if old != nil {
+			in.TargetScope = old.TargetScope
+		}
+	}
+	scoped := dynamicScope(in.TargetScope)
+	if in.TargetScope != "" && in.TargetScope != "single" && !scoped {
+		return nil, fmt.Errorf("invalid_request: unknown target scope")
+	}
+	if scoped && (in.AutomaticPause || (in.Action != "" && in.Action != "observe_only" && !managedRule(&in)) || en.Capabilities().QualityPause) {
+		return nil, fmt.Errorf("unsupported: dynamic scope is for official-host observation only")
+	}
+	if update && old != nil {
+		if in.Parameters.MaxTokens == 0 {
+			in.Parameters.MaxTokens = old.Parameters.MaxTokens
+		}
+		if in.Parameters.Temperature == nil {
+			in.Parameters.Temperature = old.Parameters.Temperature
+		}
+		if in.Parameters.ReasoningEffort == "" {
+			in.Parameters.ReasoningEffort = old.Parameters.ReasoningEffort
+		}
+	} else if in.Parameters.ReasoningEffort == "" {
+		in.Parameters.ReasoningEffort = "high"
+	}
+	switch in.Parameters.ReasoningEffort {
+	case "low", "medium", "high", "xhigh", "max":
+	default:
+		// An edit may preserve a retired effort but cannot newly select it.
+		if !update || old == nil || old.Parameters.ReasoningEffort != in.Parameters.ReasoningEffort {
+			return nil, fmt.Errorf("invalid_request: unsupported rule reasoning_effort")
+		}
+	}
+	if e := en.validateConfig(&in.RunConfig, scoped); e != nil {
 		return nil, e
 	}
 	if _, e := FreezeQuestion(in.RunConfig); e != nil {
@@ -45,8 +120,11 @@ func (en *Engine) SaveRule(ctx context.Context, in Rule, update bool) (*Rule, er
 	if in.Action == "" {
 		in.Action = "observe_only"
 	}
-	if in.Action != "observe_only" && in.Action != "pause_credential" {
+	if in.Action != "observe_only" && in.Action != "pause_credential" && !managedRule(&in) {
 		return nil, fmt.Errorf("unsupported action")
+	}
+	if err := en.validateManagedRule(&in, old); err != nil {
+		return nil, err
 	}
 	if len(in.Name) > 128 {
 		return nil, fmt.Errorf("name too long")
@@ -57,36 +135,12 @@ func (en *Engine) SaveRule(ctx context.Context, in Rule, update bool) (*Rule, er
 	if in.FailThreshold < 1 || in.FailThreshold > 100 {
 		return nil, fmt.Errorf("threshold must be 1..100")
 	}
-	if in.Timezone == "" {
-		in.Timezone = "Asia/Shanghai"
-	}
-	if _, e := time.LoadLocation(in.Timezone); e != nil {
-		return nil, fmt.Errorf("invalid timezone")
-	}
-	if in.IntervalSeconds == 0 {
-		in.IntervalSeconds = 3600
-	}
-	if in.IntervalSeconds < 60 || in.IntervalSeconds > 31*86400 {
-		return nil, fmt.Errorf("interval must be 60..2678400 seconds")
-	}
-	if in.Cron != "" {
-		if len(strings.Fields(in.Cron)) != 5 {
-			return nil, fmt.Errorf("cron requires five fields")
-		}
-		if _, e := cron.ParseStandard(in.Cron); e != nil {
-			return nil, fmt.Errorf("invalid cron")
-		}
-	}
-	if in.RetentionDays == 0 {
-		in.RetentionDays = en.cfg.RetentionDays
-	}
-	if in.RetentionDays < 1 || in.RetentionDays > 365 {
-		return nil, fmt.Errorf("retention must be 1..365")
+	if err := prepareResultLimit(&in, old); err != nil {
+		return nil, err
 	}
 	if err := en.storageAdmission(); err != nil {
 		return nil, err
 	}
-	old := en.rules[in.ID]
 	if update {
 		if old == nil {
 			return nil, fmt.Errorf("not_found: rule")
@@ -123,16 +177,43 @@ func (en *Engine) SaveRule(ctx context.Context, in Rule, update bool) (*Rule, er
 	in.EvidenceSignature = ""
 	in.FailCount = 0
 	in.LastRun = ""
+	in.LastScopeBatch = ""
+	in.LastManualSkips = nil
+	if old != nil {
+		in.LastRun, in.LastScopeBatch = old.LastRun, old.LastScopeBatch
+		if in.TargetScope == old.TargetScope {
+			in.LastManualSkips = old.LastManualSkips
+		}
+	}
 	in.IdempotencyKey = ""
-	in.NextRun = nextRun(in, en.now())
+	if err := prepareRuleSchedule(&in, old); err != nil {
+		return nil, err
+	}
+	planned, err := ruleNextInstant(&in, en.now(), time.Local)
+	if err != nil {
+		return nil, err
+	}
 	for _, r := range en.rules {
 		if r.ID != in.ID && r.AuthID == in.AuthID && r.Action == "pause_credential" && in.Action == "pause_credential" {
 			return nil, fmt.Errorf("conflict: one credential permits one pause rule")
 		}
 	}
-	targets, err := en.host.Targets(ctx)
-	if err != nil {
-		return nil, err
+	var targets []Target
+	if !scoped {
+		targets, err = en.host.Targets(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if managedRule(&in) {
+			validationRule := in
+			if update {
+				validationRule.AutoRestore = true
+			}
+			targets, _, err = en.managedTargetsLocked(ctx, &validationRule, targets)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	if in.Action == "pause_credential" {
 		supported := false
@@ -157,8 +238,18 @@ func (en *Engine) SaveRule(ctx context.Context, in Rule, update bool) (*Rule, er
 		in.BlockedAuthID = blocked
 	}
 	in.Status = ruleStatus(&in)
-	in.NextRun = nextRun(in, en.now())
+	switch {
+	case !ruleScheduled(&in):
+		in.NextRun = time.Time{}
+	case old != nil && ruleScheduled(old) && (activation != "start" || en.timerAllowed(old)) && sameRuleSchedule(&in, old) && !old.NextRun.IsZero():
+		in.NextRun = old.NextRun.UTC()
+	default:
+		in.NextRun = planned
+	}
 	c := changes()
+	if activation == "start" || !in.SchedulingEnabled || !in.Enabled {
+		c.timers = en.changedTimer(in.ID, activation == "start")
+	}
 	c.rules[in.ID] = cloneRule(&in)
 	kind := "rule_created"
 	if update {
@@ -169,7 +260,48 @@ func (en *Engine) SaveRule(ctx context.Context, in Rule, update bool) (*Rule, er
 	if err = en.commitLocked(c); err != nil {
 		return nil, err
 	}
-	return cloneRule(&in), nil
+	saved := cloneRule(&in)
+	saved.timerActive = ruleScheduled(saved) && en.timerAllowed(saved)
+	return saved, nil
+}
+
+func (en *Engine) setRuleTimer(ctx context.Context, id string, revision uint64, enabled bool) (*Rule, error) {
+	en.mu.Lock()
+	defer en.mu.Unlock()
+	if err := en.mutableLocked(); err != nil {
+		return nil, err
+	}
+	old := en.rules[id]
+	if old == nil {
+		return nil, fmt.Errorf("not_found: rule")
+	}
+	if old.Revision != revision {
+		return nil, fmt.Errorf("conflict: stale rule revision")
+	}
+	if en.Capabilities().QualityPause || en.unsupportedRule(old) || old.ActionID != "" || old.BlockedAuthID != "" {
+		return nil, unsupportedQuality()
+	}
+	next := cloneRule(old)
+	next.timerActive = ruleScheduled(old) && en.timerAllowed(old)
+	if next.timerActive == enabled {
+		return next, nil
+	}
+	if enabled {
+		return en.saveRuleLocked(ctx, *next, true, "start")
+	}
+	// Stopping a timer must also work while the credential is offline.
+	next.SchedulingEnabled, next.timerActive = false, false
+	next.Revision++
+	resetRule(next)
+	c := changes()
+	c.rules[id] = next
+	c.timers = en.changedTimer(id, false)
+	en.cancelRuleChangesLocked(c, id, "rule_changed")
+	c.audits = append(c.audits, en.audit("rule_schedule_state", id, "", "", "timer stopped"))
+	if err := en.commitLocked(c); err != nil {
+		return nil, err
+	}
+	return cloneRule(next), nil
 }
 
 func (en *Engine) PauseRule(id string, rev uint64, paused bool) error {
@@ -193,7 +325,7 @@ func (en *Engine) PauseRule(id string, rev uint64, paused bool) error {
 		if en.unsupportedRule(r) {
 			return unsupportedQuality()
 		}
-		if r.ActionID != "" {
+		if r.ActionID != "" || !en.Capabilities().QualityPause && r.BlockedAuthID != "" {
 			return fmt.Errorf("blocked: owned pause requires manual release")
 		}
 		targets, err := en.host.Targets(en.ctx)
@@ -226,6 +358,11 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 	if r.Revision != rev {
 		return fmt.Errorf("conflict: stale rule revision")
 	}
+	for _, d := range en.managed {
+		if d.RuleID == id && activeDisposition(d) && d.State != "deleted" {
+			return fmt.Errorf("conflict: resolve the owned credential suspension in CPA before deleting this rule")
+		}
+	}
 	if en.Capabilities().QualityPause {
 		actions, e := en.host.Actions(ctx)
 		if e != nil {
@@ -242,14 +379,28 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 	if r.ActionID != "" {
 		return fmt.Errorf("conflict: reconcile pending action before deleting rule")
 	}
+	drop := make(map[string]bool)
 	for _, run := range en.runs {
-		if run.Config.RuleID == id && (run.Status == "queued" || run.Status == "running") {
+		if run.Config.RuleID != id {
+			continue
+		}
+		if run.CompletedAt == nil || en.active[run.ID] != nil {
 			return fmt.Errorf("conflict: cancel active rule run first")
 		}
+		drop[run.ID] = true
 	}
 	audit := en.audit("rule_deleted", id, "", "", "rule removed without owned pause")
+	timers := en.changedTimer(id, false)
 	if err := en.store.Write(func(tx *bolt.Tx) error {
+		if timers != nil {
+			if err := put(tx, "meta", ruleTimersKey, timers); err != nil {
+				return err
+			}
+		}
 		if err := tx.Bucket([]byte("rules")).Delete([]byte(id)); err != nil {
+			return err
+		}
+		if err := deleteRuleRecords(tx, drop, id); err != nil {
 			return err
 		}
 		return put(tx, "audit", audit.ID, audit)
@@ -258,6 +409,12 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 		return err
 	}
 	delete(en.rules, id)
+	for runID := range drop {
+		delete(en.runs, runID)
+	}
+	if timers != nil {
+		en.timers = timers
+	}
 	return nil
 }
 func (en *Engine) RunRule(ctx context.Context, id string) (*Run, error) {
@@ -266,38 +423,40 @@ func (en *Engine) RunRule(ctx context.Context, id string) (*Run, error) {
 
 // RoundVerdict requires every planned sample and explicit verdicts for every model.
 func RoundVerdict(r *Run) string {
-	if r.Status != "completed" || len(r.Samples) != len(r.Config.Models)*r.Config.Samples {
+	return roundVerdict(r, func(s *Sample) bool { return s.Comparable })
+}
+
+func roundVerdict(r *Run, hasEvidence func(*Sample) bool) string {
+	if r.Status != "completed" || len(r.Config.Models) == 0 || r.Config.Samples < 1 || len(r.Samples) != len(r.Config.Models)*r.Config.Samples {
 		return "unknown"
 	}
-	failedModels := 0
-	allPass := true
-	for _, m := range r.Config.Models {
-		seen := map[int]bool{}
-		failed := false
-		for _, s := range r.Samples {
-			if s.Model != m {
-				continue
-			}
-			if seen[s.Index] || s.Index < 0 || s.Index >= r.Config.Samples || s.ExecutionStatus != "completed" || !s.Comparable || (s.QualityVerdict != "correct" && s.QualityVerdict != "incorrect") {
-				return "unknown"
-			}
-			seen[s.Index] = true
-			if s.QualityVerdict == "incorrect" {
-				failed = true
-			}
-		}
-		if len(seen) != r.Config.Samples {
+	seen := make(map[string][]bool, len(r.Config.Models))
+	for _, model := range r.Config.Models {
+		if seen[model] != nil {
 			return "unknown"
 		}
-		if failed {
-			failedModels++
-			allPass = false
+		seen[model] = make([]bool, r.Config.Samples)
+	}
+	failed := make(map[string]bool)
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		indices := seen[s.Model]
+		if s.Index < 0 || s.Index >= len(indices) || indices[s.Index] || s.ExecutionStatus != "completed" || !hasEvidence(s) {
+			return "unknown"
+		}
+		indices[s.Index] = true
+		switch s.QualityVerdict {
+		case "incorrect":
+			failed[s.Model] = true
+		case "correct":
+		default:
+			return "unknown"
 		}
 	}
-	if failedModels == len(r.Config.Models) {
+	if len(failed) == len(seen) {
 		return "incorrect"
 	}
-	if allPass {
+	if len(failed) == 0 {
 		return "correct"
 	}
 	return "mixed"
@@ -319,7 +478,11 @@ func (en *Engine) decideLocked(run *Run) {
 		return
 	}
 	r.LastRun = run.ID
-	if !en.Capabilities().VerifiedEvidence {
+	if managedRule(r) {
+		en.decideManagedLocked(run, r, c)
+		return
+	}
+	if !en.Capabilities().VerifiedEvidence || dynamicScope(r.TargetScope) {
 		r.FailCount = 0
 		r.EvidenceSignature = ""
 		out.ActionStatus = "observe_only"

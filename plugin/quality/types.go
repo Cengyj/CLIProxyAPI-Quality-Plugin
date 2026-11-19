@@ -7,9 +7,14 @@ import (
 	"time"
 )
 
-const Version = "0.15.0"
+const Version = "0.29.26"
+
+const maxRuleModels = 50
+const maxManualModels = 16
 
 type HostCapabilities struct {
+	CredentialManagement bool   `json:"credential_management"`
+	ManagementSession    bool   `json:"management_session"`
 	Mode                 string `json:"mode"`
 	QualityPause         bool   `json:"quality_pause"`
 	ManualRelease        bool   `json:"manual_release"`
@@ -57,7 +62,7 @@ func DefaultConfig() Config {
 	return Config{DataDir: "model-quality-data", Workers: 2, Queue: 32, MaxModels: 8, MaxSamples: 32, MaxOutputTokens: 4096, MaxResponseBytes: 262144, DailyCalls: 200, DailyTokens: 1000000, RetentionDays: 30, MaxStorageBytes: 128 << 20}
 }
 func (c Config) Validate() error {
-	if c.DataDir == "" || c.Workers < 1 || c.Workers > 16 || c.Queue < 1 || c.Queue > 1024 || c.MaxModels < 1 || c.MaxModels > 16 || c.MaxSamples < 1 || c.MaxSamples > 128 || c.MaxOutputTokens < 16 || c.MaxOutputTokens > 32768 || c.MaxResponseBytes < 1024 || c.MaxResponseBytes > 2<<20 || c.DailyCalls < 1 || c.DailyTokens < 1 || c.RetentionDays < 1 || c.RetentionDays > 365 || c.MaxStorageBytes < 1<<20 {
+	if c.DataDir == "" || c.Workers < 1 || c.Workers > 16 || c.Queue < 1 || c.Queue > 1024 || c.MaxModels < 1 || c.MaxModels > maxRuleModels || c.MaxSamples < 1 || c.MaxSamples > 128 || c.MaxOutputTokens < 16 || c.MaxOutputTokens > 32768 || c.MaxResponseBytes < 1024 || c.MaxResponseBytes > 2<<20 || c.DailyCalls < 1 || c.DailyTokens < 1 || c.RetentionDays < 1 || c.RetentionDays > 365 || c.MaxStorageBytes < 1<<20 {
 		return fmt.Errorf("invalid resource limits")
 	}
 	return nil
@@ -102,9 +107,13 @@ type Question struct {
 	Family  string `json:"family,omitempty"`
 }
 type Frozen struct {
-	JudgeIdentity      string `json:"judge_identity,omitempty"`
-	ControlIdentity    string `json:"control_identity,omitempty"`
-	ComparisonIdentity string `json:"comparison_identity,omitempty"`
+	ManagedProbe       *CredentialSnapshot `json:"managed_probe,omitempty"`
+	ScopeBatchID       string              `json:"scope_batch_id,omitempty"`
+	SubjectIndex       string              `json:"subject_auth_index,omitempty"`
+	Scheduled          bool                `json:"scheduled_dispatch,omitempty"`
+	JudgeIdentity      string              `json:"judge_identity,omitempty"`
+	ControlIdentity    string              `json:"control_identity,omitempty"`
+	ComparisonIdentity string              `json:"comparison_identity,omitempty"`
 	RunConfig
 	Question             Question `json:"question"`
 	IdentityVersion      string   `json:"identity_version"`
@@ -131,6 +140,7 @@ type Evidence struct {
 	Path                 string `json:"path"`
 }
 type Sample struct {
+	AnswerMatch     string   `json:"answer_match,omitempty"`
 	Model           string   `json:"model"`
 	Index           int      `json:"index"`
 	ExecutionStatus string   `json:"execution_status"`
@@ -149,6 +159,8 @@ type Sample struct {
 	ReviewNote      string   `json:"review_note,omitempty"`
 }
 type Run struct {
+	CredentialEmail string     `json:"credential_email,omitempty"`
+	PrunedSamples   int        `json:"pruned_samples,omitempty"`
 	BlockReason     string     `json:"block_reason,omitempty"`
 	Controls        []Sample   `json:"controls,omitempty"`
 	ID              string     `json:"id"`
@@ -163,23 +175,30 @@ type Run struct {
 	CancelRequested bool       `json:"cancel_requested"`
 }
 type Rule struct {
-	IntentRevision    uint64 `json:"intent_revision,omitempty"`
-	Status            string `json:"status"`
-	BlockedAuthID     string `json:"blocked_auth_id,omitempty"`
-	EvidenceSignature string `json:"evidence_signature,omitempty"`
-	ID                string `json:"id"`
-	Revision          uint64 `json:"revision"`
-	Name              string `json:"name"`
+	AutoRestore       bool `json:"auto_restore,omitempty"`
+	timerActive       bool
+	TargetScope       string   `json:"target_scope,omitempty"`
+	LastScopeBatch    string   `json:"last_scope_batch,omitempty"`
+	LastManualSkips   []string `json:"last_manual_skips,omitempty"`
+	IntentRevision    uint64   `json:"intent_revision,omitempty"`
+	Status            string   `json:"status"`
+	BlockedAuthID     string   `json:"blocked_auth_id,omitempty"`
+	EvidenceSignature string   `json:"evidence_signature,omitempty"`
+	ID                string   `json:"id"`
+	Revision          uint64   `json:"revision"`
+	Name              string   `json:"name"`
 	RunConfig
 	Action             string    `json:"action"`
 	Enabled            bool      `json:"enabled"`
 	SchedulingEnabled  bool      `json:"scheduling_enabled"`
 	AutomaticPause     bool      `json:"automatic_pause"`
-	IntervalSeconds    int       `json:"interval_seconds"`
+	IntervalSeconds    int       `json:"interval_seconds,omitempty"`
 	Cron               string    `json:"cron,omitempty"`
-	Timezone           string    `json:"timezone"`
+	Timezone           string    `json:"timezone,omitempty"`
 	FailThreshold      int       `json:"fail_threshold"`
-	RetentionDays      int       `json:"retention_days"`
+	MaxResults         int       `json:"max_results,omitempty"`
+	RetentionMode      string    `json:"retention_mode,omitempty"`
+	RetentionDays      int       `json:"retention_days,omitempty"`
 	FailCount          int       `json:"fail_count"`
 	NextRun            time.Time `json:"next_run"`
 	LastRun            string    `json:"last_run,omitempty"`
@@ -189,6 +208,10 @@ type Rule struct {
 	IdentityVersion    string    `json:"identity_version,omitempty"`
 }
 type Target struct {
+	Email                string   `json:"email,omitempty"`
+	CredentialHandling   string   `json:"credential_handling,omitempty"`
+	RuntimeStatus        string   `json:"runtime_status,omitempty"`
+	RetainedPause        bool     `json:"retained_pause,omitempty"`
 	PayloadConfigVersion string   `json:"payload_config_version"`
 	ComparisonIdentity   string   `json:"comparison_identity,omitempty"`
 	AuthID               string   `json:"auth_id"`
@@ -220,6 +243,7 @@ type Action struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 type Execution struct {
+	ManagedProbe                                    *CredentialSnapshot
 	ResponseLimit                                   int
 	AuthID, Provider, Model, Prompt, Source, System string
 	Parameters                                      Parameters

@@ -111,7 +111,7 @@ func TestSecurityResetRetainsConfirmedSeedWhenLogoutIsUnknown(t *testing.T) {
 		if err := writeSecurityFixture(in, v); err != nil {
 			return "", err
 		}
-		return "", errors.New("runtime_failed")
+		return "", &runtimeDiagnosticError{code: "runtime_failed", stage: "logout_all", reason: "network_timeout", runtimeCode: "timeout"}
 	}}
 	s := offlineService(t, opts)
 	a := importOfflineAccount(t, s)
@@ -123,6 +123,17 @@ func TestSecurityResetRetainsConfirmedSeedWhenLogoutIsUnknown(t *testing.T) {
 	detail, err := s.AccountDetail(a.ID)
 	if err != nil || !job.TOTPReset || job.DevicesLoggedOut || detail.Credentials.TOTPSecret != securityFixtureSeed || !detail.Account.SecurityPending {
 		t.Fatal("uncertain logout rolled back the confirmed seed or claimed success")
+	}
+	if job.ErrorStage != "logout_all" || job.ErrorReason != "network_timeout" || job.RuntimeCode != "timeout" {
+		t.Fatal("security quarantine discarded the originating runtime diagnosis")
+	}
+	logs, err := s.Logs(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := logs.Entries[len(logs.Entries)-1]
+	if last.Status != "security_uncertain" || !last.TOTPReset || last.DevicesLoggedOut || last.RuntimeCode != "timeout" || last.ErrorStage != "logout_all" {
+		t.Fatalf("uncertain mutation diagnostic is incomplete: %+v", last)
 	}
 	if _, err = s.StartAccountSecurity(a.ID, detail.Account.Revision, "logout_all", false, false); err == nil || calls.Load() != 1 {
 		t.Fatal("uncertain logout was allowed to replay")
@@ -231,7 +242,7 @@ func TestSecurityUnknownActivationBlocksOtherEntryPointsAcrossRestart(t *testing
 	assertBlocked := func(s *Service) {
 		t.Helper()
 		detail, err := s.AccountDetail(a.ID)
-		if err != nil || !detail.Account.SecurityPending || detail.SecurityRecovery == nil || detail.SecurityRecovery.NewTOTPSecret != securityFixtureSeed || detail.SecurityRecovery.ActivationConfirmed {
+		if err != nil || !detail.Account.SecurityPending || detail.SecurityRecovery == nil || detail.SecurityRecovery.NewTOTPSecret != "" || detail.SecurityRecovery.ActivationConfirmed {
 			t.Fatal("uncertain activation did not preserve pending recovery material")
 		}
 		if _, err = s.StartAccount(a.ID, detail.Account.Revision, ""); err == nil {

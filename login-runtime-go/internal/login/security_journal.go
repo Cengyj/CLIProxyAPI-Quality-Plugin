@@ -3,9 +3,11 @@ package login
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/MoeForge/moego/ojson"
 )
@@ -30,6 +32,14 @@ type SecurityJournal struct {
 	ActivationStatus       string `json:"activation_status"`
 	ActivationConfirmation string `json:"activation_confirmation"`
 	LogoutStatus           string `json:"logout_status"`
+	FirstEnrollStatus      string `json:"first_enroll_status"`
+	ConfirmationDigest     string `json:"confirmation_digest"`
+	PostConflictState      string `json:"post_conflict_state"`
+	InitialState           string `json:"initial_state"`
+	InitialEnrollStatus    string `json:"initial_enroll_status"`
+	DisableConfirmation    string `json:"disable_confirmation"`
+	ActivationVerifiedAt   string `json:"activation_verified_at"`
+	LocalCommit            string `json:"local_commit"`
 }
 
 type securityJournal struct {
@@ -40,7 +50,7 @@ type securityJournal struct {
 }
 
 func newSecurityJournal(in Input) (*securityJournal, error) {
-	j := &securityJournal{SecurityJournal: SecurityJournal{Version: 1, JobID: in.JobID, Attempt: in.Attempt, Operation: in.Operation, Email: in.Credentials.Email, Status: "running", DisableStatus: "not_requested", EnrollStatus: "not_requested", ActivationStatus: "not_requested", LogoutStatus: "not_requested"}, path: in.SecurityJournalPath}
+	j := &securityJournal{SecurityJournal: SecurityJournal{Version: 3, JobID: in.JobID, Attempt: in.Attempt, Operation: in.Operation, Email: in.Credentials.Email, Status: "running", DisableStatus: "not_requested", EnrollStatus: "not_requested", ActivationStatus: "not_requested", LogoutStatus: "not_requested", InitialEnrollStatus: "not_requested", FirstEnrollStatus: "not_requested", LocalCommit: "pending"}, path: in.SecurityJournalPath}
 	if err := j.save("security_check"); err != nil {
 		return nil, err
 	}
@@ -138,7 +148,7 @@ func (j *securityJournal) finishFailure() error {
 		return nil
 	}
 	j.Status = "failed"
-	for _, state := range []string{j.DisableStatus, j.EnrollStatus, j.ActivationStatus, j.LogoutStatus} {
+	for _, state := range []string{j.DisableStatus, j.InitialEnrollStatus, j.EnrollStatus, j.ActivationStatus, j.LogoutStatus} {
 		if state == "pending" || state == "unknown" {
 			j.Status = "unknown"
 		}
@@ -150,4 +160,9 @@ func (j *securityJournal) currentSecret(previous string) string {
 		return j.NewTOTPSecret
 	}
 	return previous
+}
+
+func (j SecurityJournal) confirmationDigest() string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{j.JobID, j.AccountID, j.Email, j.NewTOTPSecret, j.EnrollmentSessionID, j.NewFactorID, j.ActivationConfirmation, j.ActivationVerifiedAt}, "\x00")))
+	return hex.EncodeToString(sum[:])
 }

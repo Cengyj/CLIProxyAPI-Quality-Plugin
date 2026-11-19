@@ -20,7 +20,7 @@ func ManagementRoutes() []map[string]string {
 	for _, p := range []string{"/capabilities", "/targets", "/jobs", "/logs", "/detail", "/candidate", "/vault/status", "/accounts", "/accounts/detail", "/accounts/settings"} {
 		routes = append(routes, map[string]string{"method": "GET", "path": RoutePrefix + p})
 	}
-	for _, p := range []string{"/start", "/callback", "/cancel", "/discard", "/commit", "/accounts/import", "/accounts/start", "/accounts/inspect", "/accounts/security", "/accounts/security/complete"} {
+	for _, p := range []string{"/start", "/callback", "/cancel", "/discard", "/commit", "/accounts/import", "/accounts/start", "/accounts/inspect", "/accounts/security", "/accounts/security/complete", "/conversion/preview", "/conversion/upload"} {
 		routes = append(routes, map[string]string{"method": "POST", "path": RoutePrefix + p})
 	}
 	for _, p := range []string{"/vault/entry", "/accounts/entry"} {
@@ -28,6 +28,7 @@ func ManagementRoutes() []map[string]string {
 			routes = append(routes, map[string]string{"method": method, "path": RoutePrefix + p})
 		}
 	}
+	routes = append(routes, map[string]string{"method": "DELETE", "path": RoutePrefix + "/jobs"})
 	routes = append(routes, map[string]string{"method": "PUT", "path": RoutePrefix + "/accounts/settings"})
 	return routes
 }
@@ -66,12 +67,18 @@ func (s *Service) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 		var value any
 		var err error
 		limit := 200
+		accountID := ""
 		var cursor uint64
 		for k, v := range req.Query {
 			if len(v) != 1 {
 				return errorReply(errors.New("invalid_request"))
 			}
 			switch k {
+			case "account_id":
+				if path != "/jobs" || v[0] == "" || len(v[0]) > 512 {
+					return errorReply(errors.New("invalid_request"))
+				}
+				accountID = v[0]
 			case "id", "auth_id":
 				if len(v[0]) > 8192 {
 					return errorReply(errors.New("invalid_request"))
@@ -102,19 +109,25 @@ func (s *Service) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 		case "/targets":
 			value = map[string]any{"items": s.Targets()}
 		case "/jobs":
-			items := s.Jobs()
-			if len(items) > limit {
-				items = items[:limit]
-			}
-			value = map[string]any{"items": items}
+			var items []Job
+			var more bool
+			items, more, err = s.JobsPage(accountID, limit)
+			value = map[string]any{"items": items, "has_more": more}
 		case "/logs":
 			var logs JobLogs
 			logs, err = s.Logs(req.Query.Get("id"))
 			filtered := []LogEntry{}
+			logs.NextCursor = cursor
 			for _, entry := range logs.Entries {
-				if entry.ID > cursor && len(filtered) < limit {
-					filtered = append(filtered, entry)
+				if entry.ID <= cursor {
+					continue
 				}
+				if len(filtered) == limit {
+					logs.HasMore = true
+					break
+				}
+				filtered = append(filtered, entry)
+				logs.NextCursor = entry.ID
 			}
 			logs.Entries = filtered
 			value = logs
@@ -154,8 +167,19 @@ func (s *Service) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 	if path == "/accounts/import" {
 		limit = 512 << 10
 	}
+	if isConversionPath(path) {
+		limit = 4 << 20
+	}
 	if len(req.Query) != 0 || len(req.Body) > limit {
 		return errorReply(errors.New("invalid_request"))
+	}
+	// A preview is a pure transformation; never cache its token-bearing response.
+	if path == "/conversion/preview" {
+		value, err := s.conversionPreview(req.Body)
+		if err != nil {
+			return errorReply(err)
+		}
+		return reply(200, value)
 	}
 	body, err := s.Idempotent(req.Headers.Get("Idempotency-Key"), req.Method+path, req.Body, func() (any, error) { return s.write(ctx, req.Method, path, req.Body) })
 	if err != nil {
@@ -166,6 +190,9 @@ func (s *Service) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 	return r
 }
 func (s *Service) write(ctx context.Context, method, path string, raw []byte) (any, error) {
+	if path == "/conversion/upload" && method == http.MethodPost {
+		return s.uploadConversion(ctx, raw)
+	}
 	if strings.HasPrefix(path, "/accounts/") {
 		return credentialAccountWrite(s, method, path, raw)
 	}
@@ -221,6 +248,14 @@ func (s *Service) write(ctx context.Context, method, path string, raw []byte) (a
 		return nil, errors.New("invalid_request")
 	}
 	switch path {
+	case "/jobs":
+		if !r.Get("revision").Exists() {
+			return nil, errors.New("invalid_request")
+		}
+		if err := s.DeleteJob(id, r.Get("revision").Uint()); err != nil {
+			return nil, err
+		}
+		return map[string]bool{"deleted": true}, nil
 	case "/callback":
 		return s.Callback(id, r.Get("callback_url").String())
 	case "/cancel":

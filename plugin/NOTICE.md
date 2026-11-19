@@ -1,5 +1,9 @@
 # Source acknowledgements
 
+The horizontal workspace navigation uses static Lucide
+1.8.0 icons (ISC, with the Feather MIT notice for derived icons). The
+license is retained in `licenses/lucide.txt` and in the embedded HTML.
+
 The native C ABI scaffolding is adapted from the CLIProxyAPI host-model-callback example in the supplied 8.0.67 source archive. CLIProxyAPI is MIT licensed; its notice is retained in CPA_LICENSE. The public /v8 SDK is a separate dependency.
 
 sub2api (https://github.com/ranxi2001/sub2api) commit ccf997c73868083d96c0bec56e71c1a34d26c98a was studied as an architectural reference. Its root LICENSE is LGPL-3.0. The candy question text in `quality/questiondata/candy-sub2api.txt` is copied verbatim from `CANDY_PROMPT` in `frontend/src/utils/intelligenceTest.ts` at that commit and remains under LGPL-3.0; it is not relicensed under this plugin's MIT license. No original copyright notice was present in that source file. The upstream license and the incorporated GPL-3.0 terms are retained in `licenses/sub2api-LGPL-3.0.txt` and `licenses/GPL-3.0.txt`. The copied text is supplied with the plugin source and embedded into the dynamic library; rebuilding the supplied module regenerates the embedded question.
@@ -81,3 +85,12 @@ its own NOTICE, source inventories and dependency licenses preserved inside the
 embedded archive. See `login-runtime-go/NOTICE.md`: the user-supplied toSub2-go-port
 checkout has no root project license, so this notice does not infer a whole-project
 MIT license for that engine.
+
+## Account controls visual reference
+
+The reset option controls and two-row account action layout were studied in
+the user-supplied, read-only `toSub2-go-port-2026.11.17/web/src/components/accounts.jsx`,
+`account-actions.css` and `web/src/styles.css`. The plugin implements its own
+native controls using CPA theme roles, its existing two security options and
+existing account actions. No React components or third-party CSS are bundled.
+The reference file hashes and final scope are recorded with UI 12.7.0 artifacts.

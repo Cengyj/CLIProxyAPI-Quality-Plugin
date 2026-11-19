@@ -16,8 +16,8 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_VERSION = '2.1.0'
-PLUGIN_VERSION = '0.15.0'
+RUNTIME_VERSION = '2.2.1'
+PLUGIN_VERSION = '0.29.26'
 ENGINE = 'go_sobek_protocol'
 MODULE = 'github.com/router-for-me/CLIProxyAPI/v8'
 

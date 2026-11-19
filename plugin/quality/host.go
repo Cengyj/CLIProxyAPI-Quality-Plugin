@@ -16,6 +16,7 @@ import (
 
 type Callback func(method string, request, response any) error
 type NativeHost struct {
+	Management       *ManagementClient
 	Call             Callback
 	MaxResponseBytes int
 }
@@ -37,7 +38,12 @@ func (h *NativeHost) Check() error {
 	return h.call(context.Background(), "host.auth.list", struct{}{}, &response)
 }
 
-func (h *NativeHost) Capabilities() HostCapabilities { return officialCapabilities() }
+func (h *NativeHost) Capabilities() HostCapabilities {
+	c := officialCapabilities()
+	c.CredentialManagement = h.Management != nil
+	c.ManagementSession = h.Management != nil && h.Management.ready()
+	return c
+}
 
 func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 	var listed struct {
@@ -50,9 +56,25 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 	if err := h.call(ctx, "host.auth.models", pluginapi.HostAuthModelsRequest{}, &catalog); err != nil {
 		return nil, err
 	}
-	models := make(map[string][]string, len(catalog.Credentials))
+	models := make(map[string]pluginapi.HostAuthModels, len(catalog.Credentials))
 	for _, item := range catalog.Credentials {
-		models[item.ID] = append([]string{}, item.Models...)
+		if _, duplicate := models[item.AuthIndex]; duplicate {
+			models[item.AuthIndex] = pluginapi.HostAuthModels{}
+		} else {
+			models[item.AuthIndex] = item
+		}
+	}
+	// Some config-backed keys appear only in the model catalog. Report them as unknown
+	// if the official runtime callback cannot verify them, rather than hiding or testing them.
+	listedIDs := make(map[string]bool, len(listed.Files))
+	for _, item := range listed.Files {
+		listedIDs[item.ID] = item.AuthIndex != "" || listedIDs[item.ID]
+	}
+	for _, item := range catalog.Credentials {
+		if !listedIDs[item.ID] && item.ID != "" && item.AuthIndex != "" {
+			listed.Files = append(listed.Files, pluginapi.HostAuthFileEntry{ID: item.ID, AuthIndex: item.AuthIndex, Provider: item.Provider})
+			listedIDs[item.ID] = true
+		}
 	}
 	out := make([]Target, 0, len(listed.Files))
 	seen := make(map[string]bool)
@@ -61,6 +83,12 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 			continue
 		}
 		seen[item.ID] = true
+		// CPA's file inventory already contains the same runtime projection as
+		// get_runtime. Disk-only fallback entries have no runtime ID or index.
+		if item.Status != "" && item.Source == "file" && item.Provider != "" {
+			out = append(out, runtimeTarget(item, models[item.AuthIndex], true))
+			continue
+		}
 		var current pluginapi.HostAuthGetRuntimeResponse
 		err := h.call(ctx, "host.auth.get_runtime", pluginapi.HostAuthGetRequest{AuthIndex: item.AuthIndex}, &current)
 		if err := ctx.Err(); err != nil {
@@ -70,29 +98,53 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 		if verified {
 			item = current.Auth
 		}
-		provider := item.Provider
-		if provider == "" {
-			provider = item.Type
-		}
-		reasons := []string{}
-		disabled := item.Disabled || item.Status == "disabled"
-		if disabled {
-			reasons = append(reasons, "operator_disabled")
-		}
-		if item.Unavailable {
-			reasons = append(reasons, "native_unavailable")
-		}
-		if !verified {
-			reasons = append(reasons, "runtime_status_unavailable")
-		}
-		out = append(out, Target{
-			AuthID: item.ID, AuthIndex: item.AuthIndex, Provider: provider, Type: item.Type,
-			Models: append([]string{}, models[item.ID]...), Reasoning: map[string]any{},
-			ManualDisabled: disabled, EffectiveAvailable: verified && !disabled && !item.Unavailable,
-			Reasons: reasons, UnsupportedReason: "official_host_quality_pause_unavailable",
-		})
+		out = append(out, runtimeTarget(item, models[item.AuthIndex], verified))
 	}
 	return out, nil
+}
+
+// A scoped child rechecks only its frozen credential, never a substitute or the whole directory.
+func (h *NativeHost) pinnedTarget(ctx context.Context, id, index string) (Target, error) {
+	var catalog pluginapi.HostAuthModelsResponse
+	if err := h.call(ctx, "host.auth.models", pluginapi.HostAuthModelsRequest{AuthIndex: index}, &catalog); err != nil {
+		return Target{}, err
+	}
+	var current pluginapi.HostAuthGetRuntimeResponse
+	if err := h.call(ctx, "host.auth.get_runtime", pluginapi.HostAuthGetRequest{AuthIndex: index}, &current); err != nil {
+		return Target{}, err
+	}
+	var entry pluginapi.HostAuthModels
+	if len(catalog.Credentials) == 1 {
+		entry = catalog.Credentials[0]
+	}
+	return runtimeTarget(current.Auth, entry, current.Auth.ID == id && current.Auth.AuthIndex == index), nil
+}
+
+func runtimeTarget(item pluginapi.HostAuthFileEntry, catalog pluginapi.HostAuthModels, verified bool) Target {
+	provider := item.Provider
+	if provider == "" {
+		provider = item.Type
+	}
+	t := Target{AuthID: item.ID, AuthIndex: item.AuthIndex, Email: item.Email, Provider: provider, Type: item.Type, RuntimeStatus: item.Status,
+		ManualDisabled: item.Disabled || item.Status == "disabled", Models: []string{}, Reasoning: map[string]any{}, Reasons: []string{}, UnsupportedReason: "official_host_quality_pause_unavailable"}
+	if t.ManualDisabled {
+		t.Reasons = append(t.Reasons, "operator_disabled")
+	}
+	if item.Unavailable {
+		t.Reasons = append(t.Reasons, "native_unavailable")
+	}
+	if item.NextRetryAfter.After(time.Now()) {
+		t.Reasons = append(t.Reasons, "native_cooldown")
+	}
+	if !verified || item.Status == "" {
+		t.RuntimeStatus = "unknown"
+		t.Reasons = append(t.Reasons, "runtime_status_unavailable")
+	}
+	t.EffectiveAvailable = len(t.Reasons) == 0
+	if verified && provider != "" && item.ID == catalog.ID && item.AuthIndex == catalog.AuthIndex && provider == catalog.Provider {
+		t.Models = append(t.Models, catalog.Models...)
+	}
+	return t
 }
 func (h *NativeHost) Actions(ctx context.Context) ([]Action, error) {
 	if err := ctx.Err(); err != nil {
@@ -113,6 +165,9 @@ func (h *NativeHost) Release(ctx context.Context, _ Action) error {
 	return unsupportedQuality()
 }
 func (h *NativeHost) Execute(ctx context.Context, e Execution) (s Sample) {
+	if e.ManagedProbe != nil {
+		return h.executeManaged(ctx, e)
+	}
 	start := time.Now()
 	s = Sample{Model: e.Model, ExecutionStatus: "failed", QualityVerdict: "unknown", Evidence: Evidence{Reason: "official_host_evidence_unavailable"}}
 	defer func() {

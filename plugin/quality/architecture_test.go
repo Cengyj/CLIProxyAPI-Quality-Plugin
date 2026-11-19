@@ -12,6 +12,15 @@ type schedulerTestHost struct {
 	entered chan string
 }
 
+func (en *Engine) execute(id string) {
+	en.mu.Lock()
+	task := en.claimRunLocked(id)
+	en.mu.Unlock()
+	if task != nil {
+		en.executeTask(task)
+	}
+}
+
 func (h *schedulerTestHost) Execute(ctx context.Context, e Execution) Sample {
 	h.entered <- e.AuthID
 	<-ctx.Done()

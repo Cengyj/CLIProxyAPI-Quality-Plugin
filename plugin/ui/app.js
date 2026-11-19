@@ -9,18 +9,22 @@ import {
   holdsPause,
   items,
   parseModels,
+  ruleModelShortcuts,
+  splitRuleModels,
   safePreview,
-  statusLabels,
   statusTag,
-  tag,
   targetID,
   renderRunEvidence,
+  renderQualityDetail,
+  renderManualVerdict,
   renderSampleEvidence,
   renderRuleRows,
-  renderTargetRows,
-  renderActionItems,
+  dynamicScopeLabel,
+  renderQualityRuns,
+  renderQualityEmpty,
+  ruleState,
   renderReleasePreview,
-  sourceLabel,
+  questionTitle,
   questionTestSelection,
 } from './view.js';
 
@@ -34,20 +38,21 @@ const state = {
   actions: [],
   runs: [],
   run: null,
+  pendingManual: null,
   historyOffset: 0,
   historyTotal: 0,
   poll: null,
   pollFailures: 0,
   release: null,
   settings: {},
-  page: 'manual',
+  scopeBatch: '', scopeRule: '', batchOffset: 0, activityTotal: 0, activityRows: null,
+  page: 'login',
   manualView: 'results',
   readingExpanded: false,
-  opsView: 'attention',
   releaseBlocked: true,
   releaseAction: null,
   compareRun: null,
-  reads: { run: 0, history: 0, operations: 0, refresh: 0, preview: 0, editor: 0 },
+  reads: { run: 0, history: 0, activity: 0, operations: 0, refresh: 0, preview: 0, editor: 0 },
   busy: new Set(),
   editor: null,
   resourceStatus: {},
@@ -59,6 +64,8 @@ const findTarget = (id) => state.targets.find((target) => targetID(target) === i
 const ruleHeld = (rule) => holdsPause(rule, state.targets);
 const managementPrefix = '/v0/management/plugins/model-quality';
 const managementKeyStorage = `model-quality:management-key:${managementPrefix}`;
+const shortcutStorage = `model-quality:rule-model-shortcuts:${managementPrefix}`;
+let selectedRuleModels = [], customShortcuts = [], shortcutsLoaded = false, shortcutStorageNote = '';
 const client = new ManagementClient(managementPrefix, (key) =>
   disconnect('管理鉴权已失效，请重新连接。', true, { expectedKey: key }),
 );
@@ -111,7 +118,7 @@ function initializeTheme() {
 }
 
 let noticeTimer;
-const feedbackScope = () => `${state.page}:${state.page === 'manual' ? state.manualView : state.opsView}`;
+const feedbackScope = () => `${state.page}:${state.page === 'manual' ? state.manualView : ''}`;
 function clearNotice() {
   clearTimeout(noticeTimer);
   $('notice').classList.add('hidden');
@@ -167,12 +174,16 @@ function actionDialog({ title, description, confirm = '确认', input = false, d
 }
 
 function editorSnapshot(id) {
-  return JSON.stringify([...$(id).querySelectorAll('input,select,textarea')].map((field) => [field.id, field.type === 'checkbox' ? field.checked : field.value]));
+  const fields = [...$(id).querySelectorAll('input,select,textarea')].filter(field => !field.hasAttribute('data-preference')).map((field) => [field.id, ['checkbox','radio'].includes(field.type) ? field.checked : field.value]);
+  return JSON.stringify(id === 'rule-dialog' ? [fields, selectedRuleModels] : fields);
 }
 function editorDirty() { return state.editor && state.editor.snapshot !== editorSnapshot(state.editor.id); }
 function updateEditorDirty() {
   if (!state.editor) return;
-  $(state.editor.id).querySelector('.editor-dirty').textContent = editorDirty() ? '有未保存更改' : '尚未更改';
+  const indicator = $(state.editor.id).querySelector('.editor-dirty'), dirty = editorDirty();
+  if (indicator.dataset.changed === String(dirty)) return;
+  indicator.dataset.changed = String(dirty);
+  indicator.textContent = dirty ? '有未保存更改' : state.editor.id === 'rule-dialog' ? '' : '尚未更改';
 }
 function protectEditor(action) {
   if (state.editor?.saving) { notice('正在保存当前编辑，请等待结果。'); return; }
@@ -186,16 +197,18 @@ async function saveEditor(action) {
   editor.saving = true;
   const controls = [...$(editor.id).querySelectorAll('input,select,textarea,button')].map((node) => [node, node.disabled]);
   controls.forEach(([node]) => { node.disabled = true; });
+  let failedField;
   try { await action(editor); }
+  catch (error) { failedField = error.field; throw error; }
   finally {
     editor.saving = false;
     controls.forEach(([node, disabled]) => { node.disabled = disabled; });
-    if (state.editor === editor) $(editor.id).querySelector('[aria-invalid="true"]')?.focus();
+    if (state.editor === editor && failedField) $(failedField).focus();
     renderAdmission();
   }
 }
 
-function fieldError(id, message) {
+function markFieldError(id, message) {
   const field = $(id);
   const errorID = `${id}-error`;
   let feedback = $(errorID);
@@ -204,14 +217,20 @@ function fieldError(id, message) {
     feedback.id = errorID;
     feedback.className = 'field-error';
     feedback.setAttribute('role', 'alert');
-    field.after(feedback);
+    (field.closest('.rule-stepper') || field).after(feedback);
   }
   feedback.textContent = message;
   field.setAttribute('aria-invalid', 'true');
-  field.setAttribute('aria-describedby', [field.getAttribute('aria-describedby'), errorID].filter(Boolean).join(' '));
+  field.setAttribute('aria-describedby', [...new Set((field.getAttribute('aria-describedby') || '').split(' ').filter(Boolean).concat(errorID))].join(' '));
   field.closest('details')?.setAttribute('open', '');
   field.focus();
-  throw new Error(message);
+}
+
+function fieldError(id, message) {
+  markFieldError(id, message);
+  const error = new Error(message);
+  error.field = id;
+  throw error;
 }
 
 async function safely(action, key = '', button = null) {
@@ -220,7 +239,8 @@ async function safely(action, key = '', button = null) {
   const scope = feedbackScope();
   if (key) document.querySelectorAll('.dialog-message').forEach((node) => node.remove());
   const originalContent = button ? [...button.childNodes] : [];
-  const busyLabel = key.includes('save') || key === 'save-rule' ? '保存中…' : key.includes('refresh') ? '读取状态中…' : key === 'connect' ? '连接中…' : key === 'submit-run' ? '提交中…' : '';
+  if (key === 'submit-run') renderAdmission();
+  const busyLabel = key.includes('save') || key === 'save-rule' ? '保存中…' : key.includes('refresh') ? '读取状态中…' : key === 'connect' ? '连接中…' : '';
   if (button) {
     button.style.minWidth = `${button.getBoundingClientRect().width}px`;
     button.disabled = true;
@@ -230,7 +250,7 @@ async function safely(action, key = '', button = null) {
   try {
     return await action();
   } catch (error) {
-    if (!isDiscarded(error) && scope === feedbackScope()) notice(error.message || '操作失败，请重试。', true);
+    if (!isDiscarded(error) && scope === feedbackScope() && !(key === 'save-rule' && error.field)) notice(error.message || '操作失败，请重试。', true);
   } finally {
     if (key) state.busy.delete(key);
     if (button) {
@@ -329,8 +349,10 @@ function disconnect(
     actions: [],
     runs: [],
     run: null,
+    pendingManual: null,
+    pollFailures: 0,
     release: null,
-    settings: {},
+    settings: {}, scopeBatch: '', scopeRule: '', batchOffset: 0, activityTotal: 0, activityRows: null,
     historyOffset: 0,
     historyTotal: 0,
     resourceStatus: {},
@@ -348,8 +370,9 @@ function disconnect(
     $(id).value !== undefined ? ($(id).value = '') : $(id).replaceChildren();
   $('safe-preview').srcdoc = '';
   $('rule-form').reset();
-  $('settings-form').reset();
-  $('settings-fields').replaceChildren();
+  selectedRuleModels = [];
+  $('rule-model-selection').replaceChildren();
+  $('ops-batch-bar').hidden = true;
   for (const id of ['action-title', 'action-description', 'action-error', 'local-feedback']) $(id).textContent = '';
   document.body.classList.remove('connected');
   $('connection-state').textContent = '未连接';
@@ -366,23 +389,16 @@ function disconnect(
   $('evidence-content').replaceChildren();
   $('release-feedback').replaceChildren();
   $('release-feedback').classList.add('hidden');
-  for (const id of ['rule-dialog', 'settings-dialog']) $(id).classList.add('hidden');
-  $('operations-main').classList.remove('hidden');
+  $('rule-search').value = '';
+  $('rule-filter').value = 'all';
   setManualView('setup');
   $('data-state').textContent = failed ? '管理连接失效，请重新连接' : '管理接口未连接';
   $('data-state').classList.add('stale');
-  $('run-content').classList.add('hidden');
-  $('task-actions').classList.add('hidden');
-  $('run-empty').classList.remove('hidden');
-  $('task-indicator').textContent = '';
-  for (const id of ['run-rerun', 'run-export', 'run-cancel']) $(id).classList.add('hidden');
-  for (const id of ['run-frozen-data', 'sample-list', 'run-meta', 'operations-audit', 'operations-history'])
-    $(id).replaceChildren();
-  $('run-subtitle').textContent = '回答会显示在这里，不自动评分。';
+  renderRun();
+  $('operations-history').replaceChildren();
   renderSelectors();
   renderHistory();
   renderRules();
-  renderTargets();
   renderMetrics({});
   renderActivityState();
   renderAdmission();
@@ -391,20 +407,52 @@ function disconnect(
   else clearNotice();
 }
 
+const workspaces = {
+  login: ['账号管理', '管理 OpenAI 账号、授权与登录状态。'],
+  manual: ['智商测试', '选择凭证与模型，测试并比较回答。'],
+  operations: ['质量运维', '管理检测规则，查看模型质量与运行记录。'],
+};
+
 function setPage(page) {
   if (page !== state.page) clearNotice();
-  state.page = ['manual', 'operations', 'login'].includes(page) ? page : 'manual';
+  state.page = ['login', 'manual', 'operations'].includes(page) ? page : 'login';
   if (state.page === 'login') loginWorkbench.open({ focus: false });
   else loginWorkbench.close({ focus: false });
   $('page-manual').classList.toggle('hidden', state.page !== 'manual');
   $('page-operations').classList.toggle('hidden', state.page !== 'operations');
   $('page-login').classList.toggle('hidden', state.page !== 'login');
-  $('page-crumb').textContent = state.page === 'manual' ? '智商测试' : state.page === 'operations' ? '质量运维' : 'OpenAI 登录';
+  const [name, description] = workspaces[state.page];
+  $('page-crumb').textContent = name;
+  $('page-description').textContent = description;
   document.querySelectorAll('[data-page]').forEach((button) => {
     button.classList.toggle('active', button.dataset.page === state.page);
     button.setAttribute('aria-current', button.dataset.page === state.page ? 'page' : 'false');
   });
   history.replaceState(null, '', `#${state.page}`);
+  scheduleWorkspaceLayout();
+}
+
+let workspaceLayoutFrame = 0;
+function scheduleWorkspaceLayout() {
+  cancelAnimationFrame(workspaceLayoutFrame);
+  workspaceLayoutFrame = requestAnimationFrame(() => {
+    if (!['operations', 'manual'].includes(state.page)) return;
+    const manual = state.page === 'manual';
+    const workspace = document.querySelector(manual ? '.manual-workbench' : '.quality-workspace');
+    // Measure the document offset so scrolling never changes the panel height.
+    const top = workspace.getBoundingClientRect().top + window.scrollY;
+    const compactManual = manual && window.innerWidth < 960;
+    const minimum = manual ? (compactManual ? 380 : 520) : 460;
+    const bottomSpace = compactManual ? 16 : manual ? 32 : 24;
+    workspace.style.setProperty(manual ? '--manual-panel-height' : '--quality-panel-height', `${Math.max(minimum, Math.floor(window.innerHeight - top - bottomSpace))}px`);
+  });
+}
+
+function setManualPane(view) {
+  $('page-manual').dataset.pane = view;
+  for (const button of document.querySelectorAll('.manual-pane-switch button')) {
+    button.setAttribute('aria-pressed', String(button.dataset.manualPane === view));
+  }
 }
 
 function setManualView(view, focus = false) {
@@ -416,7 +464,10 @@ function setManualView(view, focus = false) {
   for (const name of ['results', 'history']) {
     $(`manual-${name}`).classList.toggle('hidden', name !== state.manualView);
   }
+  $('manual-result-footer').classList.toggle('hidden', state.manualView !== 'results');
+  $('manual-history-footer').classList.toggle('hidden', state.manualView !== 'history');
   document.querySelector('.answer-workspace')?.classList.remove('hidden');
+  setManualPane(view);
   document.querySelectorAll('.view-nav [data-manual-view]').forEach((button) => {
     const selected = button.dataset.manualView === state.manualView;
     button.classList.toggle('active', selected);
@@ -425,6 +476,7 @@ function setManualView(view, focus = false) {
   });
   $('page-manual').dataset.view = state.manualView;
   $('manual-title').textContent = '智商测试';
+  scheduleWorkspaceLayout();
   if (focus) {
     const section = $(showConfiguration ? 'manual-setup' : `manual-${state.manualView}`);
     section.tabIndex = -1;
@@ -435,6 +487,7 @@ function setManualView(view, focus = false) {
 
 function setReadingExpanded(expanded) {
   state.readingExpanded = expanded;
+  if (expanded && $('page-manual').dataset.pane === 'setup') setManualPane(state.manualView);
   $('manual-setup').classList.toggle('hidden', expanded);
   $('page-manual').dataset.readingExpanded = String(expanded);
   const toggle = $('reading-toggle');
@@ -442,17 +495,7 @@ function setReadingExpanded(expanded) {
   toggle.textContent = expanded ? '返回配置' : '展开阅读';
   toggle.setAttribute('aria-pressed', String(expanded));
   toggle.setAttribute('aria-controls', 'manual-setup');
-}
-
-function setOpsView(view) {
-  if (view !== state.opsView) clearNotice();
-  state.opsView = ['attention', 'rules', 'activity'].includes(view) ? view : 'attention';
-  for (const name of ['attention', 'rules', 'activity']) $(`ops-${name}`).classList.toggle('hidden', name !== state.opsView);
-  document.querySelectorAll('[data-ops-view]').forEach((button) => {
-    const selected = button.dataset.opsView === state.opsView;
-    button.classList.toggle('active', selected);
-    button.setAttribute('aria-current', selected ? 'page' : 'false');
-  });
+  scheduleWorkspaceLayout();
 }
 
 function openEditor(id) {
@@ -466,38 +509,45 @@ function openEditor(id) {
     $(id).querySelector('.editor-footer, .button-row.end').prepend(indicator);
   }
   updateEditorDirty();
-  $('operations-main').classList.add('hidden');
-  for (const name of ['rule-dialog', 'settings-dialog']) $(name).classList.toggle('hidden', name !== id);
-  const heading = $(id).querySelector('h2');
-  heading.tabIndex = -1;
-  heading.focus({ preventScroll: true });
-  $(id).scrollIntoView({ block: 'start' });
+  $(id).showModal();
+  $(id).querySelector('.rule-form-scroll').scrollTop = 0;
+  $('rule-name').focus({ preventScroll: true });
+  $(id).scrollTop = 0;
 }
 
 function closeSurface(id, saved = false) {
   const node = $(id);
-  if (node.tagName === 'DIALOG') { if (id !== 'action-dialog' || !state.busy.has('dialog-action')) node.close(); }
-  else {
-    if (!saved && state.editor?.saving) return;
+  if (state.editor?.id === id) {
+    if (!saved && state.editor.saving) return;
     if (!saved && editorDirty()) { protectEditor(() => closeSurface(id, true)); return; }
-    node.classList.add('hidden');
-    $('operations-main').classList.remove('hidden');
-    const opener = state.editor?.opener?.isConnected ? state.editor.opener : id === 'rule-dialog' ? $('rule-new') : $('settings-open');
+    const opener = state.editor.opener?.isConnected ? state.editor.opener : $('rule-new');
     state.editor = null;
-    opener.focus({ preventScroll: true });
+    node.close();
+    // Nested discard confirmation remains modal until its own submit completes.
+    if (!$('action-dialog').open) opener.focus({ preventScroll: true });
+    else $('action-dialog').addEventListener('close', () => opener.isConnected && opener.focus({ preventScroll: true }), { once: true });
+    return;
   }
+  if (node.tagName === 'DIALOG' && (id !== 'action-dialog' || !state.busy.has('dialog-action'))) node.close();
+}
+$('rule-dialog').addEventListener('cancel', event => { event.preventDefault(); closeSurface('rule-dialog'); });
+
+function targetOptions() {
+  const seen = new Set(), duplicates = new Set();
+  for (const target of state.targets) {
+    if (!target.email) continue;
+    if (seen.has(target.email)) duplicates.add(target.email);
+    seen.add(target.email);
+  }
+  return '<option value="">选择凭证</option>' + state.targets.map(target => {
+    const label = target.email || `${target.provider || 'unknown'} · ${target.auth_index || targetID(target)}`;
+    const suffix = duplicates.has(target.email) ? ` · ${target.auth_index || targetID(target)}` : '';
+    return `<option value="${escapeHTML(targetID(target))}">${escapeHTML(label + suffix)}${target.quality_paused ? ' · 质量暂停' : ''}${target.manual_disabled ? ' · 人工禁用' : ''}</option>`;
+  }).join('');
 }
 
-function updatePlan() {
-  const samples = number('samples');
-  $('run-plan').textContent = value('models') && value('prompt') && Number.isInteger(samples) && samples >= 1 && samples <= 8
-    ? `预计生成 ${samples} 份独立回答`
-    : '';
-  $('run-plan').hidden = !$('run-plan').textContent;
-}
-
-function targetOptions(includeBlank = true) {
-  return `${includeBlank ? '<option value="">选择凭证</option>' : ''}${state.targets.map((target) => `<option value="${escapeHTML(targetID(target))}">${escapeHTML(target.provider || 'unknown')} · ${escapeHTML(target.auth_index || targetID(target))}${target.quality_paused ? ' · 质量暂停' : ''}${target.manual_disabled ? ' · 人工禁用' : ''}</option>`).join('')}`;
+function credentialName(id) {
+  return findTarget(id)?.email || id;
 }
 
 function questionOptions() {
@@ -505,7 +555,7 @@ function questionOptions() {
     state.questions
       .map(
         (question) =>
-          `<option value="${escapeHTML(question.id)}">${escapeHTML(question.title || question.id)} · ${escapeHTML(question.kind || '')}</option>`,
+          `<option value="${escapeHTML(question.id)}">${escapeHTML(questionTitle(question))}</option>`,
       )
       .join('') +
     (state.questions.some((question) => question.id === 'custom')
@@ -517,15 +567,16 @@ function questionOptions() {
 function renderSelectors() {
   const previousQuestion = value('question');
   const previousPrompt = $('prompt').value;
+  const options = targetOptions();
   for (const id of ['target', 'rule-target', 'rule-judge-target', 'rule-control-target']) {
     const previous = $(id).value;
-    $(id).innerHTML = targetOptions();
+    $(id).innerHTML = options;
     if (findTarget(previous)) $(id).value = previous;
   }
   const curated = ['logic-candy', 'visual-pelican-html', 'custom'];
   const questions = curated.map((id) => state.questions.find((question) => question.id === id)).filter(Boolean);
   $('question').innerHTML = questions.length
-    ? questions.map((question) => `<option value="${escapeHTML(question.id)}">${escapeHTML(question.title || question.id)}</option>`).join('')
+    ? questions.map((question) => `<option value="${escapeHTML(question.id)}">${escapeHTML(questionTitle(question))}</option>`).join('')
     : '<option value="">连接后加载题目</option>';
   if (questions.some((question) => question.id === previousQuestion)) $('question').value = previousQuestion;
   const ruleQuestion = value('rule-question');
@@ -591,7 +642,7 @@ function renderTarget(selectModel = false) {
     $('target-summary').textContent = state.targets.length ? '选择要测试的凭证。' : resourceMessage('targets', '测试凭证') || '尚无可用凭证，请先在 CPA 中添加凭证。';
   } else {
     const reason = credentialBlock({ auth_id: targetID(target) }, state.targets);
-    $('target').title = `auth_id: ${targetID(target)} · auth_index: ${target.auth_index || '未知'}`;
+    $('target').title = target.email || targetID(target);
     patchView($('target-summary'), reason ? `<span class="error-note">${escapeHTML(reason)}</span>` : '<span>凭证可用</span>');
   }
   renderReasoning(selectModel);
@@ -602,7 +653,7 @@ function updateQuestionNote() {
   const question = state.questions.find((entry) => entry.id === value('question'));
   const selected = questionTestSelection(question, $('prompt').value);
   const changed = !!question && question.id !== 'custom' && selected.question_id === 'custom';
-  $('question-version').textContent = changed ? '已修改' : question?.id === 'custom' ? '' : question ? `版本 ${question.version || '未知'}` : '';
+  $('question-version').textContent = changed ? '已修改' : '';
   const note = $('prompt-note');
   note.hidden = !changed;
   note.textContent = changed ? '按自定义题目测试，不沿用参考答案。' : '';
@@ -639,10 +690,15 @@ function manualRunConfig() {
 function runConfig(prefix = '') {
   if (!prefix) return manualRunConfig();
   const get = (name) => value(`${prefix}${name}`);
-  const target = findTarget(get('target'));
-  if (!target) fieldError(`${prefix}target`, '请选择目标凭证。');
-  const models = parseModels(get('models'));
-  if (!models.length || models.length > 8) fieldError(`${prefix}models`, '请指定 1–8 个模型。');
+  const scope = $('rule-form').elements.namedItem('rule-scope').value;
+  const all = !!dynamicScopeLabel(scope);
+  const target = all ? null : findTarget(get('target'));
+  if (!all && !target) fieldError(`${prefix}target`, '请选择目标凭证。');
+  const models = draftRuleModels();
+  const problem = ruleModelsProblem(models);
+  if (problem) fieldError(`${prefix}models`, problem);
+  const plan = ruleSampling(models);
+  if (plan.over) fieldError(`${prefix}samples`, `超过每凭证样本限额 ${plan.limit}。请减少模型或样本数。`);
   const judge = { mode: get('judge-mode') };
   if (judge.mode === 'llm') {
     const selected = findTarget(get('judge-target'));
@@ -656,26 +712,25 @@ function runConfig(prefix = '') {
     });
   }
   const config = {
-    auth_id: targetID(target),
-    provider: target.provider,
+    target_scope: scope,
+    ...(!all ? {auth_id: targetID(target), provider: target.provider} : {}),
     models,
     question_id: get('question'),
     samples: number(`${prefix}samples`),
     parameters: {
-      temperature: number(`${prefix}temperature`),
-      max_tokens: number(`${prefix}max-tokens`),
-      stream: true,
+      stream: state.rules.find(r => r.id === value('rule-id'))?.parameters?.stream ?? true,
     },
     judge,
   };
-  if (config.question_id === 'random-linear' && get('control-target')) {
+  if (!all && config.question_id === 'random-linear' && get('control-target')) {
     const control = findTarget(get('control-target'));
     if (!control || targetID(control) === targetID(target))
       fieldError(`${prefix}control-target`, '随机题通过对照必须选择另一个凭证。');
     config.control_auth_id = targetID(control);
     config.control_provider = control.provider;
   }
-  if (get('reasoning')) config.parameters.reasoning_effort = get('reasoning');
+  const effort = $('rule-reasoning').querySelector('input:checked')?.value;
+  if (effort) config.parameters.reasoning_effort = effort;
   if (config.question_id === 'custom') {
     config.review_standard = get('review-standard');
     config.prompt = get('prompt');
@@ -691,22 +746,22 @@ function blockedConfig(config) {
 }
 
 function renderAdmission() {
+  $('manual-config-summary').textContent = `${value('samples')} 份回答`;
   const config = {
     auth_id: value('target'),
     judge: { mode: 'manual' },
   };
   const blocked = blockedConfig(config) || (config.auth_id && !availableModels(findTarget(config.auth_id)).includes(value('models')) ? '请先选择可用的测试模型。' : '') || ($('reasoning').dataset.unavailable === 'true' ? '请重新选择可用的思考强度。' : '');
-  $('run-submit').disabled = !config.auth_id || !!blocked || !value('prompt') || state.busy.has('submit-run');
+  const testing = !!state.pendingManual || state.busy.has('submit-run');
+  const phase = state.pendingManual?.status;
+  $('run-submit-label').textContent = testing ? ({ queued: '排队中', running: '测试中', cancelling: '停止中' }[phase] || '提交中') : '开始测试';
+  $('run-submit').setAttribute('aria-busy', String(testing));
+  $('run-submit').disabled = testing || !config.auth_id || !!blocked || !value('prompt');
   $('run-submit').title = state.connected ? blocked : '';
-  $('run-admission').textContent = state.connected ? blocked || '不自动评分，也不会暂停凭证。' : '';
-  $('run-admission').hidden = !state.connected;
-  $('run-guidance').hidden = !state.connected;
-  $('run-admission').classList.toggle('error-note', !!blocked && state.connected);
   $('release-confirm').disabled = state.releaseBlocked || state.busy.has('release') || !state.connected;
-  updatePlan();
   for (const id of [
     'rule-new',
-    'settings-open',
+    'ops-all-rules',
     'run-export',
     'run-cancel',
     'refresh',
@@ -714,7 +769,7 @@ function renderAdmission() {
     $(id).disabled = !state.connected || $(id).getAttribute('aria-busy') === 'true';
   if (state.run) {
     const reason = blockedConfig(state.run.config || {});
-    $('run-rerun').disabled = !!reason || state.busy.has('submit-run');
+    $('run-rerun').disabled = !!reason || testing;
     $('run-rerun').title = reason;
   }
 }
@@ -724,54 +779,168 @@ function newKey() {
 }
 
 async function submitRun(config) {
+  if (state.pendingManual) return;
   const blocked = blockedConfig(config);
   if (blocked) throw new Error(blocked);
   const result = await api('/runs', 'POST', { ...config, idempotency_key: newKey() });
-  notice('任务已入队。离开页面不会停止后台任务。');
-  await loadRun(result.run_id || result.id);
+  const id = result.run_id || result.id;
+  if (!id) throw new Error('接口未返回任务 ID，请在测试记录中核对。');
+  ++state.reads.run;
+  state.pollFailures = 0;
+  state.run = { id, source: 'manual_test', status: 'queued', config, created_at: new Date().toISOString() };
+  state.pendingManual = state.run;
+  clearNotice();
+  renderRun();
+  setManualView('results', true);
+  schedulePoll(0);
   await loadHistory();
+}
+
+function updateRunProgress(run) {
+  const id = run.id || run.run_id;
+  if (id === state.pendingManual?.id) state.pendingManual = active(run) ? { id, status: run.status } : null;
+  const row = state.runs.findIndex(item => (item.id || item.run_id) === id);
+  if (row >= 0) {
+    state.runs[row] = run;
+    renderHistory();
+  }
+  renderAdmission();
 }
 
 async function loadRun(id, show = true) {
   if (!id) throw new Error('接口未返回任务 ID。');
   const sequence = ++state.reads.run;
   clearTimeout(state.poll);
-  const run = await api(`/runs/detail?id=${encodeURIComponent(id)}`);
-  if (sequence !== state.reads.run) return;
-  state.run = run.run || run;
-  state.pollFailures = 0;
-  renderRun();
-  if (show) { clearNotice(); setManualView('results', true); }
-  schedulePoll();
+  try {
+    const reply = await api(`/runs/detail?id=${encodeURIComponent(id)}`);
+    if (sequence !== state.reads.run) return;
+    state.run = reply.run || reply;
+    updateRunProgress(state.run);
+    state.pollFailures = 0;
+    renderRun();
+    $('run-feedback').classList.add('hidden');
+    if (show) { clearNotice(); setManualView('results', true); }
+  } finally {
+    if (sequence === state.reads.run) schedulePoll();
+  }
 }
 
-function schedulePoll() {
+function schedulePoll(delay = Math.min(10000, 1200 * 2 ** state.pollFailures)) {
   clearTimeout(state.poll);
-  if (!state.connected || !active(state.run)) return;
+  const selected = state.run?.id || state.run?.run_id;
+  const ids = [...new Set([active(state.run) && selected, state.pendingManual?.id].filter(Boolean))];
+  if (!state.connected || !ids.length) return;
   const epoch = client.epoch;
   const sequence = state.reads.run;
-  const id = state.run.id || state.run.run_id;
-  const delay = Math.min(10000, 1200 * 2 ** state.pollFailures);
   state.poll = setTimeout(async () => {
-    if (epoch !== client.epoch || sequence !== state.reads.run) return;
-    try {
-      const reply = await api(`/runs/detail?id=${encodeURIComponent(id)}`);
-      if (sequence !== state.reads.run) return;
-      state.run = reply.run || reply;
-      $('run-feedback').classList.add('hidden');
-      state.pollFailures = 0;
-      renderRun();
-      if (active(state.run)) schedulePoll();
-      else await Promise.all([loadHistory(), loadOperations()]);
-    } catch (error) {
-      if (isDiscarded(error) || epoch !== client.epoch || sequence !== state.reads.run) return;
-      state.pollFailures = Math.min(state.pollFailures + 1, 4);
-      $('run-feedback').textContent = `进度查询失败：${error.message}。会自动重试查询，不会重新提交模型任务。`;
-      $('run-feedback').classList.remove('hidden');
-      schedulePoll();
+    const current = () => epoch === client.epoch && sequence === state.reads.run;
+    if (!current()) return;
+    const results = await Promise.allSettled(ids.map(id => api(`/runs/detail?id=${encodeURIComponent(id)}`)));
+    if (!current()) return;
+    let finished = false, retry = false;
+    for (const [index, result] of results.entries()) {
+      const id = ids[index];
+      if (result.status === 'rejected') {
+        const error = result.reason;
+        if (isDiscarded(error)) continue;
+        const missing = error.code === 'not_found' || error.status === 404;
+        if (missing && id === state.pendingManual?.id) state.pendingManual = null;
+        if (missing && id === selected) {
+          state.run = { ...state.run, status: 'unavailable' };
+          renderRun();
+        }
+        if (id === selected) {
+          $('run-feedback').textContent = missing ? '这条测试记录已不可用。' : `进度查询失败：${error.message}。会自动重试查询。`;
+          $('run-feedback').classList.remove('hidden');
+        }
+        retry ||= !missing;
+        finished ||= missing;
+        continue;
+      }
+      const run = result.value.run || result.value;
+      updateRunProgress(run);
+      if (id === selected) {
+        state.run = run;
+        renderRun();
+        $('run-feedback').classList.add('hidden');
+      }
+      finished ||= !active(run);
     }
+    state.pollFailures = retry ? Math.min(state.pollFailures + 1, 4) : 0;
+    renderAdmission();
+    schedulePoll();
+    if (finished) await Promise.allSettled([loadHistory(), loadOperations()]);
   }, delay);
 }
+
+const detailDialog = $('quality-detail');
+let qualityDetail = null;
+
+function openQualityDetail(id) {
+  if (!id) throw new Error('接口未返回任务 ID。');
+  clearTimeout(qualityDetail?.timer);
+  qualityDetail = { id, run: null, read: 0, timer: null };
+  $('quality-detail-content').replaceChildren();
+  detailDialog.querySelector('footer').hidden = true;
+  detailDialog.querySelector('.dialog-message')?.remove();
+  $('quality-detail-message').textContent = '正在读取检测记录…';
+  $('quality-detail-retry').hidden = true;
+  detailDialog.showModal();
+  detailDialog.querySelector('.quality-detail-scroll').scrollTop = 0;
+  return readQualityDetail(qualityDetail);
+}
+
+async function readQualityDetail(detail) {
+  if (!detail || detail !== qualityDetail || !detailDialog.open) return;
+  clearTimeout(detail.timer);
+  const sequence = ++detail.read;
+  const current = () => detailDialog.open && detail === qualityDetail && sequence === detail.read;
+  try {
+    const reply = await api(`/runs/detail?id=${encodeURIComponent(detail.id)}`);
+    if (!current()) return;
+    const run = reply.run || reply;
+    patchView($('quality-detail-content'), renderQualityDetail(run, state.rules, credentialName));
+    detail.run = run;
+    $('quality-detail-message').textContent = '';
+    $('quality-detail-retry').hidden = true;
+    $('quality-detail-cancel').hidden = !active(run);
+    detailDialog.querySelector('footer').hidden = false;
+    if (active(run) || ['disable_pending', 'restore_pending', 'delete_pending'].includes(run.action_status)) {
+      detail.timer = setTimeout(() => readQualityDetail(detail), 1500);
+    }
+    const row = state.activityRows?.findIndex(item => (item.id || item.run_id) === detail.id);
+    if (row >= 0) {
+      state.activityRows[row] = run;
+      patchView($('operations-history'), renderQualityRuns(state.activityRows, state.rules, credentialName));
+    }
+  } catch (error) {
+    if (!current() || isDiscarded(error)) return;
+    $('quality-detail-message').textContent = error.status === 404 ? '这条检测记录已不可用。' : `检测记录读取失败：${error.message}`;
+    $('quality-detail-retry').hidden = false;
+    if (error.status === 404) {
+      detail.run = null;
+      $('quality-detail-content').replaceChildren();
+      detailDialog.querySelector('footer').hidden = true;
+    }
+  }
+}
+
+detailDialog.addEventListener('close', () => {
+  if (detailDialog.open) return;
+  clearTimeout(qualityDetail?.timer);
+  qualityDetail = null;
+  $('quality-detail-content').replaceChildren();
+});
+$('quality-detail-retry').addEventListener('click', () => readQualityDetail(qualityDetail));
+$('quality-detail-export').addEventListener('click', () => exportRun(qualityDetail?.run));
+$('quality-detail-cancel').addEventListener('click', event => {
+  const detail = qualityDetail;
+  if (!active(detail?.run)) return;
+  safely(async () => {
+    await api('/runs/cancel', 'POST', { id: detail.id });
+    await readQualityDetail(detail);
+  }, `cancel:${detail.id}`, event.currentTarget);
+});
 
 // Reconcile trusted view templates without replacing stable reading and editing nodes.
 function patchView(target, html) {
@@ -827,7 +996,15 @@ function patchView(target, html) {
 
 function renderRun() {
   const run = state.run;
-  if (!run) return;
+  if (!run) {
+    for (const id of ['run-content', 'task-actions', 'run-feedback', 'run-rerun', 'run-export', 'run-cancel']) $(id).classList.add('hidden');
+    for (const id of ['run-frozen-data', 'sample-list', 'run-meta', 'task-indicator']) $(id).replaceChildren();
+    $('run-empty').classList.remove('hidden');
+    $('manual-result-summary').textContent = '等待开始测试';
+    state.compareRun = null;
+    renderAdmission();
+    return;
+  }
   $('run-empty').classList.add('hidden');
   $('run-content').classList.remove('hidden');
   $('task-actions').classList.remove('hidden');
@@ -835,14 +1012,14 @@ function renderRun() {
   $('run-rerun').classList.toggle('hidden', active(run) || !repeatable);
   $('run-export').classList.remove('hidden');
   $('run-cancel').classList.toggle('hidden', !active(run));
-  const rendered = renderRunEvidence(run);
-  $('run-subtitle').textContent = `${run.source === 'manual_test' ? '题目测试 · 不自动评分' : run.source === 'scheduled_probe' ? '规则检测 · 依据规则许可处置' : sourceLabel(run.source)} · ${date(run.created_at)}`;
+  const rendered = renderRunEvidence(run, credentialName);
   patchView($('run-meta'), rendered.metaHTML);
   patchView($('run-frozen-data'), `<div class="run-identifier">任务 ${escapeHTML(run.id || run.run_id)}</div>${rendered.conditionsHTML}`);
   const progress = Math.min(100, Math.round(rendered.completed / Math.max(1, rendered.planned) * 100));
   $('run-progress').style.width = `${progress}%`;
   $('run-progress').parentElement.setAttribute('aria-valuenow', String(progress));
   $('task-indicator').textContent = active(run) ? '执行中' : '已结束';
+  $('manual-result-summary').textContent = `${rendered.completed} / ${rendered.planned} 份${run.source === 'manual_test' ? '回答' : '样本'}已结束`;
   const id = run.id || run.run_id;
   const sameRun = state.compareRun === id;
   if (sameRun) patchView($('sample-list'), rendered.samplesHTML);
@@ -857,12 +1034,19 @@ function renderRun() {
     document.querySelector('.model-selectors').classList.toggle('hidden', models.length < 2);
     document.querySelector('.comparison-toolbar').classList.toggle('hidden', models.length < 2 && ((run.source === 'manual_test' && run.config?.judge?.mode === 'manual') || (run.config?.samples || 1) < 2));
     state.compareRun = id;
-    $('run-frozen').open = false;
+    setRunDetails(false);
     $('run-feedback').classList.add('hidden');
   }
   applyComparison();
   renderAdmission();
 }
+
+function setRunDetails(open) {
+  $('run-frozen').setAttribute('aria-expanded', String(open));
+  $('run-frozen-data').hidden = !open;
+}
+
+$('run-frozen').addEventListener('click', () => setRunDetails($('run-frozen-data').hidden));
 
 function applyComparison() {
   const selected = [value('compare-model-a'), value('compare-model-b')].filter(Boolean);
@@ -895,10 +1079,18 @@ function resourceMessage(resource, label) {
 }
 
 function renderActivityState() {
-  for (const [id, resource, label] of [['operations-history', 'activity', '规则运行记录'], ['operations-audit', 'audit', '审计记录']]) {
-    const message = resourceMessage(resource, label);
-    if (message && !$(id).querySelector('.history-row')) patchView($(id), `<p class="empty-line">${escapeHTML(message)}</p>`);
+  const message = resourceMessage('activity', '规则运行记录');
+  if (message && !$('operations-history').querySelector('.history-row, .quality-run-table')) patchView($('operations-history'), renderQualityEmpty(message));
+  for (const [id, resource, label] of [['rules-read-note', 'rules', '规则'], ['activity-read-note', 'activity', '运行记录']]) {
+    $(id).hidden = state.resourceStatus[resource] !== 'error';
+    $(id).textContent = `${label}读取失败，当前内容可能已过期。请刷新重试。`;
   }
+  $('ops-scope-label').textContent = state.scopeRule ? state.rules.find(r => r.id === state.scopeRule)?.name || '已删除规则的运行记录' : '全部规则';
+  $('ops-scope-clear').hidden = !state.scopeRule && !state.scopeBatch;
+  $('ops-all-rules').setAttribute('aria-pressed', String(!state.scopeRule && !state.scopeBatch));
+  $('ops-record-count').textContent = state.resourceStatus.activity === 'ready' ? `共 ${state.activityTotal} 条` : '';
+  $('ops-history-clear').disabled = !state.connected || state.resourceStatus.activity !== 'ready' || (!state.activityTotal && !state.scopeRule && !state.scopeBatch);
+  if (state.resourceStatus.activity !== 'ready') $('ops-batch-prev').disabled = $('ops-batch-next').disabled = true;
 }
 
 function renderHistory() {
@@ -906,12 +1098,22 @@ function renderHistory() {
   $('history-count').textContent = state.historyTotal || '';
   patchView($('history-list'), state.runs.length
     ? state.runs
-        .map(
-          (run) =>
-            `<div class="history-row" role="button" tabindex="0" data-key="run:${escapeHTML(run.id || run.run_id)}" data-run="${escapeHTML(run.id || run.run_id)}"><div><div class="history-title">${escapeHTML(run.config?.models?.join(' / ') || run.rule_id || '智商测试')}</div><div class="history-time">${escapeHTML(date(run.created_at))} · ${escapeHTML(sourceLabel(run.source))} · ${escapeHTML(run.config?.auth_id || '')}</div></div>${statusTag(run.status)}</div>`,
-        )
+        .map(run => {
+          const id = escapeHTML(run.id || run.run_id);
+          const title = escapeHTML(questionTitle(run.config?.question || state.questions.find(question => question.id === run.config?.question_id), run.config?.question_id));
+          return `<div class="history-row" data-key="run:${id}">
+            <button type="button" class="history-open" data-run="${id}">
+              <span class="history-primary"><span class="history-title">${title}</span>
+              <span class="history-secondary"><span>${escapeHTML(run.config?.models?.join(' / ') || '模型未记录')}</span><span>${escapeHTML((run.config?.models?.length || 1) * (run.config?.samples || 1))} 份回答</span></span>
+              <span class="history-time"><time>${escapeHTML(date(run.created_at))}</time><span class="history-credential">${escapeHTML(run.credential_email || credentialName(run.config?.auth_id) || '凭证未记录')}</span></span></span>
+              <span class="history-trailing">${renderManualVerdict(run)}${statusTag(run.status)}</span>
+            </button>
+            <button type="button" class="history-delete" data-delete-run="${id}" aria-label="删除测试记录：${title}" title="${active(run) ? '测试结束后可删除' : '删除记录'}" ${active(run) ? 'disabled' : ''}>
+              <svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6M10 10v7m4-7v7"/></svg>
+            </button></div>`;
+        })
         .join('')
-    : `<p class="empty-line">${escapeHTML(resourceMessage('history', '测试记录') || '暂无测试记录。首次执行后在这里查看。')}</p>`);
+    : `<div class="empty-line calm-empty"><strong>${escapeHTML(resourceMessage('history', '测试记录') || '还没有测试记录')}</strong>${state.resourceStatus.history === 'ready' ? '<span>完成一次测试后，可在这里查看回答、执行详情与历史条件。</span>' : ''}</div>`);
   $('history-page').textContent = `第 ${Math.floor(state.historyOffset / 10) + 1} 页`;
   $('history-prev').disabled = state.historyOffset === 0;
   $('history-next').disabled = state.historyOffset + 10 >= state.historyTotal;
@@ -936,123 +1138,182 @@ async function loadHistory() {
   state.resourceStatus.history = 'ready';
   state.runs = items(result);
   state.historyTotal = result.total ?? state.runs.length;
+  const lastOffset = Math.max(0, Math.floor((state.historyTotal - 1) / 10) * 10);
+  if (state.historyOffset > lastOffset) {
+    state.historyOffset = lastOffset;
+    return loadHistory();
+  }
   renderHistory();
 }
 
-function renderRules() {
-  const message = !state.rules.length && resourceMessage('rules', '检测规则');
-  patchView($('rules-list'), message ? `<tr><td colspan="5" class="empty-line">${escapeHTML(message)}</td></tr>` : renderRuleRows(state.rules, state.targets, state));
-  $('rule-count').textContent = state.rules.length || '';
+function confirmHistoryDelete(id) {
+  const run = state.runs.find(item => (item.id || item.run_id) === id);
+  if (!run || active(run)) return;
+  actionDialog({
+    title: '删除测试记录',
+    description: `删除「${questionTitle(run.config?.question, run.config?.question_id)}」（${date(run.created_at)}）及本次回答？`,
+    confirm: '删除', danger: true,
+    submit: async () => {
+      await api('/runs', 'DELETE', { id });
+      ++state.reads.run;
+      if ((state.run?.id || state.run?.run_id) === id) {
+        state.run = null;
+        renderRun();
+      }
+      if (state.pendingManual?.id === id) state.pendingManual = null;
+      schedulePoll();
+      state.runs = state.runs.filter(item => (item.id || item.run_id) !== id);
+      state.historyTotal = Math.max(0, state.historyTotal - 1);
+      renderHistory();
+      renderAdmission();
+      $('action-dialog').addEventListener('close', () => {
+        if (state.manualView === 'history') $('manual-history').focus({ preventScroll: true });
+      }, { once: true });
+      try {
+        await loadHistory();
+      } catch (error) {
+        if (!isDiscarded(error)) notice('记录已删除，列表刷新失败，请刷新重试。', true);
+      }
+    },
+  });
 }
 
-function renderTargets() {
-  const targetMessage = !state.targets.length && resourceMessage('targets', '凭证限制');
-  const actionMessage = !state.actions.length && resourceMessage('actions', '宿主保存的暂停归属');
-  patchView($('targets-list'), targetMessage ? `<tr><td colspan="5" class="empty-line">${escapeHTML(targetMessage)}</td></tr>` : renderTargetRows(state.targets));
-  patchView($('actions-list'), actionMessage ? `<p class="empty-line">${escapeHTML(actionMessage)}</p>` : renderActionItems(state.actions, state.targets));
-  $('attention-count').textContent = state.actions.length || '';
+function renderRules() {
+  const query = value('rule-search').toLocaleLowerCase(), filter = value('rule-filter');
+  const filtered = state.rules.filter(rule => {
+    const config = rule.config || rule;
+    return (filter === 'all' || ruleState(rule, state.targets) === filter) && [rule.name, rule.id, config.auth_id, credentialName(config.auth_id), ...(config.models || []), dynamicScopeLabel(rule.target_scope)].join(' ').toLocaleLowerCase().includes(query);
+  });
+  const message = !state.rules.length && resourceMessage('rules', '检测规则');
+  patchView($('rules-list'), message ? renderQualityEmpty(message) : state.rules.length && !filtered.length ? renderQualityEmpty('没有匹配的规则', '调整搜索内容或状态筛选。', '<button class="text-button" data-rule-clear>清除筛选</button>') : renderRuleRows(filtered, state.targets, state));
+  $('rules-list').querySelectorAll('[data-rule-new]').forEach(button => { button.disabled = !state.connected; });
+  $('rule-count').textContent = state.resourceStatus.rules === 'ready' || state.rules.length ? String(state.rules.length) : '—';
+  $('ops-all-count').textContent = $('rule-count').textContent;
+  $('rule-summary').textContent = state.resourceStatus.rules === 'ready' || state.rules.length ? `显示 ${filtered.length} / ${state.rules.length} 条规则` : '尚未读取检测规则';
+  $('rule-timed-count').textContent = state.resourceStatus.rules === 'ready' ? `定时 ${state.rules.filter(rule => ruleState(rule, state.targets) === 'timed').length}` : '';
 }
 
 function renderMetrics(metrics) {
-    const percentage = (number) =>
+  const percentage = (number) =>
     number == null ? '—' : `${(number <= 1 ? number * 100 : number).toFixed(1)}%`;
+  const judged = metrics.judged ?? (metrics.correct != null && metrics.incorrect != null ? metrics.correct + metrics.incorrect : null);
   const stats = [
     [
       '质量通过率',
       percentage(metrics.quality_pass_rate ?? metrics.pass_rate),
-      `正确 ${metrics.correct ?? '—'} / 可判定 ${metrics.judged ?? (metrics.correct != null && metrics.incorrect != null ? metrics.correct + metrics.incorrect : '—')}`,
+      [`正确 ${metrics.correct ?? '—'}`, '/', `可判定 ${judged ?? '—'}`],
     ],
     [
       '评测覆盖率',
       percentage(metrics.coverage ?? metrics.coverage_rate),
-      `错误 ${metrics.incorrect ?? '—'} · 未知 ${metrics.unknown ?? '—'}`,
+      [`可判定 ${judged ?? '—'}`, '/', `计划 ${metrics.planned ?? '—'}`],
     ],
-    ['质量暂停归属', state.resourceStatus.actions === 'ready' ? state.actions.length : '—', '对凭证所有模型的新业务生效'],
+    ['结论未知', metrics.unknown ?? '—', ['不计为答错', '·', `明确答错 ${metrics.incorrect ?? '—'}`]],
     [
       '已知用量',
       (metrics.known_tokens ?? metrics.total_tokens) == null
         ? '—'
         : Number(metrics.known_tokens ?? metrics.total_tokens).toLocaleString(),
-      `usage 未知 ${metrics.unknown_usage ?? '—'} · 丢事件 ${metrics.dropped_usage_events ?? metrics.dropped_events ?? '—'}`,
+      [`用量未知 ${metrics.unknown_usage ?? '—'}`, '·', `未采集事件 ${metrics.dropped_usage_events ?? metrics.dropped_events ?? '—'}`],
+      'token',
     ],
   ];
-  $('metrics-detail').textContent = resourceMessage('metrics', '质量统计') || `执行错误：${
-    Object.entries(metrics.error_types || {})
-      .map(([kind, count]) => `${statusLabels[kind] || kind} ${count}`)
-      .join(' · ') || '暂无已记录错误'
-  }。生产 usage 表示执行尝试，不等同于入站请求。缺失来源不归为生产。`;
   $('metrics').innerHTML = stats
     .map(
-      ([name, total, subtitle]) =>
-        `<article class="metric"><span>${escapeHTML(name)}</span><strong>${escapeHTML(total)}</strong><small>${escapeHTML(subtitle)}</small></article>`,
+      ([name, total, [left, divider, right], unit]) =>
+        `<article class="metric"><span class="metric-label">${escapeHTML(name)}</span>
+          <div class="metric-amount"><strong class="metric-value"${total === '—' ? ' data-missing' : ''}>${escapeHTML(total)}</strong>${unit && total !== '—' ? `<span class="metric-unit">${escapeHTML(unit)}</span>` : ''}</div>
+          <small><span>${escapeHTML(left)}</span> <span class="metric-divider" aria-hidden="true">${divider}</span> <span>${escapeHTML(right)}</span></small></article>`,
     )
     .join('');
 }
 
-async function loadOperations() {
+async function allPages(path, key) {
+  const list = [], seen = new Set(); let total;
+  for (;;) {
+    const page = await api(`${path}?limit=100&offset=${list.length}`);
+    if (!Array.isArray(page.items) || !Number.isSafeInteger(page.total) || page.total < 0 || (total !== undefined && total !== page.total)) throw Error('目录已变化，请刷新。');
+    total = page.total;
+    for (const row of page.items) { const id = row[key]; if (!id || seen.has(id)) throw Error('目录已变化，请刷新。'); seen.add(id); list.push(row); }
+    if (list.length === total) return { items:list, total };
+    if (!page.items.length || list.length > total) throw Error('目录读取不完整，请刷新。');
+  }
+}
+
+async function loadActivity() {
+  const sequence = ++state.reads.activity;
+  const query = new URLSearchParams({limit: '20', source: 'scheduled_probe', offset: String(state.batchOffset)});
+  if (state.scopeRule) query.set('rule_id', state.scopeRule);
+  if (state.scopeBatch) query.set('scope_batch_id', state.scopeBatch);
+  try {
+    const page = await api(`/runs?${query}`);
+    if (sequence !== state.reads.activity) return;
+    const total = page.total ?? 0;
+    const lastOffset = Math.max(0, Math.floor((total - 1) / 20) * 20);
+    if (total && state.batchOffset > lastOffset) {
+      state.batchOffset = lastOffset;
+      return loadActivity();
+    }
+    const offset = total ? page.offset ?? state.batchOffset : 0;
+    state.batchOffset = offset;
+    state.activityTotal = total;
+    state.activityRows = items(page);
+    state.resourceStatus.activity = 'ready';
+    $('ops-batch-summary').textContent = total ? `${state.scopeBatch ? '本批次 ' : ''}${offset + 1}–${Math.min(offset + 20, total)} / ${total}` : '0 条运行记录';
+    $('ops-batch-prev').disabled = offset === 0;
+    $('ops-batch-next').disabled = offset + 20 >= total;
+    patchView($('operations-history'), renderQualityRuns(state.activityRows, state.rules, credentialName));
+  } catch (error) {
+    if (sequence !== state.reads.activity || isDiscarded(error)) return;
+    state.resourceStatus.activity = 'error';
+    throw error;
+  } finally {
+    if (sequence === state.reads.activity) renderActivityState();
+  }
+}
+
+async function loadOperations(loadedTargets) {
   const sequence = ++state.reads.operations;
   const epoch = client.epoch;
-  const resources = ['rules', 'actions', 'metrics', 'activity', 'audit', 'targets'];
+  const resources = ['rules', 'actions', 'metrics', 'activity', 'targets', 'settings'];
   for (const resource of resources) if (state.resourceStatus[resource] !== 'ready') state.resourceStatus[resource] = 'loading';
   if (!state.rules.length) renderRules();
-  if (!state.actions.length || !state.targets.length) renderTargets();
   renderActivityState();
   if (state.resourceStatus.metrics === 'loading') renderMetrics({});
   const results = await Promise.allSettled([
-    api('/rules?limit=100'),
-    api('/actions?limit=100'),
+    allPages('/rules','id'),
+    allPages('/actions','action_id'),
     api('/metrics'),
-    api('/runs?limit=20&source=scheduled_probe'),
-    api('/history?limit=20'),
-    api('/targets?limit=100'),
+    loadActivity(),
+    loadedTargets || allPages('/targets','auth_id'), api('/settings'),
   ]);
   if (epoch !== client.epoch || sequence !== state.reads.operations) return;
-  results.forEach((result, index) => { state.resourceStatus[resources[index]] = result.status === 'fulfilled' ? 'ready' : 'error'; });
-  state.targetsFresh = results[5].status === 'fulfilled';
-  if (results[5].status === 'fulfilled') {
-    state.targets = items(results[5].value);
-    renderTarget();
+  results.forEach((result, index) => {
+    if (resources[index] !== 'activity') state.resourceStatus[resources[index]] = result.status === 'fulfilled' ? 'ready' : 'error';
+  });
+  state.targetsFresh = results[4].status === 'fulfilled';
+  state.settings = results[5].status === 'fulfilled' ? results[5].value : {};
+  if (results[4].status === 'fulfilled') {
+    state.targets = items(results[4].value);
+    if (!state.editor) renderSelectors(); else updateRuleFields();
   }
   if (results[0].status === 'fulfilled') {
     state.rules = items(results[0].value);
-    renderRules();
+    if (state.activityRows) patchView($('operations-history'), renderQualityRuns(state.activityRows, state.rules, credentialName));
   }
   if (results[1].status === 'fulfilled') {
     state.actions = items(results[1].value);
-    renderTargets();
   }
   if (results[2].status === 'fulfilled') renderMetrics(results[2].value);
-  if (results[3].status === 'fulfilled') {
-    const runs = items(results[3].value).filter((run) => run.source !== 'manual_test');
-    patchView($('operations-history'), runs.length
-      ? runs
-          .map(
-            (run) =>
-              `<div class="history-row" role="button" tabindex="0" data-key="run:${escapeHTML(run.id || run.run_id)}" data-run="${escapeHTML(run.id || run.run_id)}"><div><div class="history-title">${escapeHTML(run.rule_id || '规则检测')} · ${escapeHTML(statusLabels[run.action_status] || run.action_status || '仅观察')}</div><div class="history-time">${escapeHTML(date(run.created_at))} · ${escapeHTML(run.error || run.reason || '')}</div></div>${statusTag(run.status)}</div>`,
-          )
-          .join('')
-      : results[4].status === 'fulfilled' && items(results[4].value).length === 0
-        ? '<p class="empty-line">暂无运营记录。自动处置不会使用手动智商测试结果。</p>'
-        : '<p class="empty-line">暂无规则运行记录。</p>');
-  }
-  if (results[4].status === 'fulfilled') {
-    const audits = items(results[4].value);
-    patchView($('operations-audit'), audits
-      .map(
-        (audit) =>
-          `<div class="history-row audit-row" data-key="audit:${escapeHTML(audit.id || JSON.stringify([audit.time, audit.kind, audit.run_id, audit.action_id]))}"><div><div class="history-title">${escapeHTML(audit.kind || 'audit')} · ${escapeHTML(audit.rule_id || audit.run_id || audit.action_id || '')}</div><div class="history-time">${escapeHTML(date(audit.time))} · ${escapeHTML(audit.detail || '')}</div></div>${tag('审计')}</div>`,
-      )
-      .join('') || '<p class="empty-line">暂无审计记录。</p>');
-  }
+
   renderActivityState();
-  if (!state.rules.length) renderRules();
-  if (!state.targets.length || !state.actions.length) renderTargets();
-  if (state.resourceStatus.metrics === 'error') $('metrics-detail').textContent = '质量统计读取失败，已显示数据可能过期；请刷新重试。';
+  renderRules();
   const failed = results.find((result) => result.status === 'rejected');
   if (failed) {
     $('data-state').textContent = '部分数据更新失败，请重试';
     $('data-state').classList.add('stale');
     renderAdmission();
+    if (results.slice(0,5).every(result => result.status === 'fulfilled')) return;
     throw failed.reason;
   }
   markFresh();
@@ -1061,15 +1322,14 @@ async function loadOperations() {
 async function refresh() {
   const sequence = ++state.reads.refresh;
   try {
-    const [targets, questions] = await Promise.all([api('/targets?limit=100'), api('/questions')]);
+    const [targets, questions] = await Promise.all([allPages('/targets','auth_id'), api('/questions')]);
     if (sequence !== state.reads.refresh) return;
     state.targetsFresh = true;
     state.resourceStatus.targets = 'ready';
     state.targets = items(targets);
     state.questions = items(questions);
     renderSelectors();
-    renderTargets();
-    await Promise.all([loadHistory(), loadOperations()]);
+    await Promise.all([loadHistory(), loadOperations(targets)]);
     if (state.run) await loadRun(state.run.id || state.run.run_id, false);
   } catch (error) {
     if (!isDiscarded(error) && sequence === state.reads.refresh) {
@@ -1083,47 +1343,283 @@ async function refresh() {
   }
 }
 
+function scopeMatches(models) {
+  return state.targets.filter(t => t.runtime_status === 'active' && t.auth_index && t.provider && t.effective_available && !t.manual_disabled && !t.retained_pause && !t.quality_paused && availableModels(t).some(m => !models.length || models.includes(m)));
+}
+
+function recoveryCandidates(rule) {
+  if (rule?.action !== 'disable_credential' || !rule.auto_restore) return [];
+  const owned = new Set((rule.handling || []).filter(item => item.state === 'disabled').map(item => item.auth_id));
+  return state.targets.filter(t => t.runtime_status === 'disabled' && t.manual_disabled && !t.retained_pause && !t.quality_paused &&
+    (owned.has(targetID(t)) || (rule.target_scope === 'all_credentials' && !t.credential_handling && ['codex','openai','openai-compatibility'].includes(t.provider))) &&
+    (t.reasons || []).every(reason => ['operator_disabled','manual_disabled'].includes(reason)));
+}
+
+const scopeSampleCount = (targets, models, samples) => targets.reduce((n, t) =>
+  n + availableModels(t).filter(m => models.includes(m)).length * samples, 0);
+
+const idByteLength = id => new TextEncoder().encode(id).length;
+const validShortcut = id => typeof id === 'string' && id.length > 0 && id.length <= 100 && idByteLength(id) <= 256 && !/[\s,，;；]/u.test(id);
+const ruleModelLimit = () => state.settings.max_models || 8;
+const draftRuleModels = () => [...new Set([...selectedRuleModels, ...splitRuleModels(value('rule-models'))])];
+function ruleModelsProblem(models) {
+  if (!models.length || models.length > ruleModelLimit()) return `请指定 1–${ruleModelLimit()} 个检测模型。`;
+  return models.some(id => idByteLength(id) > 256) ? '单个模型 ID 不能超过 256 字节。' : '';
+}
+function ruleSampling(models) {
+  const samples = number('rule-samples');
+  const control = checked('rule-scope-single') && value('rule-question') === 'random-linear' && !!value('rule-control-target');
+  const limit = state.settings.max_samples || 32;
+  return { limit, over: models.length * samples * (control ? 2 : 1) > limit };
+}
+
+function loadRuleShortcuts() {
+  if (shortcutsLoaded) return;
+  shortcutsLoaded = true;
+  try {
+    const saved = JSON.parse(localStorage.getItem(shortcutStorage) || '[]');
+    if (!Array.isArray(saved)) throw new Error('Invalid shortcut storage');
+    customShortcuts = [...new Set(saved.filter(id => validShortcut(id) && !ruleModelShortcuts.includes(id)))];
+  } catch { shortcutStorageNote = '无法读取浏览器快捷项，内置模型仍可使用。'; }
+}
+function saveRuleShortcuts(models) {
+  customShortcuts = [...new Set(models.filter(id => !ruleModelShortcuts.includes(id)))];
+  try {
+    localStorage.setItem(shortcutStorage, JSON.stringify(customShortcuts));
+    shortcutStorageNote = '';
+  } catch { shortcutStorageNote = '浏览器不允许保存，快捷项仅在本页生效。'; }
+  $('rule-shortcut-status').textContent = shortcutStorageNote;
+  renderRuleModelControls();
+}
+
+const modelGlyph = name => `<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${{plus:'M12 5v14M5 12h14', check:'m20 6-11 11-5-5', x:'M18 6 6 18M6 6l12 12'}[name]}"/></svg>`;
+function modelTokens(models, action, label) {
+  return models.map(id => {
+    const safe = escapeHTML(id);
+    return `<li class="rule-model-token" data-key="id:${safe}"><code>${safe}</code><button type="button" data-${action}="${safe}" aria-label="${label} ${safe}" title="${label} ${safe}">${modelGlyph('x')}</button></li>`;
+  }).join('');
+}
+function renderRuleModelControls() {
+  const effective = draftRuleModels(), limit = ruleModelLimit();
+  const pending = effective.length - selectedRuleModels.length;
+  $('rule-model-count').textContent = `已选 ${selectedRuleModels.length}/${limit}${pending ? ` · 待添加 ${pending}` : ''}`;
+  patchView($('rule-model-selection'), modelTokens(selectedRuleModels, 'remove-model', '移除模型'));
+  patchView($('rule-model-shortcuts'), [...ruleModelShortcuts, ...customShortcuts].map(id => {
+    const safe = escapeHTML(id), selected = effective.includes(id);
+    return `<button class="rule-shortcut" data-key="quick:${safe}" type="button" data-add-model="${safe}" aria-pressed="${selected}" ${selected || effective.length >= limit ? 'disabled' : ''}>${modelGlyph(selected ? 'check' : 'plus')}<code>${safe}</code></button>`;
+  }).join(''));
+  patchView($('rule-custom-shortcuts'), modelTokens(customShortcuts, 'remove-shortcut', '移除快捷项'));
+  $('rule-model-add').disabled = !value('rule-models');
+  $('rule-shortcut-save').disabled = !value('rule-shortcut-draft');
+}
+
+function changeRuleModels(models, consumeDraft = false) {
+  selectedRuleModels = models;
+  if (consumeDraft) $('rule-models').value = '';
+  $('rule-models').dispatchEvent(new Event('input', {bubbles: true}));
+}
+function addRuleModels(ids, consumeDraft = false) {
+  const models = [...new Set([...selectedRuleModels, ...ids])];
+  const problem = ruleModelsProblem([...new Set([...models, ...splitRuleModels(value('rule-models'))])]);
+  if (problem) { markFieldError('rule-models', problem); return; }
+  changeRuleModels(models, consumeDraft);
+  $('rule-models').focus({ preventScroll: true });
+}
+
+const keepingLegacySchedule = () => !$('rule-legacy-schedule').hidden && !checked('rule-convert-cron');
+
+// Validate before locking the form so the first invalid control can receive focus.
+function validateRuleForm(form) {
+  const messages = { 'rule-name': '请填写规则名称。', 'rule-target': '请选择目标凭证。',
+    'rule-samples': '每模型样本数须为 1–8 的整数。', 'rule-cron': '请填写五段 Cron 检测周期。',
+    'rule-max-results': '保留检测结果数须为 1–200 的整数。' };
+  for (const field of form.elements) {
+    if (!field.willValidate || (field.validity.valid && (field.id !== 'rule-name' || field.value.trim()))) continue;
+    markFieldError(field.id, messages[field.id] || field.validationMessage);
+    return false;
+  }
+  return true;
+}
+
+function updateRuleSchedule() {
+  const legacy = keepingLegacySchedule(), cron = $('rule-cron');
+  $('rule-schedule-fields').hidden = legacy;
+  cron.disabled = legacy;
+  if (legacy) clearFieldError(cron);
+  const rule = state.rules.find(r => r.id === value('rule-id'));
+  $('rule-schedule-note').textContent = rule && ruleHeld(rule) ? '凭证暂停归属未解除，检测已停止。'
+    : checked('rule-timer') ? '保存后从下个周期开始，仅运行本条规则。'
+    : rule?.enabled === false ? '原规则已暂停，保存不会恢复检测。' : '关闭时仅手动执行。';
+}
+
+let previewRead;
+async function updateRulePreview(question) {
+  const preview = $('rule-preview'), toggle = $('rule-preview-toggle'), answer = $('rule-preview-answer'), editor = state.editor;
+  toggle.hidden = !question || question.kind === 'custom';
+  if (toggle.hidden) toggle.setAttribute('aria-expanded', 'false');
+  preview.hidden = toggle.getAttribute('aria-expanded') !== 'true';
+  const random = question?.kind === 'random';
+  $('rule-preview-prompt').textContent = random ? '执行时生成本轮题面，同一范围批次使用同一道题。' : question?.prompt || '未提供题面';
+  if (preview.hidden || !editor || question?.kind !== 'logic') {
+    previewRead = null;
+    answer.textContent = random ? '执行时由本地求解器计算' : '无固定参考答案';
+    return;
+  }
+  if (previewRead?.question === question && previewRead.editor === editor) return;
+  const read = previewRead = {question, editor};
+  const current = () => previewRead === read && state.editor === editor && !preview.hidden && value('rule-question') === question.id;
+  answer.textContent = '读取中…';
+  try {
+    const record = await api(`/rules/question-preview?id=${encodeURIComponent(question.id)}`);
+    if (!current()) return;
+    if (record.id !== question.id || record.version !== question.version || record.prompt !== question.prompt || !record.answer) throw Error();
+    answer.textContent = record.answer;
+  } catch {
+    if (current()) answer.textContent = '未取得此版本的参考答案，收起后可重试。';
+  }
+}
+
+function updateRuleQuestion(all, target) {
+  const question = state.questions.find(q => q.id === value('rule-question'));
+  const custom = value('rule-question') === 'custom', random = question?.kind === 'random';
+  const original = state.rules.find(r => r.id === value('rule-id'));
+  const saved = original?.config || original;
+  const official = state.settings.capabilities?.mode === 'official_observation';
+  const mode = $('rule-judge-mode');
+  const llm = mode.querySelector('[value="llm"]'), deterministic = mode.querySelector('[value="deterministic"]');
+  const hasOracle = question?.kind === 'logic' || random;
+  // An unrelated edit must not rewrite a historical judge or control configuration.
+  const sameQuestion = !!saved && saved.question_id === value('rule-question');
+  const keepJudge = sameQuestion && saved.judge?.mode === mode.value;
+  llm.disabled = all || (official && !(sameQuestion && saved.judge?.mode === 'llm'));
+  deterministic.disabled = !!question && !hasOracle && !(keepJudge && mode.value === 'deterministic');
+  if ((mode.value === 'llm' && llm.disabled) || (mode.value === 'deterministic' && deterministic.disabled)) mode.value = hasOracle ? 'deterministic' : 'manual';
+  const unsupported = official && !all && (mode.value === 'llm' || (random && value('rule-control-target')));
+  const note = unsupported ? '原规则依赖独立凭证；官方 CPA 无法核验独立身份，不能执行该配置。'
+    : !hasOracle && question ? (mode.value === 'deterministic' ? '此题没有可自动判定的整数答案；原判题设置只会给出「无法判断」。' : '此题没有可自动判定的整数答案。')
+    : !all && official && target ? '官方 CPA 无法核验独立凭证身份，不提供独立模型判题。' : '';
+  $('rule-judge-note').textContent = note; $('rule-judge-note').hidden = !note;
+  void updateRulePreview(question);
+  $('rule-prompt-field').hidden = !custom; $('rule-standard-field').hidden = !custom;
+  $('rule-control-fields').classList.toggle('hidden', all || !random || (official && !saved?.control_auth_id));
+  $('rule-judge-fields').hidden = mode.value !== 'llm';
+  if (!custom) clearFieldError($('rule-prompt'));
+  if ($('rule-control-fields').classList.contains('hidden')) clearFieldError($('rule-control-target'));
+  if ($('rule-judge-fields').hidden) { clearFieldError($('rule-judge-target')); clearFieldError($('rule-judge-model')); }
+}
+
+function ruleHandling() { return $('rule-form').elements.namedItem('rule-action').value || 'observe_only'; }
+
+function updateRuleHandling() {
+  const action = ruleHandling(), pause = action === 'disable_credential', managing = action !== 'observe_only';
+  const supported = state.settings?.capabilities?.credential_management === true;
+  for (const input of $('rule-form').querySelectorAll('[name="rule-action"]')) input.disabled = input.value !== 'observe_only' && !supported;
+  $('rule-restore-option').hidden = !pause;
+  $('rule-auto-restore').disabled = !pause;
+  $('rule-restore-detail').textContent = $('rule-scope-directory').checked
+    ? '人工停用和本规则暂停的凭证均可复检，全部模型和样本答对后启用。'
+    : '本规则暂停的凭证继续参加后续检测，全部模型和样本答对后恢复。';
+  $('rule-handling-note').textContent = !managing ? '只检测并记录结果，不处理账号。'
+    : value('rule-judge-mode') !== 'deterministic' ? '暂停或移除凭证需使用标准答案判定，请调整判题方式。'
+    : action === 'delete_credential' ? '整轮结果完整且出现答错时，从 CPA 删除对应凭证；不会自动重新上传。网络错误与未知结果不触发删除。'
+    : '整轮结果完整且出现答错时暂停对应凭证；网络错误与未知结果不触发暂停。';
+  if (managing) $('rule-handling-note').textContent += ' 当前支持 OpenAI / Codex 文件凭证，需匹配全部所选模型。';
+}
+
+function updateRuleFields() {
+  const scope = $('rule-form').elements.namedItem('rule-scope').value;
+  const all = !!dynamicScopeLabel(scope);
+  $('rule-target-field').hidden = all; $('rule-target').required = !all; $('rule-target').disabled = all;
+  if (all) clearFieldError($('rule-target'));
+  const selected = draftRuleModels(), target = findTarget(value('rule-target'));
+  updateRuleQuestion(all, target);
+  const candidates = all ? scopeMatches([]) : [target];
+  const saved = state.rules.find(r => r.id === value('rule-id'));
+  const restore = ruleHandling() === 'disable_credential' && checked('rule-auto-restore');
+  const recovery = all && restore ? recoveryCandidates({ ...saved, target_scope: scope, action: 'disable_credential', auto_restore: true }) : [];
+  const models = state.targetsFresh ? [...new Set([...candidates.flatMap(availableModels), ...recovery.flatMap(availableModels), ...(recovery.length ? saved?.models || [] : [])])].sort() : [];
+  const matches = selected.some(id => models.includes(id));
+  $('rule-scope-note').textContent = all ? !state.targetsFresh ? '目录未确认，执行时重新匹配。'
+    : scope === 'all_credentials' ? `全部 ${state.targets.length} 个凭证，${restore ? `待复检的停用凭证 ${recovery.length} 个（含人工停用）。` : '人工禁用的凭证标记为跳过。'}`
+    : recovery.length ? `本规则已暂停的 ${recovery.length} 个凭证将在下轮复测。`
+    : selected.length && !matches ? '暂无匹配凭证；新启用的凭证下轮匹配。' : '新启用的匹配凭证从下一轮纳入。'
+    : !target ? '请选择一个 CPA 凭证。' : !state.targetsFresh ? '凭证目录未确认。' : selected.some(id => !models.includes(id)) ? '此凭证未注册部分已选模型。' : '仅使用指定凭证。';
+  const picker = $('rule-model-catalog');
+  const options = `<option value="">${models.length ? '从凭证目录添加' : '凭证目录暂无模型'}</option>` + models.map(m => `<option value="${escapeHTML(m)}" ${selected.includes(m) ? 'disabled' : ''}>${escapeHTML(m)}</option>`).join('');
+  patchView(picker, options);
+  picker.disabled = !models.length || selected.length >= ruleModelLimit();
+  picker.title = !models.length ? '凭证目录暂无模型' : picker.disabled ? '已达检测模型上限' : '从凭证目录添加模型';
+  renderRuleModelControls();
+  const samples = number('rule-samples');
+  const validSamples = Number.isInteger(samples) && samples >= 1 && samples <= 8;
+  for (const button of $('rule-form').querySelectorAll('[data-sample-step]')) {
+    button.disabled = validSamples && (button.dataset.sampleStep === '1' ? samples === 8 : samples === 1);
+  }
+  const byCount = value('rule-retention-mode') === 'count';
+  const countField = $('rule-max-results');
+  countField.hidden = countField.disabled = !byCount;
+  countField.required = byCount;
+  const limit = number('rule-max-results'), round = selected.length * samples, retention = $('rule-retention-note');
+  retention.textContent = byCount && validSamples && limit > 0 && limit < round ? `为保留一整轮结果，保存时至少保留 ${round} 条。` : '';
+  retention.hidden = !retention.textContent;
+  updateRuleSchedule();
+  updateRuleHandling();
+}
+
 function editRule(rule = {}) {
   const config = rule.config || rule;
+  loadRuleShortcuts();
+  selectedRuleModels = rule.id ? [...(config.models || [])] : [ruleModelShortcuts[0]];
+  $('rule-models').value = $('rule-shortcut-draft').value = '';
+  $('rule-shortcut-panel').hidden = true;
+  $('rule-shortcut-toggle').setAttribute('aria-expanded', 'false');
+  $('rule-shortcut-status').textContent = shortcutStorageNote;
+  $('rule-form').querySelectorAll('[aria-invalid="true"]').forEach(clearFieldError);
+  $('rule-form').querySelector('.dialog-message')?.remove();
+  $('rule-preview-toggle').setAttribute('aria-expanded', 'false');
   $('rule-dialog-title').textContent = rule.id ? '编辑检测规则' : '新建检测规则';
+  const legacy = !!rule.id && (!!rule.timezone || rule.interval_seconds > 0);
+  $('rule-legacy-schedule').hidden = !legacy;
+  $('rule-original-plan').textContent = !legacy ? '' : rule.cron ? `${rule.cron} · ${rule.timezone || '服务端时区'}` : `每 ${rule.interval_seconds} 秒`;
+  $('rule-convert-cron').checked = false;
+  const effort = rule.id ? config.parameters?.reasoning_effort || '' : 'high';
+  const efforts = $('rule-form').elements.namedItem('rule-effort');
+  const legacyEffort = !Array.from(efforts).some(radio => radio.value && radio.value === effort);
+  $('rule-legacy-effort').hidden = !legacyEffort;
+  $('rule-legacy-effort').querySelector('input').disabled = !legacyEffort;
+  $('rule-legacy-effort').querySelector('span').textContent = effort || '未指定';
+  for (const radio of efforts) radio.checked = radio.value === (legacyEffort ? '' : effort);
+  const legacyRetention = !!rule.id && !rule.max_results && rule.retention_days > 0;
+  $('rule-retention-mode').querySelector('[value="legacy"]').hidden = !legacyRetention;
   const values = {
     id: rule.id || '',
     revision: rule.revision || '',
     name: rule.name || '',
-    target: config.auth_id || value('target'),
-    models: config.models?.join('\n') || value('models'),
-    question: config.question_id || value('question'),
+    target: config.auth_id || '',
+    question: config.question_id || 'logic-candy',
     samples: config.samples || 1,
-    'max-tokens': config.parameters?.max_tokens || 2048,
-    temperature: config.parameters?.temperature ?? 0,
-    reasoning: config.parameters?.reasoning_effort || '',
     prompt: config.prompt || '',
     'review-standard': config.review_standard || '',
     'judge-mode': config.judge?.mode || 'deterministic',
     'judge-target': config.judge?.auth_id || '',
     'control-target': config.control_auth_id || '',
     'judge-model': config.judge?.model || '',
-    action: 'observe_only',
-    interval: rule.interval_seconds || 3600,
-    cron: rule.cron || '',
-    timezone: rule.timezone || 'Asia/Shanghai',
-    fail: rule.fail_threshold || 3,
-    retention: rule.retention_days || 30,
+    cron: rule.cron || $('rule-cron').defaultValue,
+    'retention-mode': legacyRetention ? 'legacy' : rule.retention_mode || 'count',
+    'max-results': rule.max_results || $('rule-max-results').defaultValue,
   };
   for (const [name, current] of Object.entries(values)) $(`rule-${name}`).value = current;
-  for (const [name, current] of Object.entries({
-    enabled: rule.enabled ?? true,
-    scheduling: !!rule.scheduling_enabled,
-    'auto-pause': false,
-  }))
-    $(`rule-${name}`).checked = current;
-  $('rule-control-fields').classList.toggle('hidden', value('rule-question') !== 'random-linear');
+  $('rule-form').elements.namedItem('rule-scope').value = rule.id ? rule.target_scope || 'single' : 'all_enabled';
   const held = ruleHeld(rule);
-  $('rule-enabled').disabled = held;
-  if (held) $('rule-enabled').checked = false;
+  $('rule-form').elements.namedItem('rule-action').value = ['disable_credential','delete_credential'].includes(rule.action) ? rule.action : 'observe_only';
+  $('rule-auto-restore').checked = rule.auto_restore === true;
+  const timer = $('rule-timer');
+  timer.checked = !held && rule.timer_active === true;
+  timer.dataset.initial = String(timer.checked);
+  timer.disabled = held || (!!rule.id && typeof rule.timer_active !== 'boolean');
+  updateRuleFields();
   $('rule-hold-note').classList.toggle('hidden', !held);
   setPage('operations');
-  setOpsView('rules');
   openEditor('rule-dialog');
 }
 
@@ -1132,20 +1628,33 @@ async function saveRule() {
   const body = {
     ...config,
     name: value('rule-name'),
-    action: value('rule-action'),
-    enabled: checked('rule-enabled'),
-    scheduling_enabled: checked('rule-scheduling'),
+    action: ruleHandling(),
+    auto_restore: ruleHandling() === 'disable_credential' && checked('rule-auto-restore'),
+    activation: String(checked('rule-timer')) === $('rule-timer').dataset.initial ? 'keep' : checked('rule-timer') ? 'start' : 'stop',
     automatic_pause: false,
-    interval_seconds: number('rule-interval'),
-    cron: value('rule-cron'),
-    timezone: value('rule-timezone'),
-    fail_threshold: number('rule-fail'),
-    retention_days: number('rule-retention'),
+    fail_threshold: state.rules.find(r => r.id === value('rule-id'))?.fail_threshold || 3,
   };
+  if (body.action !== 'observe_only' && config.judge.mode !== 'deterministic') fieldError('rule-judge-mode', '暂停或移除凭证需使用标准答案判定。');
+  const retentionMode = value('rule-retention-mode');
+  if (retentionMode !== 'legacy') body.retention_mode = retentionMode;
+  if (retentionMode === 'count') {
+    const requested = number('rule-max-results');
+    if (!Number.isInteger(requested) || requested < 1 || requested > 200) fieldError('rule-max-results', '保留检测结果数须为 1–200 的整数。');
+    body.max_results = Math.max(requested, config.models.length * config.samples);
+  }
+  if (!keepingLegacySchedule()) {
+    const cron = value('rule-cron').split(/\s+/);
+    if (cron.length !== 5 || cron.some(field => /[@=]/.test(field))) fieldError('rule-cron', '请输入五段 Cron：分、时、日、月、星期，不含秒或时区。');
+    body.cron = cron.join(' ');
+  }
   if (value('rule-id')) Object.assign(body, { id: value('rule-id'), revision: number('rule-revision') });
-  await api('/rules', body.id ? 'PUT' : 'POST', body);
+  try { await api('/rules', body.id ? 'PUT' : 'POST', body); }
+  catch (error) {
+    if (error.code === 'invalid_cron' && !keepingLegacySchedule()) fieldError('rule-cron', '检测周期无效，请核对各段的取值、步长和日期。');
+    throw error;
+  }
   closeSurface('rule-dialog', true);
-  if (state.page === 'operations') notice(`规则“${body.name}”已保存，不会启动模型调用。`);
+  if (state.page === 'operations') notice(`规则“${body.name}”已保存。${body.activation === 'start' ? '将从下个周期开始检测。' : ''}`);
   await loadOperations();
 }
 
@@ -1221,44 +1730,13 @@ async function reconcileRelease() {
   }
 }
 
-const budgetFields = [
-  ['max_models', '最大模型数', 1, 16, 8],
-  ['max_samples', '总样本上限', 1, 128, 32],
-  ['max_output_tokens', '输出 token 上限', 16, 32768, 4096],
-  ['max_response_bytes', '响应字节上限', 1024, 2097152, 262144],
-  ['daily_calls', '每日调用预算', 1, 100000, 200],
-  ['daily_tokens', '每日 token 预算', 1, 100000000, 1000000],
-  ['retention_days', '历史保留（天）', 1, 365, 30],
-  ['max_storage_bytes', '存储上限（字节）', 1048576, 107374182400, 134217728],
-];
-
-async function openSettings() {
-  const sequence = ++state.reads.editor;
-  const editor = state.editor;
-  const settings = await api('/settings');
-  if (sequence !== state.reads.editor || editor !== state.editor || state.page !== 'operations') return;
-  state.settings = settings;
-  $('settings-scheduling').checked = !!state.settings.scheduling_enabled;
-  $('settings-auto-pause').checked = false;
-  $('settings-auto-pause').disabled = true;
-  $('settings-fields').innerHTML =
-    budgetFields
-      .map(
-        ([field, label, min, max, fallback]) =>
-          `<label>${escapeHTML(label)}<input id="setting-${field}" type="number" min="${min}" max="${max}" required value="${escapeHTML(state.settings[field] ?? fallback)}"></label>`,
-      )
-      .join('') +
-    `<label>全局 worker（重启生效）<input value="${escapeHTML(state.settings.workers || 2)}" disabled></label><label>队列容量（重启生效）<input value="${escapeHTML(state.settings.queue || 32)}" disabled></label><label>每凭证并发<input value="1" disabled></label>`;
-  openEditor('settings-dialog');
-}
-
-function exportRun() {
-  if (!state.run) return;
-  const blob = new Blob([JSON.stringify(state.run, null, 2)], { type: 'application/json' });
+function exportRun(run) {
+  if (!run) return;
+  const blob = new Blob([JSON.stringify(run, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `model-quality-${state.run.id || 'run'}.json`;
+  link.download = `model-quality-${run.id || run.run_id || 'run'}.json`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
@@ -1266,15 +1744,17 @@ function exportRun() {
 async function dispatchClick(event) {
   const button = event.target.closest('button,[data-run]');
   if (!button) return;
+  if (button.dataset.deleteRun) { confirmHistoryDelete(button.dataset.deleteRun); return; }
   if (button.dataset.close) {
     closeSurface(button.dataset.close);
     if (button.dataset.close === 'release-dialog') { state.reads.preview++; state.releaseBlocked = true; }
     if (button.dataset.close === 'preview-dialog') $('safe-preview').srcdoc = '';
     return;
   }
-  if (button.dataset.manualView) {
-    setManualView(button.dataset.manualView, true);
-    if (button.dataset.manualView === 'history' && state.connected) await loadHistory();
+  const manualView = button.dataset.manualView || button.dataset.manualPane;
+  if (manualView) {
+    setManualView(manualView, !button.dataset.manualPane);
+    if (manualView === 'history' && state.connected) await loadHistory();
     return;
   }
   if (button.id === 'reading-toggle') {
@@ -1282,12 +1762,37 @@ async function dispatchClick(event) {
     button.focus({ preventScroll: true });
     return;
   }
-  if (button.dataset.opsView) { setOpsView(button.dataset.opsView); return; }
+  if (button.hasAttribute('data-rule-new')) { protectEditor(() => editRule()); return; }
+  if (button.hasAttribute('data-rule-clear')) { $('rule-search').value = ''; $('rule-filter').value = 'all'; renderRules(); $('rule-search').focus(); return; }
+  if (button.dataset.ruleTimer) {
+    const rule = state.rules.find(item => item.id === button.dataset.ruleTimer);
+    if (!rule || button.disabled) return;
+    await safely(async () => {
+      renderRules();
+      try {
+        const updated = await api('/rules/timer', 'PUT', { id: rule.id, revision: rule.revision, enabled: !rule.timer_active });
+        Object.assign(rule, updated);
+      } catch (error) {
+        if (isDiscarded(error)) throw error;
+        await loadOperations().catch(() => {});
+        if (error.status === 409) throw new Error('规则状态已变更，请核对列表后重试。');
+        throw error;
+      }
+      await loadOperations();
+    }, `rule-timer:${rule.id}`);
+    renderRules();
+    return;
+  }
+  if (button.dataset.ruleSelect) {
+    state.scopeRule = state.scopeRule === button.dataset.ruleSelect ? '' : button.dataset.ruleSelect;
+    selectBatch('', 0, false); await loadActivity(); return;
+  }
   if (button.dataset.page) {
     setPage(button.dataset.page);
     return;
   }
   if (button.dataset.run) {
+    if (button.closest('#page-operations')) return openQualityDetail(button.dataset.run);
     setPage('manual');
     await loadRun(button.dataset.run);
     return;
@@ -1300,8 +1805,10 @@ async function dispatchClick(event) {
     if (!expanded) button.scrollIntoView({ block: 'nearest' });
     return;
   }
+  const detail = button.closest('#quality-detail') ? qualityDetail : null;
+  const sourceRun = detail ? detail.run : state.run;
   if (button.dataset.copySample != null) {
-    await navigator.clipboard.writeText(state.run.samples[Number(button.dataset.copySample)]?.output || '');
+    await navigator.clipboard.writeText(sourceRun.samples[Number(button.dataset.copySample)]?.output || '');
     localFeedback(button, '已复制原文');
     return;
   }
@@ -1312,27 +1819,31 @@ async function dispatchClick(event) {
   }
   if (button.dataset.previewSample != null) {
     const preview = safePreview(
-      state.run.samples[Number(button.dataset.previewSample)]?.output || '',
+      sourceRun.samples[Number(button.dataset.previewSample)]?.output || '',
     );
     $('preview-dialog').showModal();
     $('safe-preview').srcdoc = preview;
     return;
   }
   if (button.dataset.evidenceSample != null) {
-    const sample = state.run.samples[Number(button.dataset.evidenceSample)];
-    $('evidence-content').innerHTML = renderSampleEvidence(sample);
+    const sample = sourceRun.samples[Number(button.dataset.evidenceSample)];
+    const evidenceID = sample.evidence?.auth_id;
+    const label = evidenceID && evidenceID === sourceRun.config?.auth_id ? sourceRun.credential_email || credentialName(evidenceID) : credentialName(evidenceID);
+    $('evidence-content').innerHTML = renderSampleEvidence(sample, sourceRun.source === 'manual_test', label);
     $('evidence-dialog').showModal();
     return;
   }
   if (button.dataset.reviewSample != null) {
     const index = Number(button.dataset.reviewSample);
+    const fields = button.closest('.sample-review');
     await api('/runs/review', 'POST', {
-      id: state.run.id,
-      sample_index: index,
-      verdict: value(`review-${index}`),
-      note: value(`review-note-${index}`),
+      id: sourceRun.id,
+      sample_index: index + (sourceRun.pruned_samples || 0),
+      verdict: fields.querySelector('select').value,
+      note: fields.querySelector('input').value.trim(),
     });
-    await loadRun(state.run.id, false);
+    if (detail) await readQualityDetail(detail);
+    else if (state.run?.id === sourceRun.id) await loadRun(sourceRun.id, false);
     localFeedback(button, '评审已保存');
     return;
   }
@@ -1342,32 +1853,69 @@ async function dispatchClick(event) {
   }
   if (button.dataset.ruleRun) {
     const rule = state.rules.find((entry) => entry.id === button.dataset.ruleRun);
-    const blocked = rule ? blockedConfig(rule.config || rule) : '规则当前不可用';
+    const recovery = rule?.action === 'disable_credential' && rule.auto_restore && rule.handling?.some(h => h.auth_id === rule.auth_id && h.state === 'disabled');
+    const blocked = rule ? recovery && state.connected && state.targetsFresh ? '' : blockedConfig(rule.config || rule) : '规则当前不可用';
     if (blocked) throw new Error(blocked);
     if (!rule?.enabled || ruleHeld(rule))
       throw new Error('检测已停止。请先人工解除凭证暂停，再显式恢复检测规则。');
-    const reply = await api('/rules/run', 'POST', { id: button.dataset.ruleRun });
-    setPage('manual');
-    await loadRun(reply.run_id || reply.id);
+    const run = () => api('/rules/run', 'POST', { id: rule.id, revision: rule.revision });
+    if (dynamicScopeLabel(rule.target_scope)) {
+      const models = rule.models || [], matched = scopeMatches(models);
+      const calls = scopeSampleCount(matched, models, rule.samples);
+      const directory = rule.target_scope === 'all_credentials' ? `目录共 ${state.targets.length} 个凭证。${rule.action === 'disable_credential' && rule.auto_restore ? '人工停用的凭证整轮通过后将启用。' : '人工禁用的凭证将跳过。'}` : '';
+      const managed = ['disable_credential','delete_credential'].includes(rule.action);
+      const candidates = matched.filter(t => models.every(m => availableModels(t).includes(m)));
+      actionDialog({ title: '执行范围检测？', description: directory + (managed ? `已启用且模型匹配 ${candidates.length} 个，本规则待复测 ${recoveryCandidates(rule).length} 个。执行时核对凭证状态，并按已保存的策略处理结果。` : `当前匹配 ${matched.length} 个凭证，预计调用 ${calls} 次。实际数量按提交时可用的凭证和模型确定，将消耗调用额度。`), confirm: '开始检测', submit: async () => {
+        let receipt;
+        try {
+          receipt = await run();
+          if (!Number.isSafeInteger(receipt?.count) || receipt.count < 0 || !Number.isSafeInteger(receipt.skipped) || receipt.skipped < 0 || (receipt.count > 0 && !receipt.scope_batch_id)) throw Error('invalid receipt');
+        } catch (error) {
+          if (isDiscarded(error) || (error.status >= 400 && error.status < 500 && !error.outcomeUnknown)) throw error;
+          // Do not leave a retry button when the server may already have queued a batch.
+          state.scopeRule = rule.id;
+          selectBatch('');
+          await loadOperations().catch(() => {});
+          notice('提交结果未确认。请先核对规则运行记录，不要重复执行。', true);
+          return;
+        }
+        if (receipt.count) selectBatch(receipt.scope_batch_id);
+        let current = true;
+        try { await loadOperations(); } catch (error) { if (isDiscarded(error)) throw error; current = false; }
+        const skipped = Object.keys(receipt.skip_reasons || {});
+        const manualNote = receipt.skip_reasons?.manual_disabled ? `其中 ${receipt.skip_reasons.manual_disabled} 个人工禁用，名单见规则卡片。` : '';
+        const handlingNote = manualNote + (managed && skipped.some(reason => reason.includes('modified') || reason.includes('attention')) ? '部分凭证已变更或处置待核对。' : '');
+        notice((receipt.count ? `已排队 ${receipt.count} 个凭证，跳过 ${receipt.skipped} 个。` : '本轮没有匹配的可用凭证，未发起模型调用。') + handlingNote + (current ? '' : '运行记录读取失败，请刷新。'));
+      } }); return;
+    }
+    const reply = await run();
+    await Promise.all([openQualityDetail(reply.run_id || reply.id), loadActivity()]);
     return;
   }
-  if (button.dataset.rulePause) {
-    const scope = feedbackScope();
-    const rule = state.rules.find((entry) => entry.id === button.dataset.rulePause);
-    if (!state.connected || !state.targetsFresh) throw new Error('凭证状态尚未确认，请刷新后再操作检测规则。');
-    if (ruleHeld(rule)) throw new Error('凭证仍被暂停，不能恢复检测规则。');
-    await api('/rules/pause', 'POST', { id: rule.id, revision: rule.revision, paused: rule.enabled });
-    if (scope === feedbackScope()) notice(rule.enabled ? '检测规则已暂停。已有凭证暂停仍然生效。' : '检测规则已恢复。');
-    await loadOperations();
-    return;
+  if (button.dataset.ruleBatch) {
+    selectBatch(button.dataset.ruleBatch); await loadActivity(); return;
   }
   if (button.dataset.ruleDelete) {
     const rule = state.rules.find((entry) => entry.id === button.dataset.ruleDelete);
-    actionDialog({ title: '删除检测规则', description: `删除“${rule.name || rule.id}”后无法撤销。已有运行记录保留；持有暂停的规则须先处理暂停归属。`, confirm: '删除规则', danger: true, submit: async () => {
+    actionDialog({ title: '删除检测规则', description: `将删除“${rule.name || rule.id}”及其全部运行记录，此操作无法撤销。`, confirm: '删除规则', danger: true, submit: async () => {
       await api('/rules', 'DELETE', { id: rule.id, revision: rule.revision });
+      if (state.scopeRule === rule.id || (state.scopeBatch && state.scopeBatch === rule.last_scope_batch)) {
+        state.scopeRule = '';
+        selectBatch('', 0, false);
+      }
       await loadOperations();
       if (state.page === 'operations') notice(`规则“${rule.name || rule.id}”已删除。`);
     } });
+    return;
+  }
+  if (button.dataset.handlingAck) {
+    const rule = state.rules.find(r => r.handling?.some(h => h.action_id === button.dataset.handlingAck));
+    const record = rule?.handling.find(h => h.action_id === button.dataset.handlingAck);
+    if (!record) throw new Error('处置记录已变化，请刷新。');
+    actionDialog({title: '核对人工处理', description: '请先在 CPA 中手动启用或移除该凭证。确认后会重新核对状态、结束本次处置关联，并停止此规则。此操作不会修改 CPA 凭证。', confirm: '核对并停止规则', submit: async () => {
+      await api('/rules/handling/acknowledge', 'POST', {rule_id: rule.id, auth_id: record.auth_id, action_id: record.action_id});
+      await loadOperations(); notice('人工处理已核对，规则已停止。');
+    }});
     return;
   }
   if (button.dataset.actionPreview != null) await previewAction(Number(button.dataset.actionPreview));
@@ -1375,13 +1923,13 @@ async function dispatchClick(event) {
 
 document.addEventListener('click', (event) => {
   const button = event.target.closest(
-    '[data-rule-run],[data-rule-pause],[data-rule-delete],[data-action-preview],[data-review-sample]',
+    '[data-rule-run],[data-rule-batch],[data-rule-delete],[data-handling-ack],[data-action-preview],[data-review-sample]',
   );
   if (button?.disabled) return;
   safely(() => dispatchClick(event), button ? `action:${JSON.stringify(button.dataset)}` : '', button);
 });
 document.addEventListener('keydown', (event) => {
-  if (['Enter', ' '].includes(event.key) && event.target.matches('[data-run]')) { event.preventDefault(); event.target.click(); }
+  if (['Enter', ' '].includes(event.key) && event.target.matches('[data-run]:not(button)')) { event.preventDefault(); event.target.click(); }
 });
 $('connection-top').addEventListener('click', () => $('connection-dialog').showModal());
 $('connection-open').addEventListener('click', () => $('connection-dialog').showModal());
@@ -1390,21 +1938,84 @@ $('connection-form').addEventListener('submit', (event) => {
   safely(() => connectManagement(value('management-key')), 'connect', event.submitter);
 });
 $('disconnect').addEventListener('click', () => disconnect());
-$('refresh').addEventListener('click', () => safely(refresh, 'refresh', $('refresh')));
+$('refresh').addEventListener('click', () => safely(state.page === 'login' ? loginWorkbench.refresh : refresh, 'refresh', $('refresh')));
 $('target').addEventListener('change', () => renderTarget(true));
 $('models').addEventListener('change', () => { renderReasoning(true); renderTarget(); });
 $('reasoning').addEventListener('change', () => { renderReasoning(true); renderAdmission(); });
+$('samples').addEventListener('change', renderAdmission);
 $('question').addEventListener('change', renderQuestion);
 $('prompt').addEventListener('input', () => {
   updateQuestionNote();
   renderAdmission();
 });
-$('rule-question').addEventListener('change', () =>
-  $('rule-control-fields').classList.toggle('hidden', value('rule-question') !== 'random-linear'),
-);
+for (const input of $('rule-form').querySelectorAll('[name="rule-action"]')) input.addEventListener('change', updateRuleFields);
+for (const id of ['rule-target','rule-question','rule-scope-all','rule-scope-directory','rule-scope-single','rule-auto-restore','rule-judge-mode','rule-models','rule-samples','rule-control-target','rule-max-results','rule-retention-mode']) $(id).addEventListener('input', updateRuleFields);
+for (const id of ['rule-timer','rule-convert-cron','rule-cron']) $(id).addEventListener('input', updateRuleSchedule);
+for (const button of $('rule-form').querySelectorAll('[data-sample-step]')) {
+  button.addEventListener('click', () => {
+    const field = $('rule-samples'), value = field.valueAsNumber;
+    field.value = Number.isFinite(value) ? Math.min(8, Math.max(1, Math.trunc(value) + Number(button.dataset.sampleStep))) : 1;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    if (button.disabled) field.focus({ preventScroll: true });
+  });
+}
+$('rule-preview-toggle').addEventListener('click', ({currentTarget: toggle}) => {
+  toggle.setAttribute('aria-expanded', String(toggle.getAttribute('aria-expanded') !== 'true'));
+  void updateRulePreview(state.questions.find(q => q.id === value('rule-question')));
+});
+$('rule-model-catalog').addEventListener('change', () => {
+  const model = value('rule-model-catalog');
+  if (!model) return;
+  $('rule-model-catalog').value = '';
+  addRuleModels([model]);
+});
+function commitModelInput() {
+  const ids = splitRuleModels(value('rule-models'));
+  if (ids.length) addRuleModels(ids, true);
+}
+$('rule-model-add').addEventListener('click', commitModelInput);
+$('rule-models').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); commitModelInput(); }
+});
+$('rule-model-shortcuts').addEventListener('click', event => {
+  const button = event.target.closest('[data-add-model]');
+  if (button && !button.disabled) addRuleModels([button.dataset.addModel]);
+});
+$('rule-model-selection').addEventListener('click', event => {
+  const button = event.target.closest('[data-remove-model]');
+  if (!button) return;
+  const index = selectedRuleModels.indexOf(button.dataset.removeModel);
+  changeRuleModels(selectedRuleModels.filter(id => id !== button.dataset.removeModel));
+  const buttons = $('rule-model-selection').querySelectorAll('button');
+  (buttons[index] || buttons[index - 1] || $('rule-models')).focus({preventScroll:true});
+});
+$('rule-shortcut-toggle').addEventListener('click', () => {
+  const panel = $('rule-shortcut-panel');
+  panel.hidden = !panel.hidden;
+  $('rule-shortcut-toggle').setAttribute('aria-expanded', String(!panel.hidden));
+  if (!panel.hidden) $('rule-shortcut-draft').focus();
+});
+$('rule-shortcut-draft').addEventListener('input', () => { $('rule-shortcut-save').disabled = !value('rule-shortcut-draft'); });
+$('rule-shortcut-save').addEventListener('click', () => {
+  const ids = splitRuleModels(value('rule-shortcut-draft'));
+  if (!ids.length || !ids.every(validShortcut)) {
+    $('rule-shortcut-status').textContent = '请输入有效模型 ID，每项最多 100 个字符、256 字节。';
+    $('rule-shortcut-draft').focus(); return;
+  }
+  $('rule-shortcut-draft').value = '';
+  saveRuleShortcuts([...customShortcuts, ...ids]);
+  if (!shortcutStorageNote) $('rule-shortcut-status').textContent = '快捷项已保存。';
+  $('rule-shortcut-draft').focus();
+});
+$('rule-custom-shortcuts').addEventListener('click', event => {
+  const button = event.target.closest('[data-remove-shortcut]');
+  if (!button) return;
+  saveRuleShortcuts(customShortcuts.filter(id => id !== button.dataset.removeShortcut));
+  $('rule-shortcut-draft').focus();
+});
 $('run-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  safely(() => submitRun(runConfig()), 'submit-run', $('run-submit'));
+  safely(() => submitRun(runConfig()), 'submit-run');
 });
 $('run-cancel').addEventListener('click', () =>
   safely(async () => {
@@ -1424,10 +2035,9 @@ $('run-rerun').addEventListener('click', () =>
       await submitRun(copyRunConfig(state.run.config));
     },
     'submit-run',
-    $('run-rerun'),
   ),
 );
-$('run-export').addEventListener('click', exportRun);
+$('run-export').addEventListener('click', () => exportRun(state.run));
 $('history-prev').addEventListener('click', () =>
   safely(async () => {
     state.historyOffset = Math.max(0, state.historyOffset - 10);
@@ -1443,6 +2053,7 @@ $('history-next').addEventListener('click', () =>
 $('rule-new').addEventListener('click', () => protectEditor(() => editRule()));
 $('rule-form').addEventListener('submit', (event) => {
   event.preventDefault();
+  if (!validateRuleForm(event.currentTarget)) return;
   safely(() => saveEditor(saveRule), 'save-rule', event.submitter);
 });
 $('release-confirm').addEventListener('click', () =>
@@ -1471,27 +2082,37 @@ $('release-confirm').addEventListener('click', () =>
   }, 'release', $('release-confirm')),
 );
 $('release-refresh').addEventListener('click', () => safely(reconcileRelease, 'release-refresh', $('release-refresh')));
-$('settings-open').addEventListener('click', () => protectEditor(() => safely(openSettings, 'settings-read', $('settings-open'))));
-$('settings-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  safely(
-    () => saveEditor(async () => {
-      const settings = {
-        ...state.settings,
-        scheduling_enabled: checked('settings-scheduling'),
-        automatic_pause: false,
-      };
-      delete settings.automatic_recovery;
-      delete settings.capabilities;
-      for (const [field] of budgetFields) settings[field] = number(`setting-${field}`);
-      await api('/settings', 'PUT', settings);
-      closeSurface('settings-dialog', true);
-      if (state.page === 'operations') notice('全局开关与预算已保存。');
-    }),
-    'settings-save',
-    event.submitter,
-  );
+function selectBatch(batch, offset = 0, focus = true) {
+  state.scopeBatch = batch; state.batchOffset = offset;
+  state.activityRows = null;
+  if (batch) state.scopeRule = '';
+  $('ops-batch-bar').hidden = !batch;
+  $('ops-batch-summary').textContent = '正在读取记录…';
+  $('ops-batch-prev').disabled = $('ops-batch-next').disabled = true;
+  state.resourceStatus.activity = 'loading'; patchView($('operations-history'), ''); renderActivityState(); renderRules();
+  if (focus && !$('action-dialog').open) {
+    $('ops-activity').focus({ preventScroll: true });
+    $('ops-activity').scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  }
+}
+for (const [id, shift] of [['ops-batch-prev',-20],['ops-batch-next',20],['ops-batch-clear',0]]) $(id).addEventListener('click', () => {
+  selectBatch(shift ? state.scopeBatch : '', shift ? Math.max(0, state.batchOffset + shift) : 0, false);
+  safely(loadActivity, 'batch-page');
 });
+$('ops-history-clear').addEventListener('click', () => actionDialog({
+  title: '清空所有规则的运行记录？', description: '将删除所有规则已结束的检测记录和对应日志，清空后无法恢复。', confirm: '清空记录', danger: true,
+  submit: async () => {
+    const result = await api('/rules/run-history', 'DELETE');
+    state.scopeRule = '';
+    selectBatch('', 0, false);
+    try { await loadOperations(); }
+    catch (error) { if (!isDiscarded(error)) notice('清空已完成，列表刷新失败，请刷新查看。', true); return; }
+    notice(`已清空 ${result.deleted} 条运行记录。${result.kept ? `保留 ${result.kept} 条进行中或处置所需的记录。` : ''}`);
+  },
+}));
+for (const id of ['ops-scope-clear', 'ops-all-rules']) $(id).addEventListener('click', () => { state.scopeRule = ''; selectBatch('', 0, false); safely(loadActivity, 'activity-scope'); });
+$('rule-search').addEventListener('input', renderRules);
+$('rule-filter').addEventListener('change', renderRules);
 window.addEventListener('beforeunload', (event) => {
   if (editorDirty()) { event.preventDefault(); event.returnValue = ''; }
 });
@@ -1508,10 +2129,15 @@ window.addEventListener('pageshow', (event) => {
   restoreManagementConnection();
 });
 document.body.classList.toggle('embedded', window.self !== window.top);
+$('connection-build').textContent = `UI ${JSON.parse($('build-info').textContent).ui_version}`;
+document.querySelector('.skip-link').addEventListener('click', event => {
+  event.preventDefault();
+  $('main').focus();
+  $('main').scrollIntoView({ block: 'start' });
+});
 setPage(location.hash.slice(1));
-setManualView('results');
+setManualView('setup');
 setReadingExpanded(false);
-setOpsView('attention');
 initializeTheme();
 $('theme-toggle').addEventListener('change', () => {
   if (document.body.classList.contains('host-themed')) return;
@@ -1556,19 +2182,20 @@ $('action-form').addEventListener('submit', async (event) => {
   }
 });
 $('action-dialog').addEventListener('cancel', (event) => { if (state.busy.has('dialog-action')) event.preventDefault(); });
-$('action-dialog').addEventListener('close', () => { actionRequest = null; $('action-name').value = ''; });
-document.addEventListener('input', (event) => {
-  const field = event.target;
+$('action-dialog').addEventListener('close', () => { if (!$('action-dialog').open) { actionRequest = null; $('action-name').value = ''; } });
+function clearFieldError(field) {
   if (field.id && field.hasAttribute('aria-invalid')) {
     field.removeAttribute('aria-invalid');
     const errorID = `${field.id}-error`;
     $(errorID)?.remove();
     field.setAttribute('aria-describedby', (field.getAttribute('aria-describedby') || '').split(' ').filter((id) => id !== errorID).join(' '));
   }
-  if (field.closest('.inline-editor')) updateEditorDirty();
+}
+document.addEventListener('input', (event) => {
+  clearFieldError(event.target);
+  if (event.target.closest('#rule-dialog')) updateEditorDirty();
 });
-document.addEventListener('change', (event) => { if (event.target.closest('.inline-editor')) updateEditorDirty(); });
-$('samples').addEventListener('change', updatePlan);
+document.addEventListener('change', (event) => { if (event.target.closest('#rule-dialog')) updateEditorDirty(); });
 for (const id of ['compare-model-a', 'compare-model-b', 'sample-filter']) $(id).addEventListener('change', () => {
   if (value('compare-model-a') === value('compare-model-b')) $('compare-model-b').value = '';
   applyComparison();
@@ -1576,9 +2203,11 @@ for (const id of ['compare-model-a', 'compare-model-b', 'sample-filter']) $(id).
 $('preview-dialog').addEventListener('close', () => { $('safe-preview').srcdoc = ''; });
 $('release-dialog').addEventListener('close', () => { state.reads.preview++; state.releaseBlocked = true; });
 window.addEventListener('hashchange', () => setPage(location.hash.slice(1)));
+window.addEventListener('resize', scheduleWorkspaceLayout);
+const workspaceLayoutObserver = new ResizeObserver(scheduleWorkspaceLayout);
+for (const selector of ['.app-header', '.primary-nav', '.quality-heading', '.quality-overview', '.manual-pane-switch', '#notice']) workspaceLayoutObserver.observe(document.querySelector(selector));
 renderMetrics({});
 renderRules();
-renderTargets();
 renderActivityState();
 renderAdmission();
 

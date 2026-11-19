@@ -41,15 +41,16 @@ export class ManagementClient {
   async requestHostLogin(path, method = 'GET', body, idempotencyKey) {
     const allowed = {
       '/capabilities': ['GET'], '/targets': ['GET'],
-      '/jobs': ['GET'], '/detail': ['GET'], '/logs': ['GET'], '/candidate': ['GET'],
+      '/jobs': ['GET', 'DELETE'], '/detail': ['GET'], '/logs': ['GET'], '/candidate': ['GET'],
       '/callback': ['POST'], '/cancel': ['POST'], '/commit': ['POST'], '/discard': ['POST'],
       '/vault/status': ['GET'],
       '/accounts': ['GET'], '/accounts/detail': ['GET'], '/accounts/import': ['POST'], '/accounts/entry': ['PUT', 'DELETE'],
       '/accounts/security': ['POST'], '/accounts/security/complete': ['POST'],
+      '/conversion/preview': ['POST'], '/conversion/upload': ['POST'],
       '/accounts/start': ['POST'], '/accounts/inspect': ['POST'], '/accounts/settings': ['GET', 'PUT'],
     };
     const parsed = new URL(path, 'https://management.invalid');
-    const queryKeys = new Set(['id', 'auth_id', 'cursor', 'limit']);
+    const queryKeys = new Set(['id', 'auth_id', 'account_id', 'cursor', 'limit']);
     if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') || path.split('?')[0] !== parsed.pathname || parsed.origin !== 'https://management.invalid' || parsed.hash ||
         !allowed[parsed.pathname]?.includes(method) || [...parsed.searchParams.keys()].some(key => !queryKeys.has(key))) {
       throw new Error('不支持的登录管理操作。');
@@ -63,6 +64,8 @@ export class ManagementClient {
     const epoch = this.#epoch;
     const controller = new AbortController();
     this.#pending.add(controller);
+    let readTimedOut = false;
+    const readTimer = method === 'GET' ? setTimeout(() => { readTimedOut = true; controller.abort(); }, 15000) : null;
     const headers = { Authorization: `Bearer ${this.#key}`, Accept: 'application/json' };
     if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -86,7 +89,10 @@ export class ManagementClient {
       try {
         data = text ? JSON.parse(text) : {};
       } catch {
-        throw new Error(`管理接口返回了无法解析的响应 (${response.status})，请核对宿主版本。`);
+        const invalid = new Error(`管理接口返回了无法解析的响应 (${response.status})，请核对任务状态。`);
+        invalid.code = 'management_response_invalid';
+        invalid.outcomeUnknown = method !== 'GET';
+        throw invalid;
       }
       if (!response.ok) {
         const message = data.error?.message || data.error || data.message || `接口返回 ${response.status}`;
@@ -100,10 +106,21 @@ export class ManagementClient {
       }
       return data;
     } catch (error) {
+      if (readTimedOut && epoch === this.#epoch) {
+        const timeout = new Error('管理数据读取超时，将重新读取。');
+        timeout.code = 'read_timeout';
+        throw timeout;
+      }
       if (epoch !== this.#epoch || error.name === 'AbortError') throw new DiscardedRequest();
-      if (error instanceof TypeError) throw new Error('无法连接管理接口，请检查宿主连接后重试。');
+      if (error instanceof TypeError) {
+        const network = new Error('无法连接管理接口，请检查宿主连接后核对状态。');
+        network.code = 'management_network_error';
+        network.outcomeUnknown = method !== 'GET';
+        throw network;
+      }
       throw error;
     } finally {
+      clearTimeout(readTimer);
       this.#pending.delete(controller);
     }
   }

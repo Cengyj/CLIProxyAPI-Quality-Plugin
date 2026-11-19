@@ -6,12 +6,15 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/MoeForge/moego/base64"
@@ -23,6 +26,37 @@ const ClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const RedirectURI = "http://localhost:1455/auth/callback"
 const AuthURL = "https://auth.openai.com/oauth/authorize"
 const TokenURL = "https://auth.openai.com/oauth/token"
+
+// ExchangeError exposes only a numeric response status and a fixed diagnosis.
+// The raw transport error and token response never leave the exchange boundary.
+type ExchangeError struct {
+	HTTPStatus int
+	Reason     string
+}
+
+func (e *ExchangeError) Error() string { return "exchange_failed" }
+
+func transportReason(err error) string {
+	var dns *net.DNSError
+	var network net.Error
+	var cert x509.UnknownAuthorityError
+	var invalid x509.CertificateInvalidError
+	var hostname x509.HostnameError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "network_timeout"
+	case errors.As(err, &network) && network.Timeout():
+		return "network_timeout"
+	case errors.As(err, &dns):
+		return "network_dns_failed"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "network_connection_refused"
+	case errors.As(err, &cert), errors.As(err, &invalid), errors.As(err, &hostname):
+		return "network_tls_failed"
+	default:
+		return ""
+	}
+}
 
 type Config struct{ ProxyURL string }
 type PKCECodes struct{ CodeVerifier, CodeChallenge string }
@@ -74,7 +108,7 @@ func (o *CodexAuth) ExchangeLoginCode(ctx context.Context, code string, p *PKCEC
 }
 
 // The code is single use. This function never retries or follows a redirect,
-// and no transport/server diagnostics or token body leave this boundary.
+// and only a fixed diagnosis and numeric status leave this boundary.
 func exchange(ctx context.Context, client *http.Client, endpoint, code string, p *PKCECodes, now time.Time) (*CodexAuthBundle, error) {
 	form := url.Values{"grant_type": {"authorization_code"}, "client_id": {ClientID}, "code": {code}, "redirect_uri": {RedirectURI}, "code_verifier": {p.CodeVerifier}}
 	req, e := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
@@ -86,17 +120,29 @@ func exchange(ctx context.Context, client *http.Client, endpoint, code string, p
 	req.Header.Set("Accept", "application/json")
 	res, e := client.Do(req)
 	if e != nil {
-		return nil, errors.New("exchange_failed")
+		return nil, &ExchangeError{Reason: transportReason(e)}
 	}
 	defer res.Body.Close()
 	b, e := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
 	defer clear(b)
-	if e != nil || len(b) > 1<<20 || res.StatusCode != 200 || !ojson.ValidBytes(b) {
-		return nil, errors.New("exchange_failed")
+	fail := func(reason string) (*CodexAuthBundle, error) {
+		return nil, &ExchangeError{HTTPStatus: res.StatusCode, Reason: reason}
+	}
+	if e != nil {
+		return fail("response_read_failed")
+	}
+	if len(b) > 1<<20 {
+		return fail("response_too_large")
+	}
+	if res.StatusCode != 200 {
+		return fail("upstream_rejected")
+	}
+	if !ojson.ValidBytes(b) {
+		return fail("response_invalid")
 	}
 	r := ojson.ParseBytes(b)
 	if !r.IsObject() {
-		return nil, errors.New("exchange_failed")
+		return fail("response_invalid")
 	}
 	seen := map[string]bool{}
 	valid := true
@@ -119,7 +165,7 @@ func exchange(ctx context.Context, client *http.Client, endpoint, code string, p
 		valid = false
 	}
 	if !valid {
-		return nil, errors.New("exchange_failed")
+		return fail("response_invalid")
 	}
 	return &CodexAuthBundle{TokenData: CodexTokenData{IDToken: r.Get("id_token").String(), AccessToken: r.Get("access_token").String(), RefreshToken: r.Get("refresh_token").String(), Expire: now.Add(time.Duration(seconds) * time.Second).UTC().Format(time.RFC3339)}, LastRefresh: now.UTC().Format(time.RFC3339)}, nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/robfig/cron/v3"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -59,6 +58,12 @@ func (en *Engine) claimRunLocked(id string) *executionTask {
 func (en *Engine) nextRunnableLocked() *executionTask {
 	for pending := len(en.queue); pending > 0; pending-- {
 		id := <-en.queue
+		if ids, ok := en.scopeBatches[id]; ok {
+			if task := en.rotateBatchLocked(id, ids, true); task != nil {
+				return task
+			}
+			continue
+		}
 		r := en.runs[id]
 		if r == nil || r.Status != "queued" {
 			continue
@@ -75,6 +80,10 @@ func (en *Engine) nextRunnableLocked() *executionTask {
 func (en *Engine) compactQueueLocked() {
 	for pending := len(en.queue); pending > 0; pending-- {
 		id := <-en.queue
+		if ids, ok := en.scopeBatches[id]; ok {
+			en.rotateBatchLocked(id, ids, false)
+			continue
+		}
 		if r := en.runs[id]; r != nil && r.Status == "queued" {
 			en.queue <- id
 		}
@@ -110,19 +119,11 @@ func (en *Engine) worker() {
 		}
 	}
 }
-func (en *Engine) execute(id string) {
-	en.mu.Lock()
-	task := en.claimRunLocked(id)
-	en.mu.Unlock()
-	if task != nil {
-		en.executeTask(task)
-	}
-}
 func (en *Engine) background() {
 	defer en.wg.Done()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	var lastMaintenance time.Time
+	var lastReconcile, lastRetention time.Time
 	for {
 		select {
 		case <-en.ctx.Done():
@@ -132,14 +133,17 @@ func (en *Engine) background() {
 				en.dropped.Add(1)
 			}
 		case now := <-ticker.C:
-			if lastMaintenance.IsZero() || now.Sub(lastMaintenance) >= 30*time.Second {
+			if en.Capabilities().QualityPause && now.Sub(lastReconcile) >= 30*time.Second {
 				if err := en.Reconcile(en.ctx); err != nil {
 					log.Debug("model-quality: reconciliation remains pending")
 				}
+				lastReconcile = now
+			}
+			if now.Sub(lastRetention) >= time.Hour {
 				if err := en.Prune(now.UTC()); err != nil {
 					log.WithError(err).Error("model-quality: retention failed")
 				}
-				lastMaintenance = now
+				lastRetention = now
 			}
 			en.Tick(now.UTC())
 		}
@@ -147,20 +151,22 @@ func (en *Engine) background() {
 }
 func (en *Engine) Tick(now time.Time) {
 	en.mu.Lock()
-	if en.closed || en.fault != nil || !en.cfg.SchedulingEnabled {
+	if en.closed || en.fault != nil || (!en.cfg.SchedulingEnabled && len(en.timers) == 0) {
 		en.mu.Unlock()
 		return
 	}
-	targets, err := en.host.Targets(en.ctx)
-	if err != nil {
-		en.mu.Unlock()
-		return
-	}
-	for _, t := range targets {
-		if t.QualityPaused {
-			if err = en.haltCredentialLocked(t.AuthID, "", "quality_paused"); err != nil {
-				en.mu.Unlock()
-				return
+	if en.Capabilities().QualityPause {
+		targets, err := en.host.Targets(en.ctx)
+		if err != nil {
+			en.mu.Unlock()
+			return
+		}
+		for _, t := range targets {
+			if t.QualityPaused {
+				if err = en.haltCredentialLocked(t.AuthID, "", "quality_paused"); err != nil {
+					en.mu.Unlock()
+					return
+				}
 			}
 		}
 	}
@@ -169,8 +175,17 @@ func (en *Engine) Tick(now time.Time) {
 	if err != nil {
 		return
 	}
+	if len(due) == 0 {
+		return
+	}
+	targets, inventoryErr := en.host.Targets(en.ctx)
+	if inventoryErr != nil {
+		log.Debug("model-quality: scheduled credential inventory unavailable")
+		return
+	}
+	inventory := func(context.Context) ([]Target, error) { return targets, nil }
 	for _, scheduled := range due {
-		if _, err = en.submit(en.ctx, RunConfig{}, scheduled.id, scheduled.revision); err != nil {
+		if _, err = en.dispatchWithInventory(en.ctx, scheduled.id, scheduled.revision, true, inventory); err != nil {
 			log.WithField("rule_id", scheduled.id).Debug("model-quality: scheduled run not admitted")
 		}
 	}
@@ -188,10 +203,14 @@ func (en *Engine) takeDueRulesLocked(now time.Time) ([]scheduledRule, error) {
 		if en.unsupportedRule(r) {
 			continue
 		}
-		if r.Enabled && ruleStatus(r) == "detecting" && r.SchedulingEnabled && !r.NextRun.IsZero() && !r.NextRun.After(now) {
+		if en.timerAllowed(r) && ruleScheduled(r) && !r.NextRun.IsZero() && !r.NextRun.After(now) {
 			n := cloneRule(r)
 			n.NextRun = nextRun(*r, now)
 			c.rules[r.ID] = n
+			if n.NextRun.IsZero() {
+				c.audits = append(c.audits, en.audit("rule_schedule_invalid", r.ID, "", "", "invalid stored schedule; no run admitted"))
+				continue
+			}
 			due = append(due, scheduledRule{id: r.ID, revision: r.Revision})
 		}
 	}
@@ -199,22 +218,6 @@ func (en *Engine) takeDueRulesLocked(now time.Time) ([]scheduledRule, error) {
 		return nil, err
 	}
 	return due, nil
-}
-func nextRun(r Rule, now time.Time) time.Time {
-	if !r.Enabled || ruleStatus(&r) != "detecting" {
-		return time.Time{}
-	}
-	if r.Cron != "" {
-		loc, e := time.LoadLocation(r.Timezone)
-		if e != nil {
-			return now.Add(24 * time.Hour)
-		}
-		s, e := cron.ParseStandard("CRON_TZ=" + loc.String() + " " + r.Cron)
-		if e == nil {
-			return s.Next(now).UTC()
-		}
-	}
-	return now.Add(time.Duration(r.IntervalSeconds) * time.Second)
 }
 func (en *Engine) Usage(event UsageEvent) {
 	if en.ctx != nil && en.ctx.Err() != nil {

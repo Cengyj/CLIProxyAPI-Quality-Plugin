@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"github.com/MoeForge/moego/regexp"
 	"html"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +19,8 @@ type policy struct {
 	auth, chat, sdk, worker string
 	roots                   *x509.CertPool
 	now                     func() time.Time
+	pause                   func(context.Context, int) error
+	commit                  func(context.Context) error
 }
 
 // Run uses only the native Go transport and Sobek workers. The CPA host retains
@@ -39,11 +41,15 @@ type flow struct {
 	session           payload
 	security          *securityJournal
 	securityPageToken string
+	verifiedFactor    string
 }
 
 func run(ctx context.Context, in Input, progress func(string), p policy) (callback string, err error) {
 	if err = validateInput(in, p.auth); err != nil {
 		return "", err
+	}
+	if in.Operation == "reset_totp" && p.commit == nil && securityCommitFromContext(ctx) == nil {
+		return "", failure("security_storage_failed", "security_check", "journal_unavailable")
 	}
 	seconds := in.TimeoutSeconds
 	if seconds == 0 {
@@ -84,7 +90,7 @@ func run(ctx context.Context, in Input, progress func(string), p policy) (callba
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		return "", failure("transport_error", "runtime_start", "")
+		return "", f.safeError(ctx, err)
 	}
 	f.engine = engine
 	defer func() {
@@ -102,10 +108,13 @@ func run(ctx context.Context, in Input, progress func(string), p policy) (callba
 		f.emit("browser_verification")
 		if err := engine.Challenge(ctx, raw); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
-				return failure("timeout", "browser_verification", "browser_verification_timeout")
+				return f.safeError(ctx, err)
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if reason := transport.DiagnosticReason(err); reason != "" {
+				return failure("transport_error", "browser_verification", reason)
 			}
 			return failure("interaction_required", "browser_verification", "browser_verification_required")
 		}
@@ -130,6 +139,11 @@ func run(ctx context.Context, in Input, progress func(string), p policy) (callba
 		}
 		f.emit("reauthorization")
 		f.in.Credentials.TOTPSecret = f.security.currentSecret(in.Credentials.TOTPSecret)
+		if f.security.ActivationStatus == "succeeded" {
+			f.in.Credentials.TOTPFactorID = f.security.NewFactorID
+		}
+		f.verifiedFactor = ""
+		f.in.WorkspaceID = f.security.AccountID
 		if err = f.client.ResetSession(ctx); err != nil {
 			return "", err
 		}
@@ -175,7 +189,24 @@ func (g *guardedTransport) Do(ctx context.Context, r transport.Request) (*transp
 			return nil, failure("interaction_required", f.stage, "unsupported_request")
 		}
 	}
-	return f.engine.Do(ctx, r)
+	started := time.Now()
+	status := 0
+	previous := r.OnResponseHeaders
+	r.OnResponseHeaders = func(response *transport.Response) error {
+		if response != nil {
+			status = response.StatusCode
+		}
+		if previous != nil {
+			return previous(response)
+		}
+		return nil
+	}
+	response, requestErr := f.engine.Do(ctx, r)
+	if response != nil {
+		status = response.StatusCode
+	}
+	f.observeRequest(ctx, r, u, started, status, requestErr)
+	return response, requestErr
 }
 
 func origin(u *url.URL) string { return u.Scheme + "://" + u.Host }
@@ -302,6 +333,9 @@ func (f *flow) auth(ctx context.Context, path string, body any, ref, tokenFlow s
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			if reason := transport.DiagnosticReason(err); reason != "" {
+				return nil, f.safeError(ctx, err)
+			}
 			return nil, failure("interaction_required", f.stage, "sentinel_unavailable")
 		}
 	}
@@ -425,22 +459,9 @@ func (f *flow) loginWeb(ctx context.Context) error {
 		}
 		if pageType(current) == "mfa_challenge" || strings.HasPrefix(pathOf(continuation(current)), "/mfa-challenge/") {
 			f.emit("totp")
-			session := object(current["oai-client-auth-session"])
-			factor := ""
-			for _, key := range []string{"mfa_challenge_factors", "mfa_factors"} {
-				for _, v := range values(session[key]) {
-					x := object(v)
-					if text(x["factor_type"]) == "totp" && text(x["id"]) != "" {
-						factor = text(x["id"])
-						break
-					}
-				}
-				if factor != "" {
-					break
-				}
-			}
-			if factor == "" {
-				return failure("interaction_required", f.stage, "totp_factor_missing")
+			factor, selectErr := selectTOTPLoginFactor(current, f.in.Credentials.TOTPFactorID)
+			if selectErr != nil {
+				return selectErr
 			}
 			if _, e = f.auth(ctx, "/api/accounts/mfa/issue_challenge", payload{"type": "totp", "id": factor, "force_fresh_challenge": false}, page.FinalURL, ""); e != nil {
 				return e
@@ -463,6 +484,11 @@ func (f *flow) loginWeb(ctx context.Context) error {
 			if e = f.advanced(current, "mfa_challenge", ref); e != nil {
 				return e
 			}
+			f.verifiedFactor = factor
+			if err := reportFactorVerified(ctx, factor); err != nil {
+				return err
+			}
+			f.in.Credentials.TOTPFactorID = factor
 		}
 		page, e = f.continuePayload(ctx, current)
 		if e != nil {
@@ -501,25 +527,18 @@ func (f *flow) continuePayload(ctx context.Context, p payload) (*transport.Follo
 			}
 		}
 		ws := values(object(p["oai-client-auth-session"])["workspaces"])
-		if pageType(p) == "workspace" || len(ws) > 0 {
-			selected := ""
-			valid := []string{}
-			for _, v := range ws {
-				w := object(v)
-				if id := text(w["id"]); id != "" {
-					valid = append(valid, id)
-					if id == f.in.WorkspaceID {
-						selected = id
-					}
-				}
-			}
-			if f.in.WorkspaceID == "" && len(valid) == 1 {
-				selected = valid[0]
-			}
+		if pageType(p) == "workspace" || pathOf(next) == "/workspace" || len(ws) > 0 {
+			f.emit("workspace")
+			selected := f.workspace(p)
 			if selected == "" {
 				return nil, failure("interaction_required", "workspace", "workspace_selection")
 			}
-			f.emit("workspace")
+			if next == "" {
+				next = f.p.auth + "/workspace"
+				if f.oauth {
+					next = f.p.auth + "/sign-in-with-chatgpt/codex/consent"
+				}
+			}
 			var e error
 			p, e = f.auth(ctx, "/api/accounts/workspace/select", payload{"workspace_id": selected}, next, "")
 			if e != nil {
@@ -533,6 +552,32 @@ func (f *flow) continuePayload(ctx context.Context, p payload) (*transport.Follo
 		return f.follow(ctx, next, "")
 	}
 	return nil, failure("interaction_required", "workspace", "workspace_selection")
+}
+
+// Match the reference default while keeping an explicitly bound workspace exact.
+// The same policy applies to the web session and the subsequent OAuth selection.
+func (f *flow) workspace(p payload) string {
+	first := ""
+	for _, value := range values(object(p["oai-client-auth-session"])["workspaces"]) {
+		workspace := object(value)
+		id := text(workspace["id"])
+		if id == "" {
+			continue
+		}
+		if f.in.WorkspaceID != "" {
+			if id == f.in.WorkspaceID {
+				return id
+			}
+			continue
+		}
+		if first == "" {
+			first = id
+		}
+		if text(workspace["kind"]) == "organization" {
+			return id
+		}
+	}
+	return first
 }
 
 var sessionPatterns = []*regexp.Regexp{
@@ -595,8 +640,8 @@ func (f *flow) safeError(ctx context.Context, err error) error {
 		return failure("cancelled", f.stage, "")
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		reason := ""
-		if f.stage == "browser_verification" {
+		reason := transport.DiagnosticReason(err)
+		if reason == "" && f.stage == "browser_verification" {
 			reason = "browser_verification_timeout"
 		}
 		return failure("timeout", f.stage, reason)
@@ -622,5 +667,5 @@ func (f *flow) safeError(ctx context.Context, err error) error {
 	if errors.Is(err, ErrBrowserChallenge) {
 		return failure("interaction_required", "browser_verification", "browser_verification_required")
 	}
-	return failure("transport_error", f.stage, "")
+	return failure("transport_error", f.stage, transport.DiagnosticReason(err))
 }

@@ -145,6 +145,74 @@ func (e TransportError) Unwrap() error                 { return e.contextCause }
 func (e TransportError) MarshalJSON() ([]byte, error)  { return json.Marshal(e.Error()) }
 func (e TransportError) Format(s fmt.State, verb rune) { formatSafeError(s, verb, e.Error()) }
 
+// DiagnosticReason projects only transport-owned classifications into stable
+// labels. It never reads an arbitrary error string or grants retry permission.
+// Joined failures must agree, so an unrelated cause cannot borrow a diagnosis.
+func DiagnosticReason(err error) string {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return ""
+	}
+	switch failure := err.(type) {
+	case *TransportError:
+		if failure == nil {
+			return ""
+		}
+		return failure.diagnosticReason()
+	case TransportError:
+		return failure.diagnosticReason()
+	case interface{ Unwrap() []error }:
+		reason := ""
+		for _, cause := range failure.Unwrap() {
+			next := DiagnosticReason(cause)
+			if next == "" || reason != "" && reason != next {
+				return ""
+			}
+			reason = next
+		}
+		return reason
+	case interface{ Unwrap() error }:
+		return DiagnosticReason(failure.Unwrap())
+	default:
+		return ""
+	}
+}
+
+func (e TransportError) diagnosticReason() string {
+	if e.kind == failureProxyAuth {
+		return "proxy_auth_rejected"
+	}
+	if e.hasLoopbackHint() {
+		return "proxy_loopback_unreachable"
+	}
+	if e.phase == phaseProxyTLS {
+		return "proxy_tls_failed"
+	}
+	proxyFailure := e.phase == phaseProxyConnect || e.phase == phaseProxyTunnel
+	switch e.kind {
+	case failureDNS:
+		if proxyFailure {
+			return "proxy_dns_failed"
+		}
+		return "network_dns_failed"
+	case failureRefused:
+		if proxyFailure {
+			return "proxy_connection_refused"
+		}
+		return "network_connection_refused"
+	case failureTimeout:
+		if proxyFailure {
+			return "proxy_connection_timeout"
+		}
+		return "network_timeout"
+	case failureCertificate, failureTLS:
+		return "network_tls_failed"
+	}
+	if proxyFailure || e.kind == failureProxyStatus || e.kind == failureProxyConfig {
+		return "proxy_connection_failed"
+	}
+	return ""
+}
+
 // IsConnectionError identifies failures usable by a fresh, empty-session
 // connectivity probe. It does not authorize replaying an authentication write.
 func IsConnectionError(err error) bool {

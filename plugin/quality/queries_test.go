@@ -2,9 +2,11 @@ package quality
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +42,124 @@ func TestRunPaginationIsStableFilteredAndDetached(t *testing.T) {
 	}
 	if _, err = en.QueryRuns(url.Values{"source": {"production"}}); err == nil {
 		t.Fatal("invalid run source accepted")
+	}
+}
+
+func TestRulePageShowsOnlyItsActiveMarkersInStableOrder(t *testing.T) {
+	en, _, _ := scopeFixture(t)
+	en.rules = map[string]*Rule{"b": {ID: "b"}, "a": {ID: "a"}}
+	en.managed = map[string]*CredentialDisposition{
+		"3": {RuleID: "a", AuthID: "3", State: "disabled"},
+		"2": {RuleID: "a", AuthID: "2", State: "restored"},
+		"1": {RuleID: "a", AuthID: "1", State: "disabled"},
+		"4": {RuleID: "b", AuthID: "4", State: "disabled"},
+	}
+	page := en.queryRules(url.Values{"limit": {"1"}})
+	rules := page["items"].([]ruleView)
+	if page["total"] != 2 || len(rules) != 1 || rules[0].ID != "a" || len(rules[0].Handling) != 2 || rules[0].Handling[0].AuthID != "1" || rules[0].Handling[1].AuthID != "3" {
+		t.Fatal(page)
+	}
+}
+
+func TestManualAnswerMatchUsesFrozenQuestionWithoutChangingHistory(t *testing.T) {
+	en, _ := lifeFixture(t)
+	config := lifeConfig()
+	config.Judge.Mode = "manual"
+	run := &Run{ID: "old", Source: "manual_test", Config: Frozen{RunConfig: config, Question: Question{Kind: "random", Answer: "7"}}, Samples: []Sample{
+		{ExecutionStatus: "completed", Output: " 7\n", QualityVerdict: "unknown"},
+		{ExecutionStatus: "completed", Output: "8"},
+		{ExecutionStatus: "completed", Output: "probably 7"},
+		{ExecutionStatus: "incomplete", Output: "8"},
+		{ExecutionStatus: "failed", Error: "offline"},
+		{ExecutionStatus: "completed", Output: "8", Review: "unknown"},
+		{ExecutionStatus: "completed", Output: "8", QualityVerdict: "correct"},
+	}}
+	en.runs[run.ID] = run
+	detail, err := en.Run(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := en.QueryRuns(url.Values{"source": {"manual_test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := page["items"].([]Run)[0]
+	for i, want := range []string{"correct", "incorrect", "unknown", "", "", "", ""} {
+		if detail.Samples[i].AnswerMatch != want || history.Samples[i].AnswerMatch != want || run.Samples[i].AnswerMatch != "" || detail.Samples[i].QualityVerdict != run.Samples[i].QualityVerdict {
+			t.Fatalf("unexpected display or stored verdict for sample %d", i)
+		}
+	}
+	run.Source = "scheduled_probe"
+	if runForDisplay(run).Samples[0].AnswerMatch != "" {
+		t.Fatal("display match leaked into rule history")
+	}
+}
+
+func TestDeleteManualRunPersistsAndPreservesIdempotency(t *testing.T) {
+	en, _ := lifeFixture(t)
+	cfg := lifeConfig()
+	cfg.IdempotencyKey = "delete-manual-run"
+	run, err := en.Submit(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := en.DeleteManualRun(run.ID); err == nil {
+		t.Fatal("deleted queued run")
+	}
+	if err := en.Cancel(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		res := en.Handle(context.Background(), pluginapi.ManagementRequest{
+			Method: "DELETE", Path: "/v0/management/plugins/model-quality/runs",
+			Body: []byte(fmt.Sprintf(`{"id":%q}`, run.ID)),
+		})
+		if res.StatusCode != 200 {
+			t.Fatalf("delete status %d: %s", res.StatusCode, res.Body)
+		}
+	}
+	if _, err := en.Run(run.ID); err == nil {
+		t.Fatal("deleted run still visible")
+	}
+	if err := en.store.Get("runs", run.ID, &Run{}); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored run: %v", err)
+	}
+	if _, err := en.Submit(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "gone:") {
+		t.Fatal("deleted run replayed", err)
+	}
+	for _, rule := range en.rules {
+		probe := semanticRound(en, rule, "correct", "correct")
+		if err := en.DeleteManualRun(probe.ID); err == nil {
+			t.Fatal("deleted rule evidence")
+		}
+	}
+}
+
+func TestRuleHistoryFiltersBeforePagination(t *testing.T) {
+	en, _ := lifeFixture(t)
+	at := en.now()
+	for i := 0; i < 45; i++ {
+		id := fmt.Sprintf("probe-%02d", i)
+		rule := "first"
+		if i%2 == 0 {
+			rule = "second"
+		}
+		en.runs[id] = &Run{ID: id, Source: "scheduled_probe", CreatedAt: at.Add(time.Duration(i) * time.Second), Config: Frozen{RuleID: rule, ScopeBatchID: "batch"}}
+	}
+	en.runs["manual"] = &Run{ID: "manual", Source: "manual_test", Config: Frozen{RuleID: "first"}}
+	query := url.Values{"source": {"scheduled_probe"}, "rule_id": {"first"}, "scope_batch_id": {"batch"}, "offset": {"20"}, "limit": {"20"}}
+	result, err := en.QueryRuns(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := result["items"].([]Run)
+	if result["total"] != 22 || len(rows) != 2 || rows[0].ID != "probe-03" || rows[1].ID != "probe-01" {
+		t.Fatalf("rule history pagination: %+v", result)
+	}
+	query.Set("rule_id", "missing")
+	result, err = en.QueryRuns(query)
+	if err != nil || result["total"] != 0 || len(result["items"].([]Run)) != 0 {
+		t.Fatal(result, err)
 	}
 }
 
