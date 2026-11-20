@@ -8,7 +8,7 @@
 <body>
 <a class="skip-link" href="#main">跳到工作区</a>
 <header class="app-header">
-  <div class="page-heading"><h1 id="page-crumb">账号管理</h1><p id="page-description">管理 OpenAI 账号、授权与登录状态。</p></div>
+  <div class="page-heading"><h1 id="page-crumb">账号管理</h1><p id="page-description"><!--{{block "account-description" .}}-->管理 OpenAI 账号、授权与登录状态。<!--{{end}}--></p></div>
   <div class="header-actions"><div class="data-freshness"><span id="data-state" class="stale">管理接口未连接</span><button class="text-button small" id="refresh" aria-label="刷新数据"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8a6.3 6.3 0 1 0 .1 4M16 3v5h-5"/></svg><span>刷新</span></button></div><select id="theme-toggle" aria-label="界面主题"><option value="light">浅色</option><option value="white">纯白</option><option value="dark">深色</option></select><button id="connection-open" class="primary connection-button" aria-haspopup="dialog">连接管理接口</button><button id="connection-top" class="connection-button" aria-haspopup="dialog" aria-label="管理连接"><span class="connection-dot" aria-hidden="true"></span><span id="connection-state">未连接</span><span class="connection-label">管理连接</span></button></div>
 </header>
 <div class="workspace">
@@ -206,6 +206,7 @@
         </footer>
       </form></dialog>
   </section>
+  <!--{{block "accounts" .}}-->
   <section id="page-login" aria-labelledby="login-page-title">
     <h2 id="login-page-title" class="sr-only">OpenAI 账号管理</h2>
     <section id="login-disconnected" class="login-disconnected" aria-live="polite">
@@ -455,6 +456,7 @@
     </section>
   </section>
 
+  <!--{{end}}-->
 </main>
 </div>
 <dialog aria-labelledby="connection-title" id="connection-dialog">

@@ -64,7 +64,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/cliproxyapi-plugins/model-quality/login"
 	"github.com/cliproxyapi-plugins/model-quality/quality"
 	"github.com/cliproxyapi-plugins/model-quality/ui"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -229,9 +228,7 @@ func handle(method string, raw []byte) (any, error) {
 		for index := range routes {
 			routes[index].Path = "/v0/management/plugins/model-quality" + routes[index].Path
 		}
-		for _, route := range login.ManagementRoutes() {
-			routes = append(routes, quality.ManagementRoute{Method: route["method"], Path: route["path"]})
-		}
+		routes = append(routes, accountManagementRoutes()...)
 		return map[string]any{"routes": routes, "resources": resources}, nil
 	case pluginabi.MethodManagementHandle:
 		var req struct {

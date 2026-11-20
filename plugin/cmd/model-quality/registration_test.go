@@ -28,7 +28,7 @@ func TestOfficialManagementRoutesUseAuthenticatedPluginNamespace(t *testing.T) {
 		}
 		seen[key] = true
 	}
-	for _, required := range []string{"GET /targets", "POST /runs", "GET /login/capabilities", "POST /login/accounts/import", "POST /login/commit"} {
+	for _, required := range []string{"GET /targets", "POST /runs", "GET /login/capabilities"} {
 		method, path, _ := strings.Cut(required, " ")
 		if !seen[method+" /v0/management/plugins/model-quality"+path] {
 			t.Fatal("missing route:", required)

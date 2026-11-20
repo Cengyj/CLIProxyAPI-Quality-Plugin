@@ -2,7 +2,9 @@
 
 [English](README.md) · [GitHub Releases](https://github.com/Cengyj/cpa-credential-ops/releases)
 
-**保留官方 CPA，只安装插件。** 当前插件使用官方 CPA 已有的原生插件接口，本次容器已验证 CPA 8.0.76，不需要修改 CPA 源码、替换 CPA 程序或安装补丁。Go＋Sobek 登录引擎已经嵌入动态库，无需另装 Node、Chrome 或登录服务。
+**从插件商店安装（CPA 8.0.76）**：在「配置面板 → 可视化 → 高级与实验 → 插件」启用插件系统，将 `https://raw.githubusercontent.com/Cengyj/cpa-credential-ops/main/registry.json` 添加到「第三方插件源」并保存。在「插件 → 商店」刷新并安装 **Credential Ops**。Linux amd64（x86_64）独立版通过 CPA 的「OAuth 登录」添加账号，在「认证文件」管理已有凭证。Linux arm64 使用内嵌登录引擎。两个架构均支持智商测试和质量运维。
+
+**保留官方 CPA，只安装插件。** 当前插件使用官方 CPA 已有的原生插件接口。arm64 包将 Go＋Sobek 登录引擎嵌入动态库，amd64 包使用宿主提供的 OAuth。
 
 **当前版本为插件 0.29.36、UI 13.6.35、Go＋Sobek 2.2.1。** 质量规则按检测范围纳入凭证，运行异常与缺少模型进入对应检测和错误处置，不再作为普通范围过滤。401、402、额度耗尽 429、指定模型不支持 400/404 或 CPA 目录缺模型成功暂停后，凭证退出后续运维：不再核对状态、答题、重复处置或生成逐轮跳过记录，保留首次错误及暂停结果。
 

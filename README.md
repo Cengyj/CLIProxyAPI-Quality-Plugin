@@ -13,7 +13,9 @@ A native plugin for official [CLIProxyAPI](https://github.com/router-for-me/CLIP
 
 ## Install or upgrade
 
-Version **0.29.36** includes UI **13.6.35** and the embedded login runtime **2.2.1**. The published Linux arm64 package is built and tested against unmodified official CPA **8.0.76**. Go native plugins must match the host's platform, toolchain, and dependency build; compatibility with a different CPA build is not assumed.
+Version **0.29.36** includes UI **13.6.35** for official CPA **8.0.76**. Both Linux packages support manual model tests and scheduled credential checks. On **amd64 (x86_64)**, sign in through CPA's **OAuth Login** page and manage credentials under **Auth Files**. On **arm64 (aarch64)**, the plugin includes its account management page and embedded login runtime **2.2.1**.
+
+For store installation, enable the plugin system and add `https://raw.githubusercontent.com/Cengyj/cpa-credential-ops/main/registry.json` to **Third-party plugin sources**. Save your settings, refresh the plugin store, then select **Credential Ops → Install**. CPA selects the package for its platform.
 
 1. Download the package and checksums from [the release page](https://github.com/Cengyj/cpa-credential-ops/releases/tag/v0.29.36).
 2. Back up the existing plugin and persistent data while CPA is stopped.

@@ -442,7 +442,7 @@ function disconnect(
 }
 
 const workspaces = {
-  login: ['账号管理', '管理 OpenAI 账号、授权与登录状态。'],
+  login: ['账号管理', $('page-description').textContent],
   manual: ['智商测试', '选择凭证与模型，测试并比较回答。'],
   operations: ['质量运维', '管理检测规则，查看模型质量与运行记录。'],
 };

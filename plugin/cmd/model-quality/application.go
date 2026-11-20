@@ -1,3 +1,5 @@
+//go:build !credential_ops_host_oauth
+
 package main
 
 import (
@@ -18,6 +20,14 @@ import (
 type application struct {
 	quality *quality.Engine
 	login   *login.Service
+}
+
+func accountManagementRoutes() []quality.ManagementRoute {
+	var routes []quality.ManagementRoute
+	for _, route := range login.ManagementRoutes() {
+		routes = append(routes, quality.ManagementRoute{Method: route["method"], Path: route["path"]})
+	}
+	return routes
 }
 
 func newApplication(cfg quality.Config, native *quality.NativeHost) (runtimeEngine, error) {

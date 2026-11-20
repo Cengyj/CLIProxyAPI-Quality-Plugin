@@ -1,3 +1,5 @@
+//go:build !credential_ops_host_oauth
+
 // Package ui provides the public, inert model-quality browser application.
 package ui
 

@@ -4,7 +4,7 @@
     {
       "id": "model-quality",
       "name": "Credential Ops",
-      "description": "Account management, model evaluation, and scheduled credential checks for CPA 8.0.76 on Linux arm64.",
+      "description": "Model evaluation and scheduled credential checks for CPA 8.0.76 on Linux. The amd64 edition uses CPA OAuth and Auth Files (glibc 2.34+).",
       "author": "Cengyj",
       "version": "0.29.36",
       "repository": "https://github.com/Cengyj/cpa-credential-ops",
@@ -17,6 +17,13 @@
             "url": "https://github.com/Cengyj/cpa-credential-ops/releases/download/v0.29.36/credential-ops-v0.29.36-linux-arm64.zip",
             "sha256": "15b88a2e5a0d01e48ca0f801a71719ae5e2ba1ad7eef2ad62dcbda383527251f",
             "size": 12517457
+          },
+          {
+            "goos": "linux",
+            "goarch": "amd64",
+            "url": "https://github.com/Cengyj/cpa-credential-ops/releases/download/v0.29.36/credential-ops-v0.29.36-linux-amd64.zip",
+            "sha256": "1382db8578f17ed6b59da528ed996f6d9e54f715ac99e482d21629f245f1e4b4",
+            "size": 4564605
           }
         ]
       }
