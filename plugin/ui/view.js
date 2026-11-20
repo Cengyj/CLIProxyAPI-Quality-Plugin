@@ -40,7 +40,8 @@ export const questionTitle = (question, id = question?.id) =>
 const auditLabels = {
   disable_pending: '正在暂停凭证', delete_pending: '正在移除凭证', restore_pending: '正在恢复凭证',
   credential_suspended: '已暂停凭证', credential_removed: '已移除凭证', credential_restored: '整轮通过，已恢复凭证',
-  credential_action_uncertain: '处置结果待核对', credential_external_enable: '已识别 CPA 人工启用', credential_handling_acknowledged: '人工处理已核对，规则已停止',
+  credential_action_uncertain: '处置结果待核对', credential_external_enable: '已识别 CPA 人工启用',
+  credential_external_change: '已识别 CPA 当前凭证变更', credential_handling_acknowledged: '人工处理已核对，规则已停止',
 
   scope_dispatched: '匹配动态检测范围',
   observation_completed: '观察完成', settings_saved: '设置已保存',
@@ -55,6 +56,8 @@ export const auditLabel = (kind) => auditLabels[kind] || kind || '审计记录';
 const reasonLabels = {
   cancelled: '测试已取消',
   'context canceled': '测试已取消',
+  queue_full: '队列容量不足，本轮未入队。',
+  budget_exhausted: '调用预算已用尽，本轮未执行。',
   official_host_evidence_unavailable: '当前宿主未提供可验证的最终执行条件，本次结果仅供观察。',
   retained_pause_unverified: '历史暂停归属待核对',
   management_probe_not_business_payload: '本次使用 CPA 管理接口检测指定凭证。',
@@ -107,6 +110,7 @@ export const statusLabels = {
   credential_action_uncertain: '处置结果待核对',
   credential_action_attention: '凭证处置待核对',
   insufficient_evidence: '整轮判定依据不足，未处理凭证',
+  catalog_action_unconfirmed: '目录或凭证资格未能再次确认，未执行处置',
   credential_changed: '凭证已变更，未处理',
   management_session_required: '管理会话待连接',
   disable_pending: '正在暂停凭证',
@@ -247,6 +251,7 @@ const evidenceJSON = (object) => `<details class="raw-evidence"><summary>原始 
 const judgeName = (mode) => ({ deterministic: '标准答案判定', manual: '人工评审', llm: '独立模型判题' })[mode] || evidenceValue(mode);
 const reviewName = (verdict) => ({ correct: '正确', incorrect: '错误', unknown: '无法判断' })[verdict] || '未评审';
 const completedSample = (sample) => !!sample.execution_status && !['pending', 'queued', 'running', 'cancelling', 'canceling'].includes(sample.execution_status);
+const sampleModel = sample => sample.model || sample.request_model || '模型未知';
 
 function answerVerdict(sample) {
   if (sample.execution_status !== 'completed' || sample.error) return '';
@@ -275,10 +280,14 @@ export function renderManualVerdict(run) {
   if (run.source !== 'manual_test' || active(run)) return '';
   const counts = answerCounts(run);
   const correct = counts.get('correct') || 0, incorrect = counts.get('incorrect') || 0;
-  const planned = (run.config?.models?.length || 1) * (run.config?.samples || 1);
   if (correct && incorrect) return tag('部分正确', 'warn');
   if (correct || incorrect) {
-    if (counts.size > 1 || correct + incorrect < planned) return tag('部分已判定');
+    const models = run.config?.models || [];
+    const count = run.config?.samples;
+    const reviewed = run.samples.filter(s => ['correct', 'incorrect'].includes(answerVerdict(s)));
+    const positions = new Set(reviewed.filter(s => models.includes(sampleModel(s)) && Number.isInteger(s.index) && s.index >= 0 && s.index < count)
+      .map(s => JSON.stringify([sampleModel(s), s.index])));
+    if (counts.size > 1 || !models.length || !count || reviewed.length !== positions.size || positions.size !== models.length * count) return tag('部分已判定');
     return correct ? tag('正确', 'good') : tag('错误', 'warn');
   }
   return counts.has('unknown') ? tag('未判定') : '';
@@ -299,8 +308,52 @@ function qualityCounts(samples) {
 }
 
 function credentialHandlingLabel(run) {
+  if (run.status === 'skipped' && run.skip_detail?.code === 'error_policy_disabled') return '保持暂停，本轮未改写';
   if (run.action_status === 'observe_only') return active(run) ? '检测中，尚未处理' : '未处理凭证';
+  if (run.action_status === 'credential_action_uncertain') {
+    const intent = { disable_credential: '停用', delete_credential: '移除', restore_credential: '恢复' }[run.credential_action];
+    if (intent) return `${intent}结果待核对`;
+  }
   return statusLabels[run.action_status] || run.action_status || '未记录处理结果';
+}
+
+export const upstreamConditions = Object.freeze({
+  unauthorized: '401 认证失败', payment_required: '402 付费要求',
+  quota_exhausted: '429 配额耗尽', model_unsupported: '指定模型不支持',
+});
+
+export const credentialActions = Object.freeze({ observe_only: '不处理', disable_credential: '暂停凭证', delete_credential: '移除凭证' });
+export function handlesCredential(action) {
+  return action === 'disable_credential' || action === 'delete_credential';
+}
+export function configuredUpstreamActions(actions) {
+  return Object.entries(upstreamConditions)
+    .filter(([key]) => handlesCredential(actions?.[key]))
+    .map(([key, label]) => [label, credentialActions[actions[key]]]);
+}
+const upstreamLabel = key => key === 'model_unsupported' ? '400/404 指定模型不支持' : Object.hasOwn(upstreamConditions, key) ? upstreamConditions[key] : key;
+
+function admissionEvidence(run) {
+  if (run.samples?.length || run.pruned_samples) return null;
+  const preflight = run.preflight_detail, detail = preflight || run.skip_detail;
+  const catalogModel = run.config?.catalog_missing_model;
+  if (!detail && !catalogModel && run.status !== 'skipped') return null;
+  const catalog = detail?.code === 'missing_model' ? !!(preflight || catalogModel) : !detail && !!catalogModel;
+  const suspended = detail?.code === 'error_policy_disabled';
+  const stopped = catalog && (run.block_reason || run.error ||
+    (run.cancel_requested || run.status === 'cancelled' ? 'cancelled' : ''));
+  const catalogResult = catalog && !stopped;
+  const checked = catalogResult && ['completed', 'skipped'].includes(run.status);
+  return {
+    id: detail?.auth_id || run.config?.auth_id, email: detail?.email || run.credential_email,
+    model: detail?.model || catalogModel,
+    status: checked ? tag('已检测') : statusTag(run.status),
+    result: catalogResult ? '模型不支持（CPA 目录）' : suspended ? '已按错误规则暂停，未重复检测' : '未发起模型请求',
+    explanation: catalogResult ? '目录检查已确认不支持所选模型，未发起答题。' : suspended ? '本轮未重复答题。' : '未发起模型请求',
+    source: catalog || detail?.code === 'missing_model' ? 'CPA 凭证模型目录' : suspended ? '已确认的错误策略暂停' : preflight ? '当前凭证状态检查' : '范围调度准入',
+    reasonLabel: stopped ? '未执行原因' : catalog || preflight ? '检查结果' : '跳过原因',
+    reason: stopped ? reasonLabel(stopped) : detail?.reason || (catalog ? '凭证目录中缺少所选模型。' : '原因未记录'),
+  };
 }
 
 function sampleStates(sample) {
@@ -351,7 +404,7 @@ function renderFrozenConditions(run, credentialLabel, credentialName) {
     ['关联规则', config.rule_id || '无'], ['规则版本', config.rule_revision],
     ['判题模板', judge.template_version],
   ])}</details>
-  ${evidenceJSON({ config, source: run.source, action_status: run.action_status, error: run.error || null })}`;
+  ${evidenceJSON({ config, source: run.source, status: run.status, action_status: run.action_status, credential_action: run.credential_action, upstream_condition: run.upstream_condition, preflight_detail: run.preflight_detail, skip_detail: run.skip_detail, error: run.error || null })}`;
 }
 
 export function renderSampleEvidence(sample = {}, manual = false, credentialLabel = sample.evidence?.auth_id) {
@@ -361,6 +414,7 @@ export function renderSampleEvidence(sample = {}, manual = false, credentialLabe
   return `<div class="evidence-verdict sample-statuses">${manual ? statusTag(sample.execution_status) + (answerVerdict(sample) ? answerTag(sample) : '') : sampleStates(sample)}</div>
     ${evidenceFacts([
       ['判题 / 执行说明', manual && sample.review ? '历史人工评审' : manual && ['correct', 'incorrect'].includes(sample.answer_match) ? '按本次题目的标准答案核对' : reasonLabel(sample.reason || sample.error)],
+      ...(sample.upstream_condition ? [['上游错误', upstreamLabel(sample.upstream_condition)]] : []),
     ])}
     <h3>模型与执行路径</h3>${evidenceFacts([
       ['选择的模型', sample.model || sample.request_model],
@@ -383,8 +437,10 @@ export function renderSampleEvidence(sample = {}, manual = false, credentialLabe
     ])}</details>${evidenceJSON(copy)}`;
 }
 
-function renderAnswer(sample, arrayIndex, ordinal, isActive, { control, simple, qualityDetail }) {
-  const model = sample.model || sample.request_model || '模型未知';
+function renderAnswer(sample, recordIndex, ordinal, isActive, { control, simple, qualityDetail, annotation = '' }) {
+  const model = sampleModel(sample);
+  const number = Number.isInteger(ordinal) && ordinal >= 0 ? ordinal + 1 : null;
+  const label = `${control ? '对照 · ' : ''}${simple ? '回答' : '样本'}${number === null ? '（序号未知）' : ' ' + number}`;
   const output = sample.output || '';
   const isHTML = /<(?:html|svg|!doctype)/i.test(output);
   const isCode = isHTML || /^\s*(?:```|~~~|\/\/|#!|(?:const|let|var|function|import|class|def|package)\s|<\?xml)/m.test(output);
@@ -394,41 +450,68 @@ function renderAnswer(sample, arrayIndex, ordinal, isActive, { control, simple, 
   const idPrefix = qualityDetail ? 'quality-' : '';
   const statusHTML = qualityDetail ? '' : `<div class="sample-statuses">${simple ? answerTag(sample) : sampleStates(sample)}</div>`;
   const actions = control ? '' : `<div class="sample-actions" data-part="actions">
-    ${output.length > 1500 || output.split("\n").length > 12 ? `<button class="text-button" data-expand-sample="${arrayIndex}" aria-expanded="false">展开完整回答</button>` : ''}
-    <button class="text-button" data-copy-sample="${arrayIndex}" ${!output ? 'disabled' : ''}>复制原文</button>
-    ${isHTML ? `<button class="text-button" data-preview-sample="${arrayIndex}">预览 HTML / SVG</button>` : ''}
-    <button class="text-button" data-evidence-sample="${arrayIndex}">${simple ? '执行详情' : '条件详情'}</button>
+    ${output.length > 1500 || output.split("\n").length > 12 ? `<button class="text-button" data-expand-sample="${recordIndex}" aria-expanded="false">展开完整回答</button>` : ''}
+    <button class="text-button" data-copy-sample="${recordIndex}" ${!output ? 'disabled' : ''}>复制原文</button>
+    ${isHTML ? `<button class="text-button" data-preview-sample="${recordIndex}">预览 HTML / SVG</button>` : ''}
+    <button class="text-button" data-evidence-sample="${recordIndex}">${simple ? '执行详情' : '条件详情'}</button>
   </div>`;
   const reviewHTML = simple ? (sample.review ? `<details class="review-disclosure" data-part="review"><summary>历史人工评审</summary><p>${escapeHTML(reviewName(sample.review))}${sample.review_note ? ` · ${escapeHTML(sample.review_note)}` : ''}</p></details>` : '') : control ? `<details class="evidence-section" data-part="review"><summary>对照条件详情</summary>${renderSampleEvidence(sample)}</details>` :
     `<details class="review-disclosure" data-part="review"><summary>人工评审${sample.review ? ` · ${escapeHTML(reviewName(sample.review))}` : ''}</summary>
       <p class="field-note">评审单独留存，不触发自动暂停或解除。</p>
-      <div class="sample-review"><label>结论<select aria-label="样本 ${arrayIndex + 1} 人工评审" id="${idPrefix}review-${arrayIndex}">
+      <div class="sample-review"><label>结论<select aria-label="${escapeHTML(model + ' ' + label + ' ' + annotation)} 人工评审" id="${idPrefix}review-${recordIndex}">
         <option value="unknown" ${review === 'unknown' ? 'selected' : ''}>无法判断</option>
         <option value="correct" ${review === 'correct' ? 'selected' : ''}>正确</option>
         <option value="incorrect" ${review === 'incorrect' ? 'selected' : ''}>错误</option></select></label>
-        <label>评审备注<input id="${idPrefix}review-note-${arrayIndex}" maxlength="1000" placeholder="记录判断依据" aria-label="评审备注" value="${escapeHTML(sample.review_note || '')}"></label>
-        <button class="subtle small" data-review-sample="${arrayIndex}" ${isActive ? 'disabled' : ''}>保存评审</button>
+        <label>评审备注<input id="${idPrefix}review-note-${recordIndex}" maxlength="1000" placeholder="记录判断依据" aria-label="评审备注" value="${escapeHTML(sample.review_note || '')}"></label>
+        <button class="subtle small" data-review-sample="${recordIndex}" ${isActive ? 'disabled' : ''}>保存评审</button>
       </div>${isActive ? '<p class="field-note">任务结束后可保存人工评审。</p>' : ''}
     </details>`;
   const reason = sample.error || (!simple || sample.reason !== 'manual assessment required' ? sample.reason : '');
-  return `<article class="sample${control ? ' control-sample' : ''}" data-key="${escapeHTML(`${control ? 'control-' : ''}sample:${JSON.stringify([model, ordinal])}`)}" data-model="${escapeHTML(model)}" data-sample="${ordinal}">
-    <div class="sample-heading" data-part="heading"><span class="sample-model-label" title="${escapeHTML(model)}">${escapeHTML(model)}</span><h4 class="sample-title"><span class="sample-number" aria-hidden="true">${String(ordinal + 1).padStart(2, '0')}</span><span>${control ? '对照 · ' : ''}${simple ? '回答' : '样本'} ${ordinal + 1}</span></h4>${statusHTML}</div>
-    <pre class="answer-text ${isCode ? 'answer-code' : 'answer-prose'}" data-part="output" tabindex="0" aria-label="${escapeHTML(model)} 样本 ${ordinal + 1} 回答">${escapeHTML(output || emptyText)}</pre>
-    <p class="sample-reason${reason ? '' : ' hidden'}" data-part="reason">${reason ? escapeHTML(reasonLabel(reason)) : ''}</p>
+  return `<article class="sample${control ? ' control-sample' : ''}" data-key="${control ? 'control' : 'record'}:${recordIndex}" data-model="${escapeHTML(model)}" data-sample="${number === null ? '' : ordinal}">
+    <div class="sample-heading" data-part="heading"><span class="sample-model-label" title="${escapeHTML(model)}">${escapeHTML(model)}</span><h4 class="sample-title">${number === null ? '' : `<span class="sample-number" aria-hidden="true">${String(number).padStart(2, '0')}</span>`}<span>${label}</span></h4>${annotation ? tag(annotation, 'warn') : ''}${statusHTML}</div>
+    <pre class="answer-text ${isCode ? 'answer-code' : 'answer-prose'}" data-part="output" tabindex="0" aria-label="${escapeHTML(model + ' ' + label + (annotation ? ' ' + annotation : ''))} 回答">${escapeHTML(output || emptyText)}</pre>
+    <p class="sample-reason${reason || sample.upstream_condition ? '' : ' hidden'}" data-part="reason">${[sample.upstream_condition && upstreamLabel(sample.upstream_condition), reason && reasonLabel(reason)].filter(Boolean).map(escapeHTML).join(' · ')}</p>
     <div class="sample-footer" data-part="footer"><div class="sample-meta" data-part="meta"><span>总耗时 <strong>${duration(sample.total_ms)}</strong></span><span>首字时间 <strong>${duration(sample.ttft_ms)}</strong></span><span>用量 <strong>${escapeHTML(formatSampleUsage(sample))}</strong></span></div>
     ${actions}</div>${reviewHTML}</article>`;
 }
 
+function renderAbsentSample(model, ordinal, simple, isActive, pruned, unlocated) {
+  let status = simple ? '回答缺失' : '样本缺失';
+  let reason = simple ? '未取得这份回答，请查看执行状态。' : '本轮未取得该样本，不能作为完整失败证据。';
+  if (pruned) {
+    status = '历史已裁剪';
+    reason = '这份回答已按规则的保留上限移除。';
+  } else if (unlocated) {
+    status = '无留存回答';
+    reason = '旧记录未保存全部裁剪位置，无法确认此处是缺答还是已裁剪。';
+  } else if (isActive) {
+    status = '等待结果';
+    reason = '后台按计划执行，结果取得后在此更新。';
+  }
+  return `<article class="sample sample-pending" data-key="slot:${ordinal}" data-model="${escapeHTML(model)}" data-sample="${ordinal}"><div class="sample-heading" data-part="heading"><span class="sample-model-label" title="${escapeHTML(model)}">${escapeHTML(model)}</span><h4 class="sample-title"><span class="sample-number" aria-hidden="true">${String(ordinal + 1).padStart(2, '0')}</span><span>${simple ? '回答' : '样本'} ${ordinal + 1}</span></h4>${tag(status, isActive || pruned || unlocated ? 'neutral' : 'warn')}</div><p class="empty-line" data-part="pending">${reason}</p></article>`;
+}
+
 export function renderRunEvidence(run = {}, credentialName = id => id, { qualityDetail = false } = {}) {
   const config = run.config || {};
-  const credentialLabel = run.credential_email || credentialName(config.auth_id);
+  const skip = admissionEvidence(run);
+  const credentialLabel = skip?.email || run.credential_email || credentialName(skip?.id || config.auth_id);
+  if (skip) return {
+    metaHTML: skip.status,
+    conditionsHTML: renderFrozenConditions(run, credentialLabel, credentialName),
+    samplesHTML: '', completed: 0, planned: 0,
+  };
   const samples = run.samples || [];
   const simple = run.source === 'manual_test' && config.judge?.mode === 'manual';
   const isActive = active(run);
-  const models = [...new Set([...(config.models || []), ...samples.map((sample) => sample.model || sample.request_model || '模型未知')])];
+  const plannedModels = new Set(config.models?.length ? config.models : samples.map(sampleModel));
+  const models = [...new Set([...plannedModels, ...samples.map(sampleModel)])];
   const count = Number.isInteger(config.samples) && config.samples > 0 ? config.samples : 1;
-  const planned = models.length * count;
-  const completed = samples.filter(completedSample).length;
+  const planned = plannedModels.size * count;
+  const inPlan = sample => plannedModels.has(sampleModel(sample)) && Number.isInteger(sample.index) && sample.index >= 0 && sample.index < count;
+  const completed = new Set(samples.filter(s => inPlan(s) && completedSample(s)).map(s => JSON.stringify([sampleModel(s), s.index]))).size;
+  const pruned = run.pruned_samples || 0;
+  const prunedSlots = run.pruned_sample_slots || [];
+  const unlocated = pruned > prunedSlots.length;
   const { correct, incorrect, unknown } = qualityCounts(samples);
   const verdictSummary = [correct && `正确 ${correct}`, incorrect && `答错 ${incorrect}`, unknown && `无法判断 ${unknown}`].filter(Boolean).join(' · ');
   const reference = config.judge?.mode === 'deterministic' && config.question?.answer;
@@ -437,16 +520,24 @@ export function renderRunEvidence(run = {}, credentialName = id => id, { quality
     : `<div class="run-state-line">${statusTag(run.status)}<strong>${run.pruned_samples ? `保留 ${samples.length} 份结果` : `${completed} / ${planned} 样本已结束`}</strong><span>${verdictSummary}</span></div>
     <div class="run-context-line"><span>凭证 <strong>${escapeHTML(evidenceValue(credentialLabel))}</strong></span><span>${escapeHTML(questionTitle(config.question, config.question_id))}</span>${reference ? `<span>标准答案 <strong>${escapeHTML(reference)}</strong></span>` : ''}<span>请求强度 ${escapeHTML(config.parameters?.reasoning_effort || '未指定')}</span><span>凭证处理 · ${escapeHTML(credentialHandlingLabel(run))}</span></div>
     ${run.error || run.block_reason ? `<p class="notice error">${escapeHTML(run.error || run.block_reason)}</p>` : ''}`;
-  const groups = models.map((model, modelIndex) => {
-    const entries = samples.map((sample, index) => ({ sample, index })).filter(({ sample }) => (sample.model || sample.request_model || '模型未知') === model);
-    const content = Array.from({ length: count }, (_, ordinal) => {
-      const entry = entries.find(({ sample }, localIndex) => (sample.index ?? localIndex) === ordinal);
-      if (entry) return renderAnswer(entry.sample, entry.index, ordinal, isActive, { simple, qualityDetail });
-      if (modelIndex * count + ordinal < (run.pruned_samples || 0)) return '';
-      return `<article class="sample sample-pending" data-key="${escapeHTML(`sample:${JSON.stringify([model, ordinal])}`)}" data-model="${escapeHTML(model)}" data-sample="${ordinal}"><div class="sample-heading" data-part="heading"><span class="sample-model-label" title="${escapeHTML(model)}">${escapeHTML(model)}</span><h4 class="sample-title"><span class="sample-number" aria-hidden="true">${String(ordinal + 1).padStart(2, '0')}</span><span>${simple ? '回答' : '样本'} ${ordinal + 1}</span></h4>${tag(isActive ? '等待结果' : simple ? '回答缺失' : '样本缺失', isActive ? 'neutral' : 'warn')}</div><p class="empty-line" data-part="pending">${isActive ? '后台按计划执行，结果取得后在此更新。' : simple ? '未取得这份回答，请查看执行状态。' : '本轮未取得该样本，不能作为完整失败证据。'}</p></article>`;
+  const retained = samples.map((sample, i) => ({ sample, recordIndex: pruned + i }));
+  const groups = models.map(model => {
+    const entries = retained.filter(({ sample }) => sampleModel(sample) === model);
+    const plannedCount = plannedModels.has(model) ? count : 0;
+    const slots = Array.from({ length: plannedCount }, (_, ordinal) => entries.filter(({ sample }) => sample.index === ordinal));
+    const content = slots.map((records, ordinal) => {
+      const removed = prunedSlots.some(s => s.model === model && s.index === ordinal);
+      if (!records.length) return renderAbsentSample(model, ordinal, simple, isActive, removed, unlocated);
+      return records.map(({ sample, recordIndex }) => renderAnswer(sample, recordIndex, ordinal, isActive, {
+        simple, qualityDetail, annotation: records.length > 1 || removed ? `序号重复 · 原记录 ${recordIndex + 1}` : '',
+      })).join('');
     }).join('');
-    const extras = entries.filter(({ sample }, localIndex) => (sample.index ?? localIndex) >= count).map(({ sample, index }) => renderAnswer(sample, index, sample.index ?? index, isActive, { simple, qualityDetail })).join('');
-    return `<section class="model-result" data-key="${escapeHTML(`model:${model}`)}" data-model="${escapeHTML(model)}"><div class="model-heading" data-part="model-heading"><div class="model-identity"><h3 title="${escapeHTML(model)}">${escapeHTML(model)}</h3><span>${entries.length} / ${count} 份结果</span></div><button type="button" class="text-button model-copy" data-copy-model="${escapeHTML(model)}" aria-label="复制模型 ID ${escapeHTML(model)}">复制 ID</button></div>${content}${extras}</section>`;
+    const extras = entries.filter(({ sample }) => !inPlan(sample)).map(({ sample, recordIndex }) => renderAnswer(sample, recordIndex, sample.index, isActive, {
+      simple, qualityDetail, annotation: `计划外记录 · 原记录 ${recordIndex + 1}`,
+    })).join('');
+    const occupied = slots.filter(records => records.length).length;
+    const summary = plannedCount ? `${occupied} / ${plannedCount} 份结果${occupied === entries.length ? '' : ` · 保留 ${entries.length} 条记录`}` : `计划外模型 · 保留 ${entries.length} 条记录`;
+    return `<section class="model-result" data-key="${escapeHTML(`model:${model}`)}" data-model="${escapeHTML(model)}"><div class="model-heading" data-part="model-heading"><div class="model-identity"><h3 title="${escapeHTML(model)}">${escapeHTML(model)}</h3><span>${summary}</span></div><button type="button" class="text-button model-copy" data-copy-model="${escapeHTML(model)}" aria-label="复制模型 ID ${escapeHTML(model)}">复制 ID</button></div>${content}${extras}</section>`;
   }).join('');
   const controlHTML = run.controls?.length ? `<details class="control-results" data-key="controls"><summary>同批对照 · ${run.controls.length} 份结果</summary><p class="field-note">只有身份不同、同题、同模型映射、同有效条件的通过样本才构成有效对照。</p><div class="comparison-grid">${run.controls.map((sample, index) => `<section class="model-result" data-key="${escapeHTML(`control-model:${index}:${sample.model || '模型未知'}`)}"><div class="model-heading" data-part="model-heading"><h3>${escapeHTML(sample.model || '模型未知')}</h3><span>对照凭证</span></div>${renderAnswer(sample, index, sample.index ?? index, isActive, { control: true, qualityDetail })}</section>`).join('')}</div></details>` : '';
   return {
@@ -469,18 +560,28 @@ export function renderQualityDetail(run, rules, credentialName) {
     .filter(([count]) => count).map(([count, label, tone]) => tag(planned === 1 && samples.length === 1 ? label : `${label} ${count}`, tone)).join('');
   const reference = config.judge?.mode === 'deterministic' ? config.question?.answer : config.review_standard || config.question?.answer;
   const issue = run.error || run.block_reason || run.reason;
-  return `<header class="quality-detail-identity"><strong>${escapeHTML(run.credential_email || credentialName(config.auth_id) || '凭证未记录')}</strong>
-    <div><span>${escapeHTML(ruleName)}</span><time>${escapeHTML(date(run.created_at))}</time></div></header>
+  const skip = admissionEvidence(run);
+  const label = skip?.email || run.credential_email || credentialName(skip?.id || config.auth_id) || '凭证未记录';
+  const conditions = `<details class="quality-detail-conditions"><summary>检测配置与原始记录</summary><div class="run-identifier">任务 ${escapeHTML(run.id || run.run_id)}</div>${conditionsHTML}</details>`;
+  const header = `<header class="quality-detail-identity"><strong>${escapeHTML(label)}</strong>${skip?.id && skip.id !== label ? `<code>${escapeHTML(skip.id)}</code>` : ''}
+    <div><span>${escapeHTML(ruleName)}</span><time datetime="${escapeHTML(run.created_at || '')}">${escapeHTML(date(run.created_at))}</time></div></header>`;
+  if (skip) return header + `<dl class="quality-detail-facts">
+    <div><dt>运行状态</dt><dd>${skip.status}<small>${escapeHTML(skip.explanation)}</small></dd></div>
+    ${evidenceFact('判断依据', skip.source)}${skip.model ? evidenceFact('涉及模型', skip.model) : ''}
+    ${evidenceFact(skip.reasonLabel, skip.reason)}${evidenceFact('凭证处理', credentialHandlingLabel(run))}
+    ${run.credential_action && credentialActions[run.credential_action] ? evidenceFact('处置动作', credentialActions[run.credential_action]) : ''}
+  </dl>${issue && reasonLabel(issue) !== skip.reason ? `<p class="notice error">${escapeHTML(reasonLabel(issue))}</p>` : ''}${conditions}`;
+  return header + `
     <dl class="quality-detail-facts">
       <div><dt>答案判定</dt><dd>${verdict || (active(run) ? '等待判定' : '暂无判定')}</dd></div>
-      <div><dt>运行状态</dt><dd>${statusTag(run.status)}<small>${run.pruned_samples ? `保留 ${samples.length} 份已结束样本` : `${completed} / ${planned} 份样本`}</small></dd></div>
-      ${evidenceFact('凭证处理', credentialHandlingLabel(run))}
+      <div><dt>运行状态</dt><dd>${statusTag(run.status)}<small>${run.pruned_samples ? `保留 ${samples.length} 条已结束记录 · 已裁剪 ${escapeHTML(run.pruned_samples)} 条` : `${completed} / ${planned} 份样本`}</small></dd></div>
+      ${run.upstream_condition ? evidenceFact('上游错误', upstreamLabel(run.upstream_condition)) : ''}${evidenceFact('凭证处理', credentialHandlingLabel(run))}
     </dl>
     ${issue ? `<p class="notice error">${escapeHTML(reasonLabel(issue))}</p>` : ''}
     <div class="quality-detail-question"><strong>${escapeHTML(questionTitle(config.question, config.question_id))}</strong>
       ${reference == null || reference === '' ? '' : `<div><span>${config.judge?.mode === 'deterministic' ? '标准答案' : '参考标准'}</span><strong>${escapeHTML(reference)}</strong></div>`}</div>
     <section class="quality-detail-answers" aria-label="模型回答">${samplesHTML}</section>
-    <details class="quality-detail-conditions"><summary>检测配置与原始记录</summary><div class="run-identifier">任务 ${escapeHTML(run.id || run.run_id)}</div>${conditionsHTML}</details>`;
+    ${conditions}`;
 }
 // Pure operation views keep restriction ownership separate from rule state.
 const restrictionLabels = {
@@ -525,32 +626,73 @@ export function dynamicScopeLabel(scope) {
   return scope === 'all_credentials' ? '全部凭证' : scope === 'all_enabled' ? '全部已启用凭证' : '';
 }
 
-export function renderRuleRows(rules, targets, { connected, targetsFresh, settings = {}, scopeRule = '', busy, resourceStatus }) {
+function handlingRecord(record, name) {
+  const upstream = record.upstream_condition;
+  const catalogModel = record.catalog_missing_model;
+  const resolved = record.state === 'disabled' || record.state === 'deleted';
+  const evidence = catalogModel ? `CPA 注册目录缺少 ${catalogModel}` : upstream && upstreamLabel(upstream);
+  const status = record.state === 'disabled' ? (evidence ? '已按错误规则暂停，退出后续检测' : '已暂停凭证') : record.state === 'deleted' ? '已移除凭证' : '处置待核对';
+  const confirmedCondition = evidence && resolved;
+  const summary = [record.email || name(record.auth_id), evidence, status].filter(Boolean).map(escapeHTML).join(' · ');
+  const check = `<button type="button" class="text-button" data-handling-ack="${escapeHTML(record.action_id)}">核对人工处理</button>`;
+  const followup = confirmedCondition && record.state === 'deleted' ? '。后续检测无需人工标记。' : '';
+  return `<div><span>${summary}${followup}</span>${confirmedCondition ? `<details><summary>已在 CPA 手动变更</summary>${check}</details>` : check}</div>`;
+}
+
+export function renderScopeSkipDetails(dispatch) {
+  const rows = Array.isArray(dispatch.details) ? dispatch.details.filter(row => row && typeof row === 'object' && !Array.isArray(row)) : [];
+  if (!rows.length) {
+    const disabled = dispatch.skipReasons?.manual_disabled;
+    const aggregate = Number.isSafeInteger(disabled) && disabled > 0 ? `其中人工禁用 ${disabled} 个。` : '';
+    return `<p class="field-note">${aggregate}本轮未记录逐凭证明细。</p>`;
+  }
+  const note = rows.length < dispatch.skipped ? `<p class="field-note">已记录其中 ${rows.length} 个凭证的明细。</p>` : '';
+  return `${note}<ul class="scope-skip-list" tabindex="0" aria-label="跳过的凭证和原因">${rows.map(row => {
+    const identity = row.email || row.auth_id || '凭证标识未记录';
+    const id = row.email && row.auth_id && row.email !== row.auth_id ? `<code>${escapeHTML(row.auth_id)}</code>` : '';
+    const link = row.run_id ? `<button type="button" class="text-button small" data-run="${escapeHTML(row.run_id)}" aria-label="查看 ${escapeHTML(row.auth_id || identity)} 的跳过详情">详情</button>` : '';
+    return `<li${row.auth_id ? ` data-key="skip:${escapeHTML(row.auth_id)}"` : ''}><div><strong>${escapeHTML(identity)}</strong>${id}${link}</div><p>${row.model ? `<code>${escapeHTML(row.model)}</code> · ` : ''}${escapeHTML(row.reason || row.code || '原因未记录')}</p></li>`;
+  }).join('')}</ul>`;
+}
+
+export function renderScopeDispatch(dispatch, title, ruleID, expanded = false) {
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : '未知';
+  const at = dispatch.at ? ` <time datetime="${escapeHTML(dispatch.at)}">${escapeHTML(date(dispatch.at))}</time>` : '';
+  const header = `<span class="dispatch-heading">${escapeHTML(title)}${at}</span><span class="dispatch-counts">纳入检测 ${count(dispatch.matched)} 个 · 跳过 ${count(dispatch.skipped)} 个</span>`;
+  if (!(dispatch.skipped > 0 || dispatch.details?.length)) return `<div class="scope-dispatch scope-dispatch-summary">${header}</div>`;
+  return `<details class="scope-dispatch" data-part="dispatch-skips" data-skip-rule="${escapeHTML(ruleID)}"><summary>${header}</summary><div class="scope-skip-body">${expanded ? renderScopeSkipDetails(dispatch) : ''}</div></details>`;
+}
+
+export function renderRuleRows(rules, targets, { connected, targetsFresh, settings = {}, scopeRule = '', busy, resourceStatus, expandedSkips }) {
   const emails = new Map(targets.map(t => [targetID(t), t.email]));
   const name = id => emails.get(id) || id;
   if (!rules.length) return renderQualityEmpty('还没有检测规则', '创建一条规则，按需手动执行或开启定时检测。', '<button class="subtle" data-rule-new>创建第一条规则</button>');
   const officialHost = settings.capabilities?.mode === 'official_observation' || targets.some(officialQualityUnavailable);
   return rules.map((rule) => {
-    const config = rule.config || rule, held = holdsPause(rule, targets), ready = connected && targetsFresh;
+    const config = rule.config || rule, held = holdsPause(rule, targets);
+    const rulesCurrent = resourceStatus?.rules !== 'error';
+    const ready = connected && targetsFresh && rulesCurrent;
     const enabled = rule.enabled === true && !held, timed = rule.timer_active;
     const known = typeof rule.enabled === 'boolean' && typeof timed === 'boolean';
     const unsupported = rule.status === 'unsupported' || (officialHost && (rule.action === 'pause_credential' || rule.automatic_pause));
     const on = enabled && timed === true;
     const saving = busy?.has(`rule-timer:${rule.id}`);
     const label = held ? officialHost ? '历史归属待核对' : '等待人工解除' : unsupported ? '不支持' : !known ? '状态未确认' : on ? '运行中' : '已暂停';
-    const canSwitch = officialHost && known && ready && !held && !unsupported && resourceStatus?.rules !== 'error';
+    const canSwitch = officialHost && known && ready && !held && !unsupported;
     const hint = saving ? '正在保存' : canSwitch ? (on ? '暂停定时检测' : '启用定时检测') : label;
-    const blockedBy = held ? (rule.blocked_auth_id ? `受暂停凭证 ${name(rule.blocked_auth_id)} 影响` : '目标或依赖凭证暂停，所有检测停止') : !ready ? '凭证状态未确认，请刷新' : '';
+    const blockedBy = held ? (rule.blocked_auth_id ? `受暂停凭证 ${name(rule.blocked_auth_id)} 影响` : '目标或依赖凭证暂停，所有检测停止') : !rulesCurrent ? '规则状态未确认，请刷新' : !ready ? '凭证状态未确认，请刷新' : '';
     const id = escapeHTML(rule.id), selected = scopeRule === rule.id;
     const schedule = !enabled ? '已停止检测' : timed === true ? (rule.cron || `每 ${rule.interval_seconds ?? '未知'} 秒`) : timed === false ? '按需手动执行' : '定时状态未确认';
-    const actionSummary = rule.action === 'disable_credential' ? `答错后暂停凭证${rule.auto_restore ? '；整轮通过后自动恢复' : '；手动恢复'}` : rule.action === 'delete_credential' ? '答错后从 CPA 移除凭证' : rule.action === 'observe_only' ? '只检测、记录结果，不处理账号' : rule.action === 'pause_credential' ? officialHost ? '历史暂停配置；官方宿主不执行' : '凭证暂停配置' : '处置未知';
+    const actionSummary = rule.action === 'disable_credential' ? `暂停凭证${rule.auto_restore ? '；整轮通过后自动恢复' : '；手动恢复'}` : rule.action === 'delete_credential' ? '从 CPA 移除凭证' : rule.action === 'observe_only' ? '仅记录' : rule.action === 'pause_credential' ? officialHost ? '历史暂停配置；官方宿主不执行' : '凭证暂停配置' : '处置未知';
+    const upstreamFacts = configuredUpstreamActions(rule.upstream_error_actions).map(([label, action]) => operationFact(label, action)).join('');
     return `<article class="quality-rule${selected ? ' selected' : ''}" data-key="rule:${id}">
       <div class="quality-rule-head"><button class="quality-rule-select" data-rule-select="${id}" aria-pressed="${selected}" title="查看此规则的运行记录">${escapeHTML(rule.name || rule.id)}</button><button type="button" class="rule-state rule-timer-toggle" role="switch" aria-label="${escapeHTML(rule.name || rule.id)}的定时检测" aria-checked="${on}" aria-busy="${!!saving}" data-rule-timer="${id}" title="${hint}" ${!canSwitch || saving ? 'disabled' : ''}>${label}</button></div>
       <p class="quality-rule-scope"><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="7" r="3"/><path d="M4 17v-1a6 6 0 0 1 12 0v1"/></svg><span>${dynamicScopeLabel(rule.target_scope) ? dynamicScopeLabel(rule.target_scope) + ' · 动态纳入' : escapeHTML(name(config.auth_id) || '目标未知')}</span></p>
-      ${rule.target_scope === 'all_credentials' && rule.last_manual_skips?.length ? `<details><summary>上轮跳过 ${rule.last_manual_skips.length} 个手动禁用凭证</summary><ul class="restriction-list">${rule.last_manual_skips.map(id => `<li>${escapeHTML(name(id))} · 人工禁用</li>`).join('')}</ul></details>` : ''}
+      ${rule.last_scope_dispatch ? renderScopeDispatch(rule.last_scope_dispatch, '最近调度', rule.id, expandedSkips?.has(rule.id))
+        : rule.target_scope === 'all_credentials' && rule.last_manual_skips?.length ? `<details><summary>上轮跳过 ${rule.last_manual_skips.length} 个手动禁用凭证</summary><ul class="restriction-list">${rule.last_manual_skips.map(id => `<li>${escapeHTML(name(id))}${name(id) !== id ? ` · ${escapeHTML(id)}` : ''} · 人工禁用</li>`).join('')}</ul></details>` : ''}
       <div class="quality-rule-models">${(config.models || []).map(model => `<code>${escapeHTML(model)}</code>`).join('') || '<small>模型未记录</small>'}</div>
-      <details><summary>${escapeHTML(config.models?.length ?? 0)} 个模型 · 请求强度 ${escapeHTML(config.parameters?.reasoning_effort || '未指定')}</summary><dl class="evidence-facts">${operationFact('题目', questionTitle(config.question, config.question_id))}${operationFact('每模型样本', config.samples)}${operationFact('规则版本', rule.revision)}${operationFact('对照凭证', name(config.control_auth_id) || '未配置')}${operationFact('判题', config.judge?.mode === 'llm' ? `独立模型 · ${name(config.judge.auth_id) || '未知'} · ${config.judge.model || '未知'}` : config.judge?.mode === 'deterministic' ? '标准答案判定' : config.judge?.mode === 'manual' ? '人工评审' : '未知')}${operationFact('处置', actionSummary)}${rule.action === 'pause_credential' ? operationFact('历史自动暂停配置', rule.automatic_pause === true ? '开；当前执行能力另行核验' : rule.automatic_pause === false ? '关' : '未知') : ''}</dl></details>
-      ${rule.handling?.length ? `<div class="quality-handling-records">${rule.handling.map(h => `<div><span>${escapeHTML(h.email || name(h.auth_id))} · ${h.state === 'disabled' ? '已暂停凭证' : h.state === 'deleted' ? '已移除凭证' : '处置待核对'}</span><button type="button" class="text-button" data-handling-ack="${escapeHTML(h.action_id)}">核对人工处理</button></div>`).join('')}</div>` : ''}
+      <details><summary>${escapeHTML(config.models?.length ?? 0)} 个模型 · 请求强度 ${escapeHTML(config.parameters?.reasoning_effort || '未指定')}</summary><dl class="evidence-facts">${operationFact('题目', questionTitle(config.question, config.question_id))}${operationFact('每模型样本', config.samples)}${operationFact('规则版本', rule.revision)}${operationFact('对照凭证', name(config.control_auth_id) || '未配置')}${operationFact('判题', config.judge?.mode === 'llm' ? `独立模型 · ${name(config.judge.auth_id) || '未知'} · ${config.judge.model || '未知'}` : config.judge?.mode === 'deterministic' ? '标准答案判定' : config.judge?.mode === 'manual' ? '人工评审' : '未知')}${operationFact('答错后的处理', actionSummary)}${upstreamFacts}${rule.action === 'pause_credential' ? operationFact('历史自动暂停配置', rule.automatic_pause === true ? '开；当前执行能力另行核验' : rule.automatic_pause === false ? '关' : '未知') : ''}</dl></details>
+      ${rule.handling?.length ? `<div class="quality-handling-records">${rule.handling.map(record => handlingRecord(record, name)).join('')}</div>` : ''}
       <div class="quality-rule-plan"><span>${enabled && timed ? '下次检测' : '运行方式'}</span><strong>${enabled && timed ? `${escapeHTML(nextRuleTime(rule))}<small>${escapeHTML(schedule)}</small>` : escapeHTML(schedule)}</strong></div>
       ${blockedBy ? `<p class="quality-rule-warning">${escapeHTML(blockedBy)}</p>` : ''}
       <footer class="quality-rule-actions"><button class="text-button" data-rule-edit="${id}">编辑</button><button class="text-button" data-rule-delete="${id}" ${held || !ready ? 'disabled' : ''}>删除</button>${rule.last_scope_batch ? `<button class="text-button" data-rule-batch="${escapeHTML(rule.last_scope_batch)}">最近批次</button>` : rule.last_run ? `<button class="text-button" data-run="${escapeHTML(rule.last_run)}">最近结果</button>` : ''}<button data-rule-run="${id}" ${!ready || !enabled ? 'disabled' : ''}>立即执行</button></footer>
@@ -562,17 +704,20 @@ export function renderQualityRuns(runs, rules, credentialName = id => id) {
   if (!runs.length) return renderQualityEmpty('暂无运行记录', '手动或定时执行规则后，在这里查看检测结果。');
   return `<table class="quality-run-table"><thead><tr><th scope="col">检测时间</th><th scope="col">凭证 / 规则</th><th scope="col">检测结果</th><th scope="col">凭证处理</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody>${runs.map(run => {
     const ruleID = run.rule_id || run.config?.rule_id;
+    const skip = admissionEvidence(run);
     const samples = run.samples || [], { correct, incorrect, unknown } = qualityCounts(samples);
-    const result = samples.length ? `<span class="good">正确 ${correct}</span><span${incorrect ? ' class="bad"' : ''}>答错 ${incorrect}</span><span class="muted">未知 ${unknown}</span>${run.pruned_samples ? `<span class="muted">已裁剪 ${escapeHTML(run.pruned_samples)}</span>` : ''}` : '<span class="muted">暂无判定</span>';
+    const result = skip ? `<span class="muted">${escapeHTML(skip.result)}</span>` : samples.length ? `<span class="good">正确 ${correct}</span><span${incorrect ? ' class="bad"' : ''}>答错 ${incorrect}</span><span class="muted">未知 ${unknown}</span>${run.pruned_samples ? `<span class="muted">已裁剪 ${escapeHTML(run.pruned_samples)}</span>` : ''}` : '<span class="muted">暂无判定</span>';
     const ruleName = rules.find(r => r.id === ruleID)?.name || ruleID || '规则检测';
     const stamp = date(run.created_at), [day, clock] = stamp.split(' ');
     const handling = credentialHandlingLabel(run);
+    const identity = skip?.email || run.credential_email || credentialName(skip?.id || run.config?.auth_id) || '凭证未记录';
+    const issue = skip?.reason || run.error || run.reason || run.block_reason;
     const handlingTone = run.action_status === 'credential_restored' ? 'good' : run.action_status === 'credential_removed' ? 'bad' : ['credential_suspended', 'credential_action_uncertain', 'credential_action_attention', 'management_session_required', 'pending_reconciliation', 'awaiting_release'].includes(run.action_status) ? 'warn' : 'neutral';
     return `<tr data-key="run:${escapeHTML(run.id || run.run_id)}">
       <td class="quality-time-cell" data-label="检测时间"><time datetime="${escapeHTML(run.created_at || '')}" title="${escapeHTML(stamp)}"><strong>${escapeHTML(clock || day)}</strong>${clock ? `<small>${escapeHTML(day)}</small>` : ''}</time></td>
-      <td class="quality-identity-cell" data-label="凭证 / 规则"><strong>${escapeHTML(run.credential_email || credentialName(run.config?.auth_id) || '凭证未记录')}</strong><small>${escapeHTML(ruleName)}</small><small class="quality-run-parameters"><span>${escapeHTML(run.config?.models?.join(' / ') || '模型未记录')}</span><span>请求强度 ${escapeHTML(run.config?.parameters?.reasoning_effort || '未指定')}</span></small></td>
-      <td class="quality-result-cell" data-label="检测结果">${statusTag(run.status)}<div class="quality-result">${result}</div>${run.error || run.reason || run.block_reason ? `<small class="error-note">${escapeHTML(run.error || run.reason || run.block_reason)}</small>` : ''}</td>
-      <td class="quality-handling-cell" data-label="凭证处理">${tag(handling, handlingTone)}</td>
+      <td class="quality-identity-cell" data-label="凭证 / 规则"><strong>${escapeHTML(identity)}</strong>${skip?.id && skip.id !== identity ? `<small>${escapeHTML(skip.id)}</small>` : ''}<small>${escapeHTML(ruleName)}</small><small class="quality-run-parameters"><span>${escapeHTML(run.config?.models?.join(' / ') || '模型未记录')}</span>${skip ? '' : `<span>请求强度 ${escapeHTML(run.config?.parameters?.reasoning_effort || '未指定')}</span>`}</small></td>
+      <td class="quality-result-cell" data-label="检测结果">${skip?.status || statusTag(run.status)}<div class="quality-result">${result}</div>${issue ? `<small class="${skip ? 'muted' : 'error-note'}">${skip?.model ? escapeHTML(skip.model) + ' · ' : ''}${escapeHTML(issue)}</small>` : ''}</td>
+      <td class="quality-handling-cell" data-label="凭证处理">${tag(handling, handlingTone)}${skip ? `<small>${escapeHTML(skip.source)}</small>` : run.upstream_condition ? `<small>${escapeHTML(upstreamLabel(run.upstream_condition))}</small>` : ''}</td>
       <td class="quality-detail-cell"><button class="text-button" data-run="${escapeHTML(run.id || run.run_id)}" aria-label="查看${escapeHTML(ruleName)}的运行详情">详情 <span aria-hidden="true">→</span></button></td>
     </tr>`;
   }).join('')}</tbody></table>`;

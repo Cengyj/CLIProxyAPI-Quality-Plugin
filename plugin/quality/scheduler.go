@@ -2,6 +2,7 @@ package quality
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -171,6 +172,7 @@ func (en *Engine) Tick(now time.Time) {
 		}
 	}
 	due, err := en.takeDueRulesLocked(now)
+	inventoryCtx := en.inventoryContextLocked(en.ctx)
 	en.mu.Unlock()
 	if err != nil {
 		return
@@ -178,12 +180,8 @@ func (en *Engine) Tick(now time.Time) {
 	if len(due) == 0 {
 		return
 	}
-	targets, inventoryErr := en.host.Targets(en.ctx)
-	if inventoryErr != nil {
-		log.Debug("model-quality: scheduled credential inventory unavailable")
-		return
-	}
-	inventory := func(context.Context) ([]Target, error) { return targets, nil }
+	read := sync.OnceValues(func() ([]Target, error) { return en.host.Targets(inventoryCtx) })
+	inventory := func(context.Context) ([]Target, error) { return read() }
 	for _, scheduled := range due {
 		if _, err = en.dispatchWithInventory(en.ctx, scheduled.id, scheduled.revision, true, inventory); err != nil {
 			log.WithField("rule_id", scheduled.id).Debug("model-quality: scheduled run not admitted")

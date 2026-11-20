@@ -167,7 +167,7 @@ async function main() {
     await el('#rule-question').selectOption('logic-candy');await el('#rule-judge-mode').selectOption('deterministic');await cleanDraft();
         await el('#rule-name').fill('指向字段的校验');await el('#rule-scope-single').check();await click('#rule-form button[type=submit]');await focused('rule-target');assert(await el('#rule-model-title').isVisible());assert.equal(writes.length,0);
     await el('#rule-scope-all').check();await el('#rule-name').fill('');
-    assert(await quick(defaults[0]).isDisabled());assert.match(await el('#rule-scope-note').innerText(),/暂无匹配凭证/);
+    assert(await quick(defaults[0]).isDisabled());assert.match(await el('#rule-scope-note').innerText(),/当前范围 123 个凭证/);
     await el('#rule-scope-all').focus();await page.keyboard.press('ArrowRight');assert(await el('#rule-scope-directory').isChecked());assert(await el('#rule-target-field').isHidden());await text('#rule-scope-note','人工禁用');await page.keyboard.press('ArrowRight');assert(await el('#rule-scope-single').isChecked());await el('#rule-scope-all').check();
     await click('#rule-shortcut-toggle');await el('#rule-shortcut-draft').fill('local-one，local-two\nlocal-one；gpt-6-astra');await click('#rule-shortcut-save');
     assert.deepEqual(await el('#rule-custom-shortcuts code').allTextContents(),['local-one','local-two']);await cleanDraft();
@@ -224,7 +224,7 @@ async function main() {
       await click('[data-rule-edit="rule-2"]');assert.equal(await el('#rule-timer').isChecked(),on);
       await click('#rule-form .editor-footer [data-close]');
     }
-    await click('[data-rule-run="rule-1"]');await text('#action-description','预计调用 246 次'); await click('#action-cancel');assert(!writes.some(w=>w.p==='/rules/run'));
+    await click('[data-rule-run="rule-1"]');await text('#action-description','最多计划 492 份目标回答'); await click('#action-cancel');assert(!writes.some(w=>w.p==='/rules/run'));
     await click('[data-rule-run="rule-1"]');await click('#action-confirm');await text('#ops-batch-summary','1–20 / 23');assert.equal(await el('#operations-history [data-run]').count(),20);
     await text('#operations-history','请求强度 low');
     await text('#operations-history','snapshot@example.test');

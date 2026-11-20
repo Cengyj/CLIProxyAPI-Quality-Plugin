@@ -92,6 +92,8 @@ def check(package, output, quality_scope=False):
                     raise RuntimeError(f'Isolated CPA did not register the plugin: {phase}')
                 entry = next(e for e in entries if e['id'] == 'model-quality')
                 assert entry['metadata']['version'] == manifest['plugin_version']
+                assert entry['metadata']['name'] == 'CPA Credential Ops'
+                assert entry['metadata']['github_repository'] == 'https://github.com/Cengyj/cpa-credential-ops'
                 assert get(PREFIX + '/settings')[0] == 401
                 assert get('/v0/resource/plugins/model-quality/login/accounts')[0] == 404
                 capabilities = fetch(PREFIX + '/login/capabilities')
@@ -159,13 +161,16 @@ ThreadingHTTPServer(('127.0.0.1',18887),Mock).serve_forever()"""
                                 assert rule['parameters']['reasoning_effort'] == requested
                                 status, data = get(PREFIX + '/rules/run', True, {'id': rule['id'], 'revision': rule['revision']})
                                 receipt = json.loads(data)
-                                assert status == 202 and receipt['count'] == 2 and receipt['skipped'] == 1, receipt
+                                assert status == 202 and receipt['count'] == 3 and receipt['skipped'] == 0, receipt
                                 batch = receipt['scope_batch_id']; history[batch] = requested
                                 batch_path = PREFIX + '/runs?source=scheduled_probe&scope_batch_id=' + batch
                                 for _ in range(20):
-                                    children = fetch(batch_path)['items']
-                                    if len(children) == 2 and all(r['status'] == 'completed' for r in children): break
+                                    batch_rows = fetch(batch_path)['items']
+                                    children = [r for r in batch_rows if r['config']['auth_id'] in {t['auth_id'] for t in active}]
+                                    if len(batch_rows) == 3 and len(children) == 2 and all(r['status'] == 'completed' for r in children): break
                                     time.sleep(.1)
+                                blocked = [r for r in batch_rows if r['config']['auth_id'] not in {t['auth_id'] for t in active}]
+                                assert len(blocked) == 1 and not blocked[0]['samples'] and blocked[0]['status'] == 'failed' and blocked[0]['error'] == 'unavailable: credential status cannot be verified', blocked
                                 assert {r['config']['auth_id'] for r in children} == {t['auth_id'] for t in active}
                                 assert all(r['status'] == 'completed' and r['config']['models'] == registered_models and r['config']['parameters']['reasoning_effort'] == requested and len(r['samples']) == 4 and all(s['execution_status'] == 'completed' and s['output'] == 'offline sample' and not s['comparable'] for s in r['samples']) for r in children), (requested, [(r['status'],r.get('error'),r['samples']) for r in children])
                                 calls = [json.loads(line) for line in docker('exec', mock, 'cat', '/tmp/calls').decode().splitlines()][total_calls:]
@@ -180,14 +185,39 @@ ThreadingHTTPServer(('127.0.0.1',18887),Mock).serve_forever()"""
                         empty = json.loads(data); assert empty['next_run_local'].endswith('T10:15:00+05:45') and empty['next_run'].endswith('T04:30:00Z')
                         assert empty['timer_active'] and empty['enabled'] and empty['scheduling_enabled'] and not fetch(PREFIX + '/settings')['scheduling_enabled']
                         status, data = get(PREFIX + '/rules/run', True, {'id': empty['id'], 'revision': empty['revision']})
-                        assert status == 200 and json.loads(data) == {'count': 0, 'skipped': 3}
+                        receipt = json.loads(data)
+                        assert status == 202 and receipt['count'] == 3 and receipt['skipped'] == 0, receipt
+                        empty_details = []
+                        for _ in range(30):
+                            empty_rows = fetch(PREFIX + '/runs?scope_batch_id=' + receipt['scope_batch_id'])['items']
+                            if len(empty_rows) == 3 and all(r['status'] not in ('queued','running') for r in empty_rows): break
+                            time.sleep(.1)
+                        assert len(empty_rows) == 3
+                        for row in empty_rows:
+                            assert not row['samples'] and not row.get('skip_detail')
+                            detail = row.get('preflight_detail')
+                            if row['config']['auth_id'] in {t['auth_id'] for t in active}:
+                                assert row['status'] == 'completed' and detail['code'] == 'missing_model' and detail['model'] == 'not-registered'
+                            else:
+                                assert row['status'] == 'failed' and row['error'] == 'unavailable: credential status cannot be verified'
                     else:
                         stored_runs = fetch(PREFIX + '/runs')
-                        assert stored_runs['total'] == len(stored_runs['items']) == 2 * len(history) == 10
-                        assert all(r['config']['parameters']['reasoning_effort'] == history[r['config']['scope_batch_id']] for r in stored_runs['items'])
+                        assert stored_runs['total'] == len(stored_runs['items']) == 3 * len(history) + 3 == 18
+                        summaries = fetch(PREFIX + '/runs?source=scheduled_probe&view=summary')
+                        assert summaries['total'] == len(summaries['items']) == stored_runs['total']
+                        for row, full in zip(summaries['items'], stored_runs['items']):
+                            assert row['id'] == full['id'] and row['config']['models'] == full['config']['models']
+                            assert 'prompt' not in row['config']['question'] and all('output' not in sample for sample in row['samples'])
+                            assert [s['quality_verdict'] for s in row['samples']] == [s['quality_verdict'] for s in full['samples']]
+                        completed_id = next(row['id'] for row in summaries['items'] if row['status'] == 'completed' and row['samples'])
+                        detail = fetch(PREFIX + '/runs/detail?id=' + completed_id)
+                        assert detail['config']['question']['prompt'] and detail['samples'][0]['output'] == 'offline sample'
+                        assert all(r['config']['parameters']['reasoning_effort'] == history[r['config']['scope_batch_id']] for r in stored_runs['items'] if r['config']['rule_id'] == rule['id'])
                         stored_rules = fetch(PREFIX + '/rules')['items']; assert len(stored_rules) == 2
                         assert all(r['parameters']['reasoning_effort'] == 'max' for r in stored_rules)
                         saved = next(r for r in stored_rules if r['id'] == empty['id'])
+                        dispatch = saved['last_scope_dispatch']
+                        assert dispatch['matched'] == 3 and dispatch['skipped'] == 0 and dispatch.get('details', []) == empty_details
                         assert all(saved[k] == empty[k] for k in ('cron','max_results','next_run','next_run_local','parameters','target_scope','timer_active'))
                         assert saved['timer_active'] and not next(r for r in stored_rules if r['id'] == rule['id'])['timer_active']
                         assert not fetch(PREFIX + '/settings')['scheduling_enabled']
@@ -195,8 +225,8 @@ ThreadingHTTPServer(('127.0.0.1',18887),Mock).serve_forever()"""
                         status, data = get(PREFIX + '/rules', True, stop, method='PUT')
                         assert status == 200 and not json.loads(data)['timer_active'] and json.loads(data)['next_run'].startswith('0001-')
                     history_page = fetch(PREFIX + '/runs?source=scheduled_probe&rule_id=' + rule['id'] + '&offset=8&limit=1')
-                    assert history_page['total'] == 10 and len(history_page['items']) == 1 and history_page['items'][0]['config']['rule_id'] == rule['id']
-                    assert fetch(PREFIX + '/runs?source=scheduled_probe&rule_id=' + empty['id'])['total'] == 0
+                    assert history_page['total'] == 15 and len(history_page['items']) == 1 and history_page['items'][0]['config']['rule_id'] == rule['id']
+                    assert fetch(PREFIX + '/runs?source=scheduled_probe&rule_id=' + empty['id'])['total'] == 3
                     assert fetch(PREFIX + '/runs?source=manual_test&rule_id=' + rule['id'])['total'] == 0
                 elif capabilities.get('credential_conversion'):
                     claims = {'exp': 1999999999, 'email': 'conversion@example.test', 'https://api.openai.com/auth': {'chatgpt_account_id': 'synthetic-account', 'chatgpt_user_id': 'synthetic-user'}}

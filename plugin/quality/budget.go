@@ -108,7 +108,9 @@ func (en *Engine) account(day string, usage *Usage) error {
 func (en *Engine) pruneBudgetDaysLocked(tx *bolt.Tx, activeDay, completedDay string) error {
 	cutoff := en.now().UTC().AddDate(0, 0, -en.cfg.RetentionDays+1).Format("2006-01-02")
 	prefix := []byte("budget:")
-	cursor := tx.Bucket([]byte("meta")).Cursor()
+	metadata := tx.Bucket([]byte("meta"))
+	cursor := metadata.Cursor()
+	var expired []string
 	for key, _ := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, _ = cursor.Next() {
 		day := string(key[len(prefix):])
 		pending := en.budgetPending[day]
@@ -116,9 +118,12 @@ func (en *Engine) pruneBudgetDaysLocked(tx *bolt.Tx, activeDay, completedDay str
 			pending--
 		}
 		if day < cutoff && day != activeDay && pending <= 0 {
-			if err := cursor.Delete(); err != nil {
-				return err
-			}
+			expired = append(expired, string(key))
+		}
+	}
+	for _, key := range expired {
+		if err := metadata.Delete([]byte(key)); err != nil {
+			return err
 		}
 	}
 	return nil

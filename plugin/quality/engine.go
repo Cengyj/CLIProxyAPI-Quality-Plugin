@@ -160,6 +160,12 @@ func (en *Engine) load() error {
 		}
 		en.noteRoundEndLocked(r.Config.RuleID)
 	}
+	if err := en.interruptCredentialWrites(); err != nil {
+		return err
+	}
+	if err := en.recoverDisabledSources(); err != nil {
+		return err
+	}
 	if e := en.store.Get("meta", "budget", &en.budget); e != nil && !errors.Is(e, os.ErrNotExist) {
 		return e
 	}

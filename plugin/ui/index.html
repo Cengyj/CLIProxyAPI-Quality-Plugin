@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="referrer" content="no-referrer"><title>Model Quality · 模型质量控制台</title>
+  <meta name="referrer" content="no-referrer"><title>CPA Credential Ops</title>
   <link rel="stylesheet" href="./style.css"><script type="module" src="./app.js"></script>
 </head>
 <body>
@@ -57,8 +57,8 @@
           <div class="question-paper">
             <label class="question-heading" for="question">测试题目<select id="question"><option value="">连接后加载题目</option></select></label>
             <label class="prompt-label" for="prompt">题目内容<span>可以直接编辑</span></label>
-            <textarea id="prompt" aria-describedby="question-version prompt-note" rows="7" maxlength="16000" required placeholder="选择内置题目，或编写你想测试的问题"></textarea>
-            <div class="prompt-caption"><small id="question-version"></small><p id="prompt-note" class="field-note" hidden></p></div>
+            <textarea id="prompt" aria-describedby="question-version prompt-note" rows="7" required placeholder="选择内置题目，或编写你想测试的问题"></textarea>
+            <div class="prompt-caption"><small id="question-version"></small><p id="prompt-note" class="field-note" hidden></p><p id="question-read-note" class="field-note error-note" role="status" hidden>题库读取失败，请刷新后再测试。</p></div>
           </div>
         </div>
       </form>
@@ -80,18 +80,18 @@
         <div class="comparison-toolbar"><div class="model-selectors"><label>查看模型<select id="compare-model-a"></select></label><label>对比模型<select id="compare-model-b"></select></label></div><label>样本<select id="sample-filter"><option value="all">全部样本</option></select></label></div><div id="sample-list" class="sample-list"></div>
       </div>
     </section>
-    <section id="manual-history" class="hidden" aria-label="测试记录" tabindex="0"><h2 class="sr-only">测试记录</h2><div id="history-list" class="history-list"><p class="empty-line">连接管理接口后查看历史。</p></div></section>
+    <section id="manual-history" class="hidden" aria-label="测试记录" tabindex="0"><h2 class="sr-only">测试记录</h2><p id="history-read-note" class="quality-read-note" role="status" hidden>测试记录读取失败，以下为上次读取的页面。可再次翻页或刷新。</p><div id="history-list" class="history-list"><p class="empty-line">连接管理接口后查看历史。</p></div></section>
     <footer class="manual-panel-footer answer-footer">
       <div id="manual-result-footer"><span id="manual-result-summary" role="status" aria-live="polite">等待开始测试</span><div class="result-heading"><h2 class="sr-only">任务操作</h2><div class="button-row result-actions"><button id="run-cancel" class="danger small hidden">停止测试</button><details id="task-actions" class="task-actions hidden" open><summary>任务操作</summary><div class="button-row"><button id="run-rerun" class="subtle small hidden">同配置再测试</button><button id="run-export" class="subtle small hidden">下载结果</button></div></details></div></div></div>
-      <div id="manual-history-footer" class="hidden"><span id="history-total">0 个任务</span><div id="history-pagination" class="pagination" hidden><button class="text-button small" id="history-prev" disabled>上一页</button><span id="history-page">第 1 页</span><button class="text-button small" id="history-next" disabled>下一页</button></div></div>
+      <div id="manual-history-footer" class="hidden"><span id="history-total">任务数未确认</span><div id="history-pagination" class="pagination" hidden><button class="text-button small" id="history-prev" disabled>上一页</button><span id="history-page">第 1 页</span><button class="text-button small" id="history-next" disabled>下一页</button></div></div>
     </footer>
     </div>
     </div>
   </section>
   <section id="page-operations" class="hidden" aria-labelledby="operations-title">
     <div id="operations-main">
-      <header class="quality-heading"><div><h2 id="operations-title">检测概况</h2><p>汇总已保留的检测结果，跟进规则的运行情况。</p></div><button class="primary" id="rule-new"><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>新建规则</button></header>
-      <section class="quality-overview" aria-label="检测统计"><div id="metrics" class="metrics-grid"></div></section>
+      <header class="quality-heading"><div><h2 id="operations-title">检测概况</h2><p>统计全部手动与规则答题，已裁剪样本和未答题的目录检查除外。</p></div><button class="primary" id="rule-new"><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>新建规则</button></header>
+      <section class="quality-overview" aria-label="检测统计"><p id="metrics-read-note" class="quality-read-note" role="status" hidden></p><div id="metrics" class="metrics-grid"></div></section>
       <div class="quality-workspace">
         <section id="ops-rules" class="quality-panel" aria-labelledby="rules-title">
           <header class="quality-panel-heading"><div><h3 id="rules-title">检测规则 <span id="rule-count" class="count-inline"></span></h3><p>选择规则，查看对应的检测记录</p></div></header>
@@ -103,6 +103,7 @@
         </section>
         <section id="ops-activity" class="quality-panel" aria-labelledby="activity-title" tabindex="-1">
           <header class="quality-panel-heading"><div><h3 id="activity-title">运行记录 <span id="ops-record-count" class="count-inline"></span></h3><p>检测结果与凭证处理分别展示</p></div><button type="button" id="ops-history-clear" class="text-button small" aria-haspopup="dialog" title="清空所有规则的运行记录" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6M10 10v7m4-7v7"/></svg>清空记录</button></header>
+          <div id="ops-dispatch-receipt" class="dispatch-receipt" aria-label="手动执行回执" role="region" hidden></div>
           <div class="quality-activity-scope"><strong id="ops-scope-label">全部规则</strong><button id="ops-scope-clear" class="text-button small" hidden>清除筛选</button></div>
           <div id="ops-batch-bar" class="quality-batch" hidden><span>正在查看单个检测批次</span><button id="ops-batch-clear" class="text-button small">退出批次</button></div>
           <p id="activity-read-note" class="quality-read-note" role="status" hidden></p>
@@ -161,9 +162,9 @@
             <button id="rule-preview-toggle" class="setting-action" type="button" aria-expanded="false" aria-controls="rule-preview"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h5a4 4 0 0 1 4 4v11a4 4 0 0 0-4-3H3V5Zm18 0h-5a4 4 0 0 0-4 4v11a4 4 0 0 1 4-3h5V5Z"/></svg>题面与参考答案<svg class="control-icon disclosure-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
             <p id="rule-judge-note" class="setting-detail field-note" hidden></p>
             <div id="rule-preview" class="setting-detail rule-reading" hidden><div><h4>题面</h4><pre id="rule-preview-prompt"></pre></div><div><h4>参考答案</h4><p id="rule-preview-answer" role="status"></p></div></div>
-            <label id="rule-prompt-field" class="setting-detail" hidden>自定义题面<textarea id="rule-prompt" rows="4" maxlength="16000"></textarea></label>
+            <label id="rule-prompt-field" class="setting-detail" hidden>自定义题面<textarea id="rule-prompt" rows="4"></textarea></label>
             <label id="rule-control-fields" class="setting-detail hidden">通过对照凭证（随机题可选）<select id="rule-control-target"><option value="">不选择对照</option></select><small>对照用于核对同一轮结果，不改变凭证状态。</small></label>
-            <label id="rule-standard-field" class="setting-detail" hidden>自定义评审标准<textarea id="rule-review-standard" rows="2" maxlength="4096"></textarea></label>
+            <label id="rule-standard-field" class="setting-detail" hidden>自定义评审标准<textarea id="rule-review-standard" rows="2"></textarea></label>
             <div id="rule-judge-fields" class="setting-detail field-row" hidden><label>判题凭证<select id="rule-judge-target"></select></label><label>判题模型<input id="rule-judge-model" maxlength="200"></label></div>
           </section>
           <section class="setting-row rule-handling" aria-labelledby="rule-handling-title">
@@ -173,8 +174,13 @@
               <label><input type="radio" name="rule-action" value="disable_credential"><span>暂停凭证</span><small>停止业务调用</small></label>
               <label><input type="radio" name="rule-action" value="delete_credential"><span>移除凭证</span><small>从 CPA 删除</small></label>
             </div>
-            <div id="rule-restore-option" class="handling-recovery" hidden><label class="check"><input id="rule-auto-restore" type="checkbox"><span>整轮检测通过后自动恢复</span></label><small id="rule-restore-detail"></small></div>
+            <div id="rule-restore-option" class="handling-recovery" hidden><label class="check"><input id="rule-auto-restore" type="checkbox" aria-describedby="rule-restore-detail"><span>答错暂停后，整轮检测通过才自动恢复</span></label><small id="rule-restore-detail"></small></div>
             <p id="rule-handling-note" class="setting-detail field-note" role="status">只检测并记录结果，不处理账号。</p>
+          </section>
+          <section class="setting-row rule-upstream" aria-labelledby="rule-upstream-title">
+            <h3 id="rule-upstream-title">上游错误处理</h3>
+            <div id="rule-upstream-options" class="setting-detail upstream-options"></div>
+            <p id="rule-upstream-note" class="setting-detail field-note" role="status"></p>
           </section>
           <section class="setting-row" aria-labelledby="rule-plan-title">
             <h3 id="rule-plan-title">运行计划</h3>
@@ -508,5 +514,5 @@
         referrerpolicy="no-referrer"
       ></iframe>
     </dialog>
-<script type="application/json" id="build-info">{"application":"model-quality","ui_version":"13.6.26"}</script>
+<script type="application/json" id="build-info">{"application":"model-quality","ui_version":"13.6.35"}</script>
 </body></html>

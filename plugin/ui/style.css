@@ -134,6 +134,7 @@ body:not(.connected) :is(.data-freshness, #connection-top), body.connected #conn
 .section-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .notice { padding: 12px 16px; margin-bottom: 16px; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border)); border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
 .notice.error { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 25%, var(--border)); background: var(--bad-bg); }
+.quality-panel > #notice, .answer-workspace > #notice { flex: none; margin: 0 16px 10px; padding: 8px 12px; font-size: 12px; }
 summary { cursor: pointer; min-height: 36px; padding: 8px 0; font-size: 13px; font-weight: 550; }
 summary:hover { color: var(--accent); }
 summary > span { margin-left: 8px; color: var(--muted); font-size: 12px; font-weight: 400; }
@@ -391,6 +392,7 @@ dialog .button-row.end { margin-top: 22px; padding-top: 18px; border-top: 1px so
 .question-test-results.single-question .model-heading { display: none; }
 .question-test-results .model-result:has(> .sample:only-of-type) { grid-template-columns: minmax(0,1fr); }
 .sample-pending .empty-line { padding: 32px 20px; min-height: 180px; display: grid; place-content: center; font-size: 12px; }
+.quality-detail-answers .sample-pending .empty-line { display: block; min-height: 0; margin: 0; padding: 8px 14px 12px; }
 .control-results { margin-top: 24px; }
 .control-results > p { margin: 12px 0; }
 .history-summary { margin-bottom: 12px; color: var(--muted); font-size: 11px; }
@@ -1677,12 +1679,35 @@ html:has(#account-security-dialog[open]) { overflow: hidden; }
 .handling-recovery .check { margin: 0; font-size: 12px; font-weight: 400; }
 .handling-recovery small { font-size: 11px; color: var(--muted); line-height: 1.6; }
 .rule-handling .field-note { margin: 0; font-size: 11px; line-height: 1.7; }
+.upstream-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 22px; }
+.upstream-options label { min-width: 0; margin: 0; }
+.rule-upstream .field-note { margin: 0; }
+@media (max-width: 540px) {
+  .upstream-options { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+  .upstream-options label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, .72fr); align-items: center; gap: 8px; }
+  .upstream-options select { margin: 0; }
+}
 @media (max-width: 440px) { .rule-handling .handling-options { grid-template-columns: 1fr; gap: 6px; } .handling-options label { grid-template-columns: auto auto 1fr; padding: 7px 10px; } .handling-options input { grid-row: 1; } .handling-options small { grid-column: 3; text-align: right; } }
 
 .quality-handling-records { display: grid; gap: 6px; font-size: 11px; color: var(--muted); }
 .quality-handling-records > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; }
 .quality-handling-records span { overflow-wrap: anywhere; min-width: 0; }
 .quality-handling-records button { font-size: 11px; min-height: 28px; }
+.dispatch-receipt { margin: 0 16px 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.scope-dispatch { min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.scope-dispatch summary { cursor: pointer; overflow-wrap: anywhere; }
+.scope-dispatch .dispatch-heading { color: var(--ink); font-weight: 500; }
+.scope-dispatch time { color: var(--muted); font-size: 11px; font-weight: 400; white-space: nowrap; }
+.scope-dispatch .dispatch-counts { display: inline-block; margin-inline-start: 7px; font-variant-numeric: tabular-nums; }
+.scope-skip-list { max-height: min(36vh, 270px); overflow: auto; margin: 7px 0 0; padding: 0 0 0 10px; border-inline-start: 2px solid var(--border); list-style: none; }
+.scope-skip-list li { padding: 4px 0; overflow-wrap: anywhere; }
+.scope-skip-list li + li { border-top: 1px solid var(--border); }
+.scope-skip-list li div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 6px; }
+.scope-skip-list strong { color: var(--ink); font-size: 12px; font-weight: 500; }
+.scope-skip-list [data-run] { margin-inline-start: auto; min-height: 24px; }
+.quality-detail-identity > code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.scope-skip-list code { font-size: 11px; }
+.scope-skip-list p, .scope-skip-body .field-note { margin: 2px 0; font-size: 11px; }
 
 /* Account directory controls and focused native dialog surfaces. */
 .account-toolbar { display: flex; flex-wrap: wrap; gap: 10px; }

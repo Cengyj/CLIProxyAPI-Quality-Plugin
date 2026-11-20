@@ -54,10 +54,15 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 	}
 	var catalog pluginapi.HostAuthModelsResponse
 	if err := h.call(ctx, "host.auth.models", pluginapi.HostAuthModelsRequest{}, &catalog); err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		catalog.Credentials = nil
 	}
 	models := make(map[string]pluginapi.HostAuthModels, len(catalog.Credentials))
+	catalogIDs := make(map[string]int, len(catalog.Credentials))
 	for _, item := range catalog.Credentials {
+		catalogIDs[item.ID]++
 		if _, duplicate := models[item.AuthIndex]; duplicate {
 			models[item.AuthIndex] = pluginapi.HostAuthModels{}
 		} else {
@@ -78,15 +83,28 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 	}
 	out := make([]Target, 0, len(listed.Files))
 	seen := make(map[string]bool)
+	excluded, _ := ctx.Value(excludedCredentialIDs{}).(map[string]bool)
+	inventoryIDs := make(map[string]int, len(listed.Files))
+	inventoryIndices := make(map[string]int, len(listed.Files))
 	for _, item := range listed.Files {
-		if item.ID == "" || item.AuthIndex == "" || seen[item.ID] {
+		inventoryIDs[item.ID]++
+		inventoryIndices[item.AuthIndex]++
+	}
+	for _, item := range listed.Files {
+		if item.ID == "" || item.AuthIndex == "" || seen[item.ID] || excluded[item.ID] {
 			continue
 		}
 		seen[item.ID] = true
+		entry, hasEntry := models[item.AuthIndex]
+		conflict := inventoryIDs[item.ID] != 1 || inventoryIndices[item.AuthIndex] != 1 || catalogIDs[item.ID] > 1 ||
+			hasEntry && (entry.ID != item.ID || entry.AuthIndex != item.AuthIndex) || !hasEntry && catalogIDs[item.ID] > 0
 		// CPA's file inventory already contains the same runtime projection as
 		// get_runtime. Disk-only fallback entries have no runtime ID or index.
 		if item.Status != "" && item.Source == "file" && item.Provider != "" {
-			out = append(out, runtimeTarget(item, models[item.AuthIndex], true))
+			t := runtimeTarget(item, models[item.AuthIndex], true)
+			t.identityConflict = t.identityConflict || conflict
+			t.catalogVerified = t.catalogVerified && !t.identityConflict
+			out = append(out, t)
 			continue
 		}
 		var current pluginapi.HostAuthGetRuntimeResponse
@@ -98,7 +116,10 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 		if verified {
 			item = current.Auth
 		}
-		out = append(out, runtimeTarget(item, models[item.AuthIndex], verified))
+		t := runtimeTarget(item, models[item.AuthIndex], verified)
+		t.identityConflict = t.identityConflict || conflict || err == nil && !verified
+		t.catalogVerified = t.catalogVerified && !t.identityConflict
+		out = append(out, t)
 	}
 	return out, nil
 }
@@ -107,7 +128,10 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 func (h *NativeHost) pinnedTarget(ctx context.Context, id, index string) (Target, error) {
 	var catalog pluginapi.HostAuthModelsResponse
 	if err := h.call(ctx, "host.auth.models", pluginapi.HostAuthModelsRequest{AuthIndex: index}, &catalog); err != nil {
-		return Target{}, err
+		if ctx.Err() != nil {
+			return Target{}, ctx.Err()
+		}
+		catalog.Credentials = nil
 	}
 	var current pluginapi.HostAuthGetRuntimeResponse
 	if err := h.call(ctx, "host.auth.get_runtime", pluginapi.HostAuthGetRequest{AuthIndex: index}, &current); err != nil {
@@ -117,7 +141,10 @@ func (h *NativeHost) pinnedTarget(ctx context.Context, id, index string) (Target
 	if len(catalog.Credentials) == 1 {
 		entry = catalog.Credentials[0]
 	}
-	return runtimeTarget(current.Auth, entry, current.Auth.ID == id && current.Auth.AuthIndex == index), nil
+	verified := current.Auth.ID == id && current.Auth.AuthIndex == index
+	t := runtimeTarget(current.Auth, entry, verified)
+	t.identityConflict = t.identityConflict || !verified || len(catalog.Credentials) > 1
+	return t, nil
 }
 
 func runtimeTarget(item pluginapi.HostAuthFileEntry, catalog pluginapi.HostAuthModels, verified bool) Target {
@@ -125,7 +152,7 @@ func runtimeTarget(item pluginapi.HostAuthFileEntry, catalog pluginapi.HostAuthM
 	if provider == "" {
 		provider = item.Type
 	}
-	t := Target{AuthID: item.ID, AuthIndex: item.AuthIndex, Email: item.Email, Provider: provider, Type: item.Type, RuntimeStatus: item.Status,
+	t := Target{identityVerified: verified, AuthID: item.ID, AuthIndex: item.AuthIndex, Email: item.Email, Provider: provider, Type: item.Type, RuntimeStatus: item.Status,
 		ManualDisabled: item.Disabled || item.Status == "disabled", Models: []string{}, Reasoning: map[string]any{}, Reasons: []string{}, UnsupportedReason: "official_host_quality_pause_unavailable"}
 	if t.ManualDisabled {
 		t.Reasons = append(t.Reasons, "operator_disabled")
@@ -141,7 +168,9 @@ func runtimeTarget(item pluginapi.HostAuthFileEntry, catalog pluginapi.HostAuthM
 		t.Reasons = append(t.Reasons, "runtime_status_unavailable")
 	}
 	t.EffectiveAvailable = len(t.Reasons) == 0
+	t.identityConflict = catalog.AuthIndex != "" && (item.AuthIndex != catalog.AuthIndex || item.ID != catalog.ID || catalog.Provider != provider)
 	if verified && provider != "" && item.ID == catalog.ID && item.AuthIndex == catalog.AuthIndex && provider == catalog.Provider {
+		t.catalogVerified = catalog.Models != nil
 		t.Models = append(t.Models, catalog.Models...)
 	}
 	return t

@@ -11,10 +11,77 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	bolt "go.etcd.io/bbolt"
 )
+
+func TestHistorySummaryOmitsLongEvidenceOnlyOnListRequests(t *testing.T) {
+	en, _ := lifeFixture(t)
+	long := strings.Repeat("frozen answer ", 5000)
+	for _, source := range []string{"manual_test", "scheduled_probe"} {
+		for i := range 41 {
+			id := fmt.Sprintf("%s-%02d", source, i)
+			cfg := lifeConfig()
+			cfg.Samples, cfg.Judge.Mode = 2, "manual"
+			q := Question{Title: "Frozen question", Prompt: "frozen prompt", Kind: "logic", Answer: "4"}
+			r := &Run{ID: id, Source: source, Config: Frozen{RunConfig: cfg, Question: q}, Status: "completed", ActionStatus: "observe_only", Samples: []Sample{
+				{Model: cfg.Models[0], Index: 0, Output: long, ExecutionStatus: "completed", QualityVerdict: "unknown"},
+				{Model: cfg.Models[0], Index: 1, Output: "4", ExecutionStatus: "completed", QualityVerdict: "unknown"},
+			}}
+			en.runs[id] = r
+		}
+	}
+	for _, tc := range []struct{ source, limit string }{{"manual_test", "10"}, {"scheduled_probe", "20"}} {
+		t.Run(tc.source, func(t *testing.T) {
+			req := pluginapi.ManagementRequest{Method: "GET", Path: "/v0/management/plugins/model-quality/runs", Query: url.Values{"source": {tc.source}, "limit": {tc.limit}, "offset": {"10"}}}
+			full := en.Handle(context.Background(), req)
+			req.Query.Set("view", "summary")
+			short := en.Handle(context.Background(), req)
+			t.Logf("page JSON: full %d bytes, summary %d bytes", len(full.Body), len(short.Body))
+			if full.StatusCode != 200 || short.StatusCode != 200 || !strings.Contains(string(full.Body), long) || strings.Contains(string(short.Body), "frozen prompt") || len(short.Body)*10 >= len(full.Body) {
+				t.Fatal("expected compact list and backward-compatible full list")
+			}
+			var page struct {
+				Items                []Run
+				Total, Offset, Limit int
+			}
+			if err := json.Unmarshal(short.Body, &page); err != nil || page.Total != 41 || page.Offset != 10 || len(page.Items) != page.Limit {
+				t.Fatal("wrong page", err)
+			}
+			row := page.Items[0]
+			if len(row.Samples) != 2 || row.Samples[1].Model != row.Config.Models[0] || row.Samples[1].Index != 1 {
+				t.Fatal("summary lost the identity of a planned sample")
+			}
+			if row.ID != tc.source+"-10" || row.Config.Question.Title != "Frozen question" || len(row.Samples) != 2 || row.Samples[1].QualityVerdict != "unknown" || (row.Samples[1].AnswerMatch == "correct") != (tc.source == "manual_test") {
+				t.Fatal("summary lost list verdict or frozen configuration")
+			}
+			detail, err := en.Run(row.ID)
+			if err != nil || detail.Config.Question.Prompt != "frozen prompt" || detail.Samples[0].Output != long {
+				t.Fatal("summary affected detail")
+			}
+		})
+	}
+}
+
+func TestReviewRequiresExplicitStoredSamplePosition(t *testing.T) {
+	en, _ := lifeFixture(t)
+	en.runs["test"] = &Run{ID: "test", Status: "completed", Samples: []Sample{{Model: "a", Index: 0, Output: "first"}, {Model: "a", Index: 0, Output: "second"}}}
+	for _, body := range []string{`{"id":"test","verdict":"correct"}`, `{"id":"test","sample_index":null,"verdict":"correct"}`} {
+		response := en.Handle(context.Background(), pluginapi.ManagementRequest{Method: "POST", Path: "/v0/management/plugins/model-quality/runs/review", Body: []byte(body)})
+		if response.StatusCode != 400 || en.runs["test"].Samples[0].Review != "" {
+			t.Fatalf("ambiguous review targeted sample zero: status=%d review=%q", response.StatusCode, en.runs["test"].Samples[0].Review)
+		}
+	}
+	for index, verdict := range []string{"correct", "incorrect"} {
+		body := fmt.Sprintf(`{"id":"test","sample_index":%d,"verdict":%q}`, index, verdict)
+		response := en.Handle(context.Background(), pluginapi.ManagementRequest{Method: "POST", Path: "/v0/management/plugins/model-quality/runs/review", Body: []byte(body)})
+		if response.StatusCode != 200 || en.runs["test"].Samples[index].Review != verdict {
+			t.Fatalf("original position %d failed to retain its own review", index)
+		}
+	}
+}
 
 func TestRunPaginationIsStableFilteredAndDetached(t *testing.T) {
 	en, _ := lifeFixture(t)
@@ -184,11 +251,17 @@ func TestHistoryAndMetricsCorruptionReturnUnavailable(t *testing.T) {
 
 func TestMetricsUnknownProvenanceAndQualityDenominators(t *testing.T) {
 	en, _ := lifeFixture(t)
-	en.runs["sample"] = &Run{Config: Frozen{RunConfig: RunConfig{Models: []string{"a"}, Samples: 4}}, Samples: []Sample{
-		{ExecutionStatus: "completed", QualityVerdict: "correct", Usage: &Usage{Total: 10}},
-		{ExecutionStatus: "completed", QualityVerdict: "incorrect", Usage: &Usage{Total: 20}},
-		{ExecutionStatus: "failed", QualityVerdict: "unknown"},
+	en.runs["sample"] = &Run{Source: "scheduled_probe", PrunedSamples: 1, PrunedSlots: []SampleSlot{{Model: "a", Index: 0}}, Config: Frozen{RunConfig: RunConfig{Models: []string{"a"}, Samples: 5}}, Samples: []Sample{
+		{Model: "a", Index: 1, ExecutionStatus: "completed", QualityVerdict: "correct", Usage: &Usage{Total: 10}},
+		{Model: "a", Index: 2, ExecutionStatus: "completed", QualityVerdict: "incorrect", Usage: &Usage{Total: 20}},
+		{Model: "a", Index: 3, ExecutionStatus: "failed", QualityVerdict: "unknown"},
 	}}
+	en.runs["manual"] = &Run{Source: "manual_test", Config: Frozen{RunConfig: RunConfig{Models: []string{"a"}, Samples: 1, Judge: Judge{Mode: "manual"}}, Question: Question{Kind: "logic", Answer: "4"}}, Samples: []Sample{
+		{ExecutionStatus: "completed", Output: "4", QualityVerdict: "unknown"},
+	}}
+	if match := runForDisplay(en.runs["manual"]).Samples[0].AnswerMatch; match != "correct" {
+		t.Fatalf("expected display-only match, got %q", match)
+	}
 	for id, source := range map[string]string{"legacy": "", "untrusted": "arbitrary", "business": "production"} {
 		if err := en.store.Put("usage", id, UsageEvent{ID: id, Source: source}); err != nil {
 			t.Fatal(err)
@@ -198,7 +271,7 @@ func TestMetricsUnknownProvenanceAndQualityDenominators(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats["quality_pass_rate"] != float64(.5) || stats["coverage"] != float64(.5) || stats["unknown_usage"] != 1 {
+	if stats["quality_pass_rate"] != float64(.5) || stats["coverage"] != float64(2)/5 || stats["planned"] != 5 || stats["unknown"] != 2 || stats["unknown_usage"] != 2 {
 		t.Fatal(stats)
 	}
 	sources := stats["traffic_sources"].(map[string]map[string]int64)

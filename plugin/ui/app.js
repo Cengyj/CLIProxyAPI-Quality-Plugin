@@ -4,6 +4,10 @@ import {
   active,
   copyRunConfig,
   credentialBlock,
+  credentialActions,
+  configuredUpstreamActions,
+  handlesCredential,
+  upstreamConditions,
   date,
   escapeHTML,
   holdsPause,
@@ -19,6 +23,8 @@ import {
   renderManualVerdict,
   renderSampleEvidence,
   renderRuleRows,
+  renderScopeDispatch,
+  renderScopeSkipDetails,
   dynamicScopeLabel,
   renderQualityRuns,
   renderQualityEmpty,
@@ -36,16 +42,19 @@ const state = {
   questions: [],
   rules: [],
   actions: [],
+  metrics: null,
   runs: [],
   run: null,
+  readingRun: null,
   pendingManual: null,
   historyOffset: 0,
-  historyTotal: 0,
+  historyTotal: null,
   poll: null,
   pollFailures: 0,
   release: null,
   settings: {},
   scopeBatch: '', scopeRule: '', batchOffset: 0, activityTotal: 0, activityRows: null,
+  receiptBatch: '',
   page: 'login',
   manualView: 'results',
   readingExpanded: false,
@@ -64,6 +73,18 @@ const findTarget = (id) => state.targets.find((target) => targetID(target) === i
 const ruleHeld = (rule) => holdsPause(rule, state.targets);
 const managementPrefix = '/v0/management/plugins/model-quality';
 const managementKeyStorage = `model-quality:management-key:${managementPrefix}`;
+const manualReceiptStorage = `model-quality:manual-receipt:${managementPrefix}`;
+let manualReceiptKey = '';
+try { manualReceiptKey = sessionStorage.getItem(manualReceiptStorage) || ''; } catch { /* Use page memory when storage is unavailable. */ }
+
+function rememberManualReceipt(key) {
+  manualReceiptKey = key;
+  try {
+    if (key) sessionStorage.setItem(manualReceiptStorage, key);
+    else sessionStorage.removeItem(manualReceiptStorage);
+  } catch { /* The receipt still survives a reconnect within this page. */ }
+}
+
 const shortcutStorage = `model-quality:rule-model-shortcuts:${managementPrefix}`;
 let selectedRuleModels = [], customShortcuts = [], shortcutsLoaded = false, shortcutStorageNote = '';
 const client = new ManagementClient(managementPrefix, (key) =>
@@ -123,15 +144,17 @@ function clearNotice() {
   clearTimeout(noticeTimer);
   $('notice').classList.add('hidden');
   $('notice').textContent = '';
+  if ($('notice').parentNode !== $('main')) $('main').prepend($('notice'));
 }
 
-function notice(message, error = false) {
+function notice(message, error = false, before = null) {
   clearNotice();
+  if (before) $(before).before($('notice'));
   $('notice').textContent = message;
   $('notice').classList.remove('hidden');
   $('notice').classList.toggle('error', error);
   const dialog = document.querySelector('dialog[open], .inline-editor:not(.hidden)');
-  if (error && dialog && dialog.id !== 'release-dialog') {
+  if (error && !before && dialog && dialog.id !== 'release-dialog') {
     let feedback = dialog.querySelector('.dialog-message');
     if (!feedback) {
       feedback = document.createElement('div');
@@ -208,7 +231,7 @@ async function saveEditor(action) {
   }
 }
 
-function markFieldError(id, message) {
+function markFieldError(id, message, focus = true) {
   const field = $(id);
   const errorID = `${id}-error`;
   let feedback = $(errorID);
@@ -219,11 +242,14 @@ function markFieldError(id, message) {
     feedback.setAttribute('role', 'alert');
     (field.closest('.rule-stepper') || field).after(feedback);
   }
-  feedback.textContent = message;
+  if (feedback.textContent !== message) feedback.textContent = message;
   field.setAttribute('aria-invalid', 'true');
   field.setAttribute('aria-describedby', [...new Set((field.getAttribute('aria-describedby') || '').split(' ').filter(Boolean).concat(errorID))].join(' '));
-  field.closest('details')?.setAttribute('open', '');
-  field.focus();
+  if (focus) {
+    field.closest('details')?.setAttribute('open', '');
+    field.focus();
+  }
+  return feedback;
 }
 
 function fieldError(id, message) {
@@ -263,9 +289,12 @@ async function safely(action, key = '', button = null) {
   }
 }
 
-function markFresh() {
-  $('data-state').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
-  $('data-state').classList.remove('stale');
+function updateFreshness() {
+  const statuses = Object.values(state.resourceStatus);
+  const failed = statuses.includes('error');
+  if (!failed && statuses.includes('loading')) return;
+  $('data-state').textContent = failed ? '部分数据更新失败，请刷新重试' : `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+  $('data-state').classList.toggle('stale', failed);
 }
 
 function saveManagementKey(key) {
@@ -320,8 +349,10 @@ async function connectManagement(key, { restoring = false } = {}) {
     $('connection-dialog').close();
     renderAdmission();
     renderRules();
+    renderActivityState();
     if (state.page === 'login') loginWorkbench.open({ focus: false });
-    schedulePoll();
+    if (manualReceiptKey) void checkManualReceipt(manualSelection(), false);
+    else schedulePoll();
     if (!remembered) notice('已连接，但浏览器未能保存管理密钥。刷新后需要重新输入，请允许本站使用本地存储。');
   } catch (error) {
     if (!isDiscarded(error) && epoch === client.epoch) {
@@ -347,14 +378,16 @@ function disconnect(
     questions: [],
     rules: [],
     actions: [],
+    metrics: null,
     runs: [],
     run: null,
+    readingRun: null,
     pendingManual: null,
     pollFailures: 0,
     release: null,
     settings: {}, scopeBatch: '', scopeRule: '', batchOffset: 0, activityTotal: 0, activityRows: null,
     historyOffset: 0,
-    historyTotal: 0,
+    historyTotal: null,
     resourceStatus: {},
   });
   document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
@@ -373,6 +406,7 @@ function disconnect(
   selectedRuleModels = [];
   $('rule-model-selection').replaceChildren();
   $('ops-batch-bar').hidden = true;
+  clearScopeReceipt();
   for (const id of ['action-title', 'action-description', 'action-error', 'local-feedback']) $(id).textContent = '';
   document.body.classList.remove('connected');
   $('connection-state').textContent = '未连接';
@@ -399,7 +433,7 @@ function disconnect(
   renderSelectors();
   renderHistory();
   renderRules();
-  renderMetrics({});
+  renderMetrics();
   renderActivityState();
   renderAdmission();
   if (!forgotten) notice('已断开当前连接，但浏览器未允许清除已保存的管理密钥。请清除此站点的本地存储。', true);
@@ -565,24 +599,36 @@ function questionOptions() {
 }
 
 function renderSelectors() {
-  const previousQuestion = value('question');
-  const previousPrompt = $('prompt').value;
+  renderTargetSelectors();
+  renderQuestionSelectors();
+}
+
+function renderTargetSelectors() {
   const options = targetOptions();
-  for (const id of ['target', 'rule-target', 'rule-judge-target', 'rule-control-target']) {
+  for (const id of state.editor ? ['target'] : ['target', 'rule-target', 'rule-judge-target', 'rule-control-target']) {
     const previous = $(id).value;
     $(id).innerHTML = options;
     if (findTarget(previous)) $(id).value = previous;
   }
+  renderTarget();
+  if (state.editor) updateRuleFields();
+}
+
+function renderQuestionSelectors() {
+  const previousQuestion = value('question');
+  const previousPrompt = $('prompt').value;
+  $('question-read-note').hidden = state.resourceStatus.questions !== 'error';
   const curated = ['logic-candy', 'visual-pelican-html', 'custom'];
   const questions = curated.map((id) => state.questions.find((question) => question.id === id)).filter(Boolean);
   $('question').innerHTML = questions.length
     ? questions.map((question) => `<option value="${escapeHTML(question.id)}">${escapeHTML(questionTitle(question))}</option>`).join('')
     : '<option value="">连接后加载题目</option>';
   if (questions.some((question) => question.id === previousQuestion)) $('question').value = previousQuestion;
-  const ruleQuestion = value('rule-question');
-  $('rule-question').innerHTML = questionOptions();
-  if ([...$('rule-question').options].some((option) => option.value === ruleQuestion)) $('rule-question').value = ruleQuestion;
-  renderTarget();
+  if (!state.editor) {
+    const ruleQuestion = value('rule-question');
+    $('rule-question').innerHTML = questionOptions();
+    if ([...$('rule-question').options].some((option) => option.value === ruleQuestion)) $('rule-question').value = ruleQuestion;
+  }
   renderQuestion();
   if (previousQuestion && value('question') === previousQuestion) {
     $('prompt').value = previousPrompt;
@@ -639,14 +685,40 @@ function renderTarget(selectModel = false) {
   $('model-note').classList.toggle('error-note', !!target && (!models.length || unavailable));
   if (!target) {
     $('target').removeAttribute('title');
-    $('target-summary').textContent = state.targets.length ? '选择要测试的凭证。' : resourceMessage('targets', '测试凭证') || '尚无可用凭证，请先在 CPA 中添加凭证。';
+    $('target-summary').textContent = resourceMessage('targets', '测试凭证') || (state.targets.length ? '选择要测试的凭证。' : '尚无可用凭证，请先在 CPA 中添加凭证。');
   } else {
-    const reason = credentialBlock({ auth_id: targetID(target) }, state.targets);
+    const reason = !state.targetsFresh ? '凭证目录读取失败，当前状态未确认。请刷新重试。' : credentialBlock({ auth_id: targetID(target) }, state.targets);
     $('target').title = target.email || targetID(target);
     patchView($('target-summary'), reason ? `<span class="error-note">${escapeHTML(reason)}</span>` : '<span>凭证可用</span>');
   }
   renderReasoning(selectModel);
   renderAdmission();
+}
+
+const questionTextEncoder = new TextEncoder();
+function customQuestionTextError(field) {
+  const standard = field.id === 'rule-review-standard';
+  // Match Go's strings.TrimSpace emptiness check and count the original UTF-8 text.
+  if (!standard && !/[^\p{White_Space}]/u.test(field.value)) return '请填写题目内容。';
+  const limit = standard ? 4096 : 16384;
+  const excess = questionTextEncoder.encode(field.value).length - limit;
+  return excess > 0 ? `至少删减 ${excess.toLocaleString('zh-CN')} 字节（UTF-8 上限 ${limit.toLocaleString('zh-CN')}）` : '';
+}
+
+function updateQuestionTextValidity(field, custom) {
+  const message = custom ? customQuestionTextError(field) : '';
+  field.setCustomValidity(message);
+  const marked = field.hasAttribute('aria-invalid');
+  if (message && (field.value || marked)) {
+    const error = markFieldError(field.id, message, false);
+    if (!marked && document.activeElement === field) error.scrollIntoView({ block: 'nearest', container: 'nearest' });
+  } else clearFieldError(field);
+}
+
+function readCustomQuestionText(id) {
+  const field = $(id), message = customQuestionTextError(field);
+  if (message) fieldError(id, message);
+  return field.value;
 }
 
 function updateQuestionNote() {
@@ -657,6 +729,8 @@ function updateQuestionNote() {
   const note = $('prompt-note');
   note.hidden = !changed;
   note.textContent = changed ? '按自定义题目测试，不沿用参考答案。' : '';
+  updateQuestionTextValidity($('prompt'), selected.question_id === 'custom');
+  renderAdmission();
 }
 
 function renderQuestion() {
@@ -664,7 +738,6 @@ function renderQuestion() {
   $('prompt').readOnly = false;
   $('prompt').value = question?.prompt || '';
   updateQuestionNote();
-  renderAdmission();
 }
 
 function manualRunConfig() {
@@ -675,11 +748,12 @@ function manualRunConfig() {
   if ($('reasoning').dataset.unavailable === 'true') fieldError('reasoning', '请重新选择可用的思考强度。');
   const samples = number('samples');
   if (!Number.isInteger(samples) || samples < 1 || samples > 8) fieldError('samples', '回答数量须为 1–8 的整数。');
-  if (!$('prompt').value.trim()) fieldError('prompt', '请填写测试题目。');
   const question = state.questions.find((entry) => entry.id === value('question'));
+  const selection = questionTestSelection(question, $('prompt').value);
+  if (selection.question_id === 'custom') readCustomQuestionText('prompt');
   const config = {
     auth_id: targetID(target), provider: target.provider, models, samples,
-    ...questionTestSelection(question, $('prompt').value),
+    ...selection,
     parameters: { stream: true },
     judge: { mode: 'manual' },
   };
@@ -732,9 +806,8 @@ function runConfig(prefix = '') {
   const effort = $('rule-reasoning').querySelector('input:checked')?.value;
   if (effort) config.parameters.reasoning_effort = effort;
   if (config.question_id === 'custom') {
-    config.review_standard = get('review-standard');
-    config.prompt = get('prompt');
-    if (!config.prompt) fieldError(`${prefix}prompt`, '自定义题面不能为空。');
+    config.prompt = readCustomQuestionText(`${prefix}prompt`);
+    config.review_standard = readCustomQuestionText(`${prefix}review-standard`);
   }
   return config;
 }
@@ -745,19 +818,24 @@ function blockedConfig(config) {
   return credentialBlock(config, state.targets);
 }
 
+function blockedManualConfig(config) {
+  return blockedConfig(config) || (state.resourceStatus.questions === 'error' ? '题库读取失败，请刷新后再测试。' : '');
+}
+
 function renderAdmission() {
-  $('manual-config-summary').textContent = `${value('samples')} 份回答`;
   const config = {
     auth_id: value('target'),
     judge: { mode: 'manual' },
   };
-  const blocked = blockedConfig(config) || (config.auth_id && !availableModels(findTarget(config.auth_id)).includes(value('models')) ? '请先选择可用的测试模型。' : '') || ($('reasoning').dataset.unavailable === 'true' ? '请重新选择可用的思考强度。' : '');
+  const blocked = blockedManualConfig(config) || (config.auth_id && !availableModels(findTarget(config.auth_id)).includes(value('models')) ? '请先选择可用的测试模型。' : '') || ($('reasoning').dataset.unavailable === 'true' ? '请重新选择可用的思考强度。' : '');
   const testing = !!state.pendingManual || state.busy.has('submit-run');
   const phase = state.pendingManual?.status;
-  $('run-submit-label').textContent = testing ? ({ queued: '排队中', running: '测试中', cancelling: '停止中' }[phase] || '提交中') : '开始测试';
+  const retrySubmission = state.connected && !testing && !!manualReceiptKey;
+  $('manual-config-summary').textContent = phase === 'checking_receipt' ? '正在查询上次提交' : retrySubmission ? '未查到上次任务' : `${value('samples')} 份回答`;
+  $('run-submit-label').textContent = testing ? ({ queued: '排队中', running: '测试中', cancelling: '停止中', checking_receipt: '核对中' }[phase] || '提交中') : retrySubmission ? '重新提交' : '开始测试';
   $('run-submit').setAttribute('aria-busy', String(testing));
-  $('run-submit').disabled = testing || !config.auth_id || !!blocked || !value('prompt');
-  $('run-submit').title = state.connected ? blocked : '';
+  $('run-submit').disabled = testing || !config.auth_id || !!blocked || !$('prompt').validity.valid;
+  $('run-submit').title = state.connected ? blocked || $('prompt').validationMessage : '';
   $('release-confirm').disabled = state.releaseBlocked || state.busy.has('release') || !state.connected;
   for (const id of [
     'rule-new',
@@ -768,7 +846,7 @@ function renderAdmission() {
   ])
     $(id).disabled = !state.connected || $(id).getAttribute('aria-busy') === 'true';
   if (state.run) {
-    const reason = blockedConfig(state.run.config || {});
+    const reason = blockedManualConfig(state.run.config || {});
     $('run-rerun').disabled = !!reason || testing;
     $('run-rerun').title = reason;
   }
@@ -778,27 +856,90 @@ function newKey() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function manualSelection() {
+  return { sequence: state.reads.run, scope: feedbackScope() };
+}
+
+function trackManualRun(run, selection, focus) {
+  state.pollFailures = 0;
+  state.pendingManual = active(run) ? { id: run.id, status: run.status } : null;
+  if (!state.pendingManual) rememberManualReceipt('');
+  if (selection.sequence === state.reads.run) {
+    ++state.reads.run;
+    state.run = run;
+    renderRun();
+    if (focus && state.page === 'manual' && selection.scope === feedbackScope()) {
+      clearNotice();
+      setManualView('results', true);
+    }
+  }
+  renderAdmission();
+  schedulePoll(0);
+}
+
+// Only an explicit submit may send a POST. A missing receipt can still be
+// racing admission, so even that retry must reuse the original key.
+async function checkManualReceipt(selection, focus) {
+  const key = manualReceiptKey;
+  const pending = { status: 'checking_receipt', selection, focus };
+  state.pendingManual = pending;
+  renderAdmission();
+  try {
+    const reply = await api(`/runs/detail?idempotency_key=${encodeURIComponent(key)}`);
+    if (state.pendingManual !== pending) return;
+    const run = reply.run || reply;
+    if (!run?.id || run.source !== 'manual_test' || run.config?.idempotency_key !== key) throw new Error('任务回执尚未确认。');
+    trackManualRun(run, selection, focus);
+    await Promise.allSettled([loadHistory()]);
+  } catch (error) {
+    if (state.pendingManual !== pending || isDiscarded(error)) return;
+    if (error.status === 404 || error.status === 410) {
+      state.pendingManual = null;
+      state.pollFailures = 0;
+      if (error.status === 410) rememberManualReceipt('');
+      renderAdmission();
+      schedulePoll();
+      return error.status === 404 ? 'missing' : 'removed';
+    }
+    state.pollFailures = Math.min(state.pollFailures + 1, 4);
+    schedulePoll();
+  }
+}
+
 async function submitRun(config) {
   if (state.pendingManual) return;
-  const blocked = blockedConfig(config);
+  const selection = manualSelection();
+  const retry = !!manualReceiptKey;
+  if (retry && await checkManualReceipt(selection, true) !== 'missing') return;
+  const blocked = blockedManualConfig(config);
   if (blocked) throw new Error(blocked);
-  const result = await api('/runs', 'POST', { ...config, idempotency_key: newKey() });
-  const id = result.run_id || result.id;
-  if (!id) throw new Error('接口未返回任务 ID，请在测试记录中核对。');
-  ++state.reads.run;
-  state.pollFailures = 0;
-  state.run = { id, source: 'manual_test', status: 'queued', config, created_at: new Date().toISOString() };
-  state.pendingManual = state.run;
-  clearNotice();
-  renderRun();
-  setManualView('results', true);
-  schedulePoll(0);
+  const key = manualReceiptKey || newKey();
+  rememberManualReceipt(key);
+  let id;
+  try {
+    const reply = await api('/runs', 'POST', { ...config, idempotency_key: key });
+    id = reply.run_id || reply.id;
+  } catch (error) {
+    if (isDiscarded(error)) return;
+    if (!error.outcomeUnknown && error.status < 500 && error.status !== 408 && !(retry && error.status === 409)) {
+      if (!retry || error.status === 410) rememberManualReceipt('');
+      throw error;
+    }
+  }
+  if (!id) {
+    await checkManualReceipt(selection, true);
+    return;
+  }
+  trackManualRun({ id, source: 'manual_test', status: 'queued', config, created_at: new Date().toISOString() }, selection, true);
   await loadHistory();
 }
 
 function updateRunProgress(run) {
   const id = run.id || run.run_id;
-  if (id === state.pendingManual?.id) state.pendingManual = active(run) ? { id, status: run.status } : null;
+  if (id === state.pendingManual?.id) {
+    state.pendingManual = active(run) ? { id, status: run.status } : null;
+    if (!state.pendingManual) rememberManualReceipt('');
+  }
   const row = state.runs.findIndex(item => (item.id || item.run_id) === id);
   if (row >= 0) {
     state.runs[row] = run;
@@ -810,7 +951,7 @@ function updateRunProgress(run) {
 async function loadRun(id, show = true) {
   if (!id) throw new Error('接口未返回任务 ID。');
   const sequence = ++state.reads.run;
-  clearTimeout(state.poll);
+  state.readingRun = { id, sequence };
   try {
     const reply = await api(`/runs/detail?id=${encodeURIComponent(id)}`);
     if (sequence !== state.reads.run) return;
@@ -819,21 +960,33 @@ async function loadRun(id, show = true) {
     state.pollFailures = 0;
     renderRun();
     $('run-feedback').classList.add('hidden');
-    if (show) { clearNotice(); setManualView('results', true); }
+    if (show) {
+      if (state.page === 'manual') clearNotice();
+      setManualView('results', state.page === 'manual');
+    }
   } finally {
+    if (state.readingRun?.sequence === sequence) state.readingRun = null;
     if (sequence === state.reads.run) schedulePoll();
   }
 }
 
 function schedulePoll(delay = Math.min(10000, 1200 * 2 ** state.pollFailures)) {
   clearTimeout(state.poll);
+  state.poll = null;
+  if (!state.connected) return;
+  const pending = state.pendingManual;
+  if (pending?.status === 'checking_receipt') {
+    state.poll = setTimeout(() => {
+      if (state.pendingManual === pending) void checkManualReceipt(pending.selection, pending.focus);
+    }, delay);
+    return;
+  }
   const selected = state.run?.id || state.run?.run_id;
   const ids = [...new Set([active(state.run) && selected, state.pendingManual?.id].filter(Boolean))];
-  if (!state.connected || !ids.length) return;
+  if (!ids.length) return;
   const epoch = client.epoch;
-  const sequence = state.reads.run;
-  state.poll = setTimeout(async () => {
-    const current = () => epoch === client.epoch && sequence === state.reads.run;
+  const timer = state.poll = setTimeout(async () => {
+    const current = () => epoch === client.epoch && timer === state.poll;
     if (!current()) return;
     const results = await Promise.allSettled(ids.map(id => api(`/runs/detail?id=${encodeURIComponent(id)}`)));
     if (!current()) return;
@@ -844,7 +997,10 @@ function schedulePoll(delay = Math.min(10000, 1200 * 2 ** state.pollFailures)) {
         const error = result.reason;
         if (isDiscarded(error)) continue;
         const missing = error.code === 'not_found' || error.status === 404;
-        if (missing && id === state.pendingManual?.id) state.pendingManual = null;
+        if (missing && id === state.pendingManual?.id) {
+          state.pendingManual = null;
+          rememberManualReceipt('');
+        }
         if (missing && id === selected) {
           state.run = { ...state.run, status: 'unavailable' };
           renderRun();
@@ -1094,8 +1250,9 @@ function renderActivityState() {
 }
 
 function renderHistory() {
-  $('history-total').textContent = `${state.historyTotal} 个任务`;
+  $('history-total').textContent = state.historyTotal == null ? '任务数未确认' : `${state.historyTotal} 个任务`;
   $('history-count').textContent = state.historyTotal || '';
+  $('history-read-note').hidden = state.resourceStatus.history !== 'error' || !state.runs.length;
   patchView($('history-list'), state.runs.length
     ? state.runs
         .map(run => {
@@ -1120,30 +1277,61 @@ function renderHistory() {
   $('history-pagination').hidden = state.historyTotal <= 10 && state.historyOffset === 0;
 }
 
-async function loadHistory() {
+async function loadHistory(offset = state.historyOffset) {
   const sequence = ++state.reads.history;
-  if (state.resourceStatus.history !== 'ready') state.resourceStatus.history = 'loading';
+  if (!state.resourceStatus.history) state.resourceStatus.history = 'loading';
   if (!state.runs.length) renderHistory();
   let result;
   try {
-    result = await api(`/runs?source=manual_test&offset=${state.historyOffset}&limit=10`);
+    result = await api(`/runs?source=manual_test&offset=${offset}&limit=10&view=summary`);
   } catch (error) {
     if (sequence === state.reads.history && !isDiscarded(error)) {
       state.resourceStatus.history = 'error';
       renderHistory();
+      updateFreshness();
+      return false;
     }
-    throw error;
+    return;
   }
   if (sequence !== state.reads.history) return;
+  const rows = items(result), total = result.total ?? rows.length;
+  const lastOffset = Math.max(0, Math.floor((total - 1) / 10) * 10);
+  if (offset > lastOffset) return loadHistory(lastOffset);
   state.resourceStatus.history = 'ready';
-  state.runs = items(result);
-  state.historyTotal = result.total ?? state.runs.length;
-  const lastOffset = Math.max(0, Math.floor((state.historyTotal - 1) / 10) * 10);
-  if (state.historyOffset > lastOffset) {
-    state.historyOffset = lastOffset;
-    return loadHistory();
-  }
+  state.historyOffset = offset;
+  state.runs = rows;
+  state.historyTotal = total;
   renderHistory();
+  updateFreshness();
+  return true;
+}
+
+async function cleanupRequest(path, body) {
+  const confirmation = actionRequest;
+  let receipt = null;
+  try {
+    const result = await api(path, 'DELETE', body);
+    if (path === '/rules/run-history') {
+      if ([result?.deleted, result?.kept].every(count => Number.isSafeInteger(count) && count >= 0)) receipt = result;
+    } else if (result?.ok === true) receipt = result;
+  } catch (error) {
+    if (isDiscarded(error) || (!error.outcomeUnknown && error.status >= 400 && error.status < 500 && error.status !== 408)) throw error;
+  }
+  // A second bulk DELETE could remove runs that completed after the original request.
+  confirmation.cleanupSent = true;
+  return receipt;
+}
+
+async function refreshCleanupLists(epoch) {
+  try { await loadOperations(); }
+  catch (error) { if (isDiscarded(error)) throw error; }
+  return client.epoch === epoch;
+}
+
+function focusAfterCleanup(id) {
+  $('action-dialog').addEventListener('close', () => {
+    if ($(id).getClientRects().length) $(id).focus({ preventScroll: true });
+  }, { once: true });
 }
 
 function confirmHistoryDelete(id) {
@@ -1151,29 +1339,38 @@ function confirmHistoryDelete(id) {
   if (!run || active(run)) return;
   actionDialog({
     title: '删除测试记录',
-    description: `删除「${questionTitle(run.config?.question, run.config?.question_id)}」（${date(run.created_at)}）及本次回答？`,
+    description: `删除「${questionTitle(run.config?.question, run.config?.question_id)}」（${date(run.created_at)}）及本次回答？任务 ${id}，凭证 ${run.credential_email || credentialName(run.config?.auth_id) || '未记录'}。`,
     confirm: '删除', danger: true,
     submit: async () => {
-      await api('/runs', 'DELETE', { id });
-      ++state.reads.run;
-      if ((state.run?.id || state.run?.run_id) === id) {
-        state.run = null;
-        renderRun();
+      const epoch = client.epoch;
+      const receipt = await cleanupRequest('/runs', { id });
+      let removed = !!receipt, checked = '';
+      if (!receipt) {
+        try {
+          const result = await api(`/runs/detail?id=${encodeURIComponent(id)}`);
+          if ((result?.run || result)?.id === id) checked = '当前仍可读取此记录。';
+        } catch (error) {
+          if (isDiscarded(error)) throw error;
+          removed = error.status === 404 && error.code === 'not_found';
+          if (removed) checked = '已按任务 ID 核对，当前查不到此记录。';
+        }
       }
-      if (state.pendingManual?.id === id) state.pendingManual = null;
-      schedulePoll();
-      state.runs = state.runs.filter(item => (item.id || item.run_id) !== id);
-      state.historyTotal = Math.max(0, state.historyTotal - 1);
-      renderHistory();
-      renderAdmission();
-      $('action-dialog').addEventListener('close', () => {
-        if (state.manualView === 'history') $('manual-history').focus({ preventScroll: true });
-      }, { once: true });
-      try {
-        await loadHistory();
-      } catch (error) {
-        if (!isDiscarded(error)) notice('记录已删除，列表刷新失败，请刷新重试。', true);
+      if (removed) {
+        if (state.readingRun?.id === id && state.readingRun.sequence === state.reads.run) ++state.reads.run;
+        if ((state.run?.id || state.run?.run_id) === id) { state.run = null; renderRun(); }
+        if (state.pendingManual?.id === id) { state.pendingManual = null; rememberManualReceipt(''); }
+        schedulePoll();
+        const rows = state.runs.filter(item => (item.id || item.run_id) !== id);
+        if (rows.length !== state.runs.length) state.historyTotal = Math.max(0, state.historyTotal - 1);
+        state.runs = rows;
+        renderHistory();
+        renderAdmission();
       }
+      const refreshed = await loadHistory();
+      if (epoch !== client.epoch || state.page !== 'manual') return;
+      focusAfterCleanup('manual-history');
+      if (!receipt) notice(`删除回执未确认。${checked || '任务状态仍待读取。'}${refreshed === false ? '列表读取失败，请刷新。' : ''}`, true, 'manual-history');
+      else if (refreshed === false) notice('记录已删除，列表刷新失败，请刷新重试。', true, 'manual-history');
     },
   });
 }
@@ -1185,7 +1382,8 @@ function renderRules() {
     return (filter === 'all' || ruleState(rule, state.targets) === filter) && [rule.name, rule.id, config.auth_id, credentialName(config.auth_id), ...(config.models || []), dynamicScopeLabel(rule.target_scope)].join(' ').toLocaleLowerCase().includes(query);
   });
   const message = !state.rules.length && resourceMessage('rules', '检测规则');
-  patchView($('rules-list'), message ? renderQualityEmpty(message) : state.rules.length && !filtered.length ? renderQualityEmpty('没有匹配的规则', '调整搜索内容或状态筛选。', '<button class="text-button" data-rule-clear>清除筛选</button>') : renderRuleRows(filtered, state.targets, state));
+  const expandedSkips = new Set([...$('rules-list').querySelectorAll('details[data-skip-rule][open]')].map(node => node.dataset.skipRule));
+  patchView($('rules-list'), message ? renderQualityEmpty(message) : state.rules.length && !filtered.length ? renderQualityEmpty('没有匹配的规则', '调整搜索内容或状态筛选。', '<button class="text-button" data-rule-clear>清除筛选</button>') : renderRuleRows(filtered, state.targets, { ...state, expandedSkips }));
   $('rules-list').querySelectorAll('[data-rule-new]').forEach(button => { button.disabled = !state.connected; });
   $('rule-count').textContent = state.resourceStatus.rules === 'ready' || state.rules.length ? String(state.rules.length) : '—';
   $('ops-all-count').textContent = $('rule-count').textContent;
@@ -1193,10 +1391,14 @@ function renderRules() {
   $('rule-timed-count').textContent = state.resourceStatus.rules === 'ready' ? `定时 ${state.rules.filter(rule => ruleState(rule, state.targets) === 'timed').length}` : '';
 }
 
-function renderMetrics(metrics) {
+function renderMetrics() {
+  const metrics = state.metrics || {};
+  $('metrics-read-note').hidden = state.resourceStatus.metrics !== 'error';
+  $('metrics-read-note').textContent = state.metrics ? '检测统计读取失败，以下为上次读取的数值。请刷新重试。' : '检测统计读取失败，请刷新重试。';
   const percentage = (number) =>
     number == null ? '—' : `${(number <= 1 ? number * 100 : number).toFixed(1)}%`;
   const judged = metrics.judged ?? (metrics.correct != null && metrics.incorrect != null ? metrics.correct + metrics.incorrect : null);
+  const prunedUnknown = metrics.unlocated_pruned_samples > 0;
   const stats = [
     [
       '质量通过率',
@@ -1204,9 +1406,10 @@ function renderMetrics(metrics) {
       [`正确 ${metrics.correct ?? '—'}`, '/', `可判定 ${judged ?? '—'}`],
     ],
     [
-      '评测覆盖率',
+      prunedUnknown ? '评测覆盖率下限' : '评测覆盖率',
       percentage(metrics.coverage ?? metrics.coverage_rate),
-      [`可判定 ${judged ?? '—'}`, '/', `计划 ${metrics.planned ?? '—'}`],
+      [`已覆盖 ${metrics.covered ?? judged ?? '—'}`, '/', `${prunedUnknown ? '计划至多' : '计划'} ${metrics.planned ?? '—'}`],
+      '', prunedUnknown ? `${metrics.unlocated_pruned_samples} 条历史裁剪记录缺少样本位置` : '',
     ],
     ['结论未知', metrics.unknown ?? '—', ['不计为答错', '·', `明确答错 ${metrics.incorrect ?? '—'}`]],
     [
@@ -1220,10 +1423,10 @@ function renderMetrics(metrics) {
   ];
   $('metrics').innerHTML = stats
     .map(
-      ([name, total, [left, divider, right], unit]) =>
+      ([name, total, [left, divider, right], unit, note]) =>
         `<article class="metric"><span class="metric-label">${escapeHTML(name)}</span>
           <div class="metric-amount"><strong class="metric-value"${total === '—' ? ' data-missing' : ''}>${escapeHTML(total)}</strong>${unit && total !== '—' ? `<span class="metric-unit">${escapeHTML(unit)}</span>` : ''}</div>
-          <small><span>${escapeHTML(left)}</span> <span class="metric-divider" aria-hidden="true">${divider}</span> <span>${escapeHTML(right)}</span></small></article>`,
+          <small><span>${escapeHTML(left)}</span> <span class="metric-divider" aria-hidden="true">${divider}</span> <span>${escapeHTML(right)}</span></small>${note ? `<small>${escapeHTML(note)}</small>` : ''}</article>`,
     )
     .join('');
 }
@@ -1242,7 +1445,7 @@ async function allPages(path, key) {
 
 async function loadActivity() {
   const sequence = ++state.reads.activity;
-  const query = new URLSearchParams({limit: '20', source: 'scheduled_probe', offset: String(state.batchOffset)});
+  const query = new URLSearchParams({limit: '20', source: 'scheduled_probe', offset: String(state.batchOffset), view: 'summary'});
   if (state.scopeRule) query.set('rule_id', state.scopeRule);
   if (state.scopeBatch) query.set('scope_batch_id', state.scopeBatch);
   try {
@@ -1268,95 +1471,113 @@ async function loadActivity() {
     state.resourceStatus.activity = 'error';
     throw error;
   } finally {
-    if (sequence === state.reads.activity) renderActivityState();
+    if (sequence === state.reads.activity) {
+      renderActivityState();
+      updateFreshness();
+    }
   }
 }
 
-async function loadOperations(loadedTargets) {
+async function loadOperations() {
   const sequence = ++state.reads.operations;
   const epoch = client.epoch;
+  const current = () => epoch === client.epoch && sequence === state.reads.operations;
   const resources = ['rules', 'actions', 'metrics', 'activity', 'targets', 'settings'];
-  for (const resource of resources) if (state.resourceStatus[resource] !== 'ready') state.resourceStatus[resource] = 'loading';
+  for (const resource of resources) if (!state.resourceStatus[resource]) state.resourceStatus[resource] = 'loading';
   if (!state.rules.length) renderRules();
   renderActivityState();
-  if (state.resourceStatus.metrics === 'loading') renderMetrics({});
+  // Apply each read as it settles so a slow statistic cannot delay a credential restriction.
+  async function read(resource, request, render) {
+    let data;
+    try {
+      const result = await request;
+      if (!result || typeof result !== 'object' || Array.isArray(result)) throw Error('管理数据格式无效，请刷新重试。');
+      data = result;
+    }
+    finally {
+      if (current()) {
+        state.resourceStatus[resource] = data === undefined ? 'error' : 'ready';
+        render(data);
+        updateFreshness();
+      }
+    }
+  }
   const results = await Promise.allSettled([
-    allPages('/rules','id'),
-    allPages('/actions','action_id'),
-    api('/metrics'),
+    read('rules', allPages('/rules', 'id'), data => {
+      if (data) state.rules = items(data);
+      if (state.activityRows) patchView($('operations-history'), renderQualityRuns(state.activityRows, state.rules, credentialName));
+      renderRules();
+      renderActivityState();
+    }),
+    read('actions', allPages('/actions', 'action_id'), data => {
+      if (data) state.actions = items(data);
+    }),
+    read('metrics', api('/metrics?view=summary'), data => {
+      if (data) state.metrics = data;
+      renderMetrics();
+    }),
     loadActivity(),
-    loadedTargets || allPages('/targets','auth_id'), api('/settings'),
+    read('targets', allPages('/targets', 'auth_id'), data => {
+      state.targetsFresh = data !== undefined;
+      if (data) state.targets = items(data);
+      renderTargetSelectors();
+      renderRules();
+      if (state.activityRows) patchView($('operations-history'), renderQualityRuns(state.activityRows, state.rules, credentialName));
+      if (state.runs.length) renderHistory();
+    }),
+    read('settings', api('/settings'), data => {
+      state.settings = data || {};
+      renderRules();
+      if (state.editor) updateRuleFields();
+    }),
   ]);
-  if (epoch !== client.epoch || sequence !== state.reads.operations) return;
-  results.forEach((result, index) => {
-    if (resources[index] !== 'activity') state.resourceStatus[resources[index]] = result.status === 'fulfilled' ? 'ready' : 'error';
-  });
-  state.targetsFresh = results[4].status === 'fulfilled';
-  state.settings = results[5].status === 'fulfilled' ? results[5].value : {};
-  if (results[4].status === 'fulfilled') {
-    state.targets = items(results[4].value);
-    if (!state.editor) renderSelectors(); else updateRuleFields();
-  }
-  if (results[0].status === 'fulfilled') {
-    state.rules = items(results[0].value);
-    if (state.activityRows) patchView($('operations-history'), renderQualityRuns(state.activityRows, state.rules, credentialName));
-  }
-  if (results[1].status === 'fulfilled') {
-    state.actions = items(results[1].value);
-  }
-  if (results[2].status === 'fulfilled') renderMetrics(results[2].value);
-
-  renderActivityState();
-  renderRules();
-  const failed = results.find((result) => result.status === 'rejected');
-  if (failed) {
-    $('data-state').textContent = '部分数据更新失败，请重试';
-    $('data-state').classList.add('stale');
-    renderAdmission();
-    if (results.slice(0,5).every(result => result.status === 'fulfilled')) return;
-    throw failed.reason;
-  }
-  markFresh();
+  if (!current()) return;
+  // Reconciliation callers still require positive reads of rules, actions and credentials.
+  const failed = results.slice(0, 5).find(result => result.status === 'rejected');
+  if (failed) throw failed.reason;
 }
 
 async function refresh() {
   const sequence = ++state.reads.refresh;
-  try {
-    const [targets, questions] = await Promise.all([allPages('/targets','auth_id'), api('/questions')]);
-    if (sequence !== state.reads.refresh) return;
-    state.targetsFresh = true;
-    state.resourceStatus.targets = 'ready';
-    state.targets = items(targets);
-    state.questions = items(questions);
-    renderSelectors();
-    await Promise.all([loadHistory(), loadOperations(targets)]);
-    if (state.run) await loadRun(state.run.id || state.run.run_id, false);
-  } catch (error) {
-    if (!isDiscarded(error) && sequence === state.reads.refresh) {
-      state.targetsFresh = false;
-      $('data-state').textContent = '数据更新失败，请重试';
-      $('data-state').classList.add('stale');
-      renderRules();
-      renderAdmission();
-    }
-    throw error;
-  }
+  const runRead = state.reads.run;
+  if (!state.resourceStatus.questions) state.resourceStatus.questions = 'loading';
+  const [questions, operations] = await Promise.allSettled([api('/questions'), loadOperations(), loadHistory()]);
+  if (sequence !== state.reads.refresh) return;
+  state.resourceStatus.questions = questions.status === 'fulfilled' ? 'ready' : 'error';
+  if (questions.status === 'fulfilled') state.questions = items(questions.value);
+  renderQuestionSelectors();
+  updateFreshness();
+  // The two catalogs validate a new connection. Independent history/metric reads can be retried in that session.
+  if (!state.connected && !state.targetsFresh) throw operations.reason || Error('凭证目录读取失败，请刷新重试。');
+  if (!state.connected && questions.status === 'rejected') throw questions.reason;
+  if (state.run && runRead === state.reads.run) await loadRun(state.run.id || state.run.run_id, false);
 }
 
-function scopeMatches(models) {
-  return state.targets.filter(t => t.runtime_status === 'active' && t.auth_index && t.provider && t.effective_available && !t.manual_disabled && !t.retained_pause && !t.quality_paused && availableModels(t).some(m => !models.length || models.includes(m)));
+function errorPolicyPauses() {
+  return new Set(state.rules.flatMap(rule => (rule.handling || [])
+    .filter(record => record.state === 'disabled' && (record.upstream_condition || record.catalog_missing_model))
+    .map(record => record.auth_id)));
+}
+
+function scopeTargets(scope, recovery) {
+  const stopped = errorPolicyPauses();
+  const recoverable = new Set(recovery.map(targetID));
+  return state.targets.filter(target => !stopped.has(targetID(target)) &&
+    (scope === 'all_credentials' || (!target.manual_disabled && target.runtime_status !== 'disabled') || recoverable.has(targetID(target))));
 }
 
 function recoveryCandidates(rule) {
   if (rule?.action !== 'disable_credential' || !rule.auto_restore) return [];
-  const owned = new Set((rule.handling || []).filter(item => item.state === 'disabled').map(item => item.auth_id));
+  const owned = new Map((rule.handling || []).map(item => [item.auth_id, item]));
+  const heldElsewhere = new Set(state.rules.filter(other => other.id !== rule.id).flatMap(other => (other.handling || []).map(item => item.auth_id)));
   return state.targets.filter(t => t.runtime_status === 'disabled' && t.manual_disabled && !t.retained_pause && !t.quality_paused &&
-    (owned.has(targetID(t)) || (rule.target_scope === 'all_credentials' && !t.credential_handling && ['codex','openai','openai-compatibility'].includes(t.provider))) &&
+    (owned.has(targetID(t)) ? qualityRecoveryRecord(owned.get(targetID(t))) : rule.target_scope === 'all_credentials' && !t.credential_handling && !heldElsewhere.has(targetID(t)) && ['codex','openai','openai-compatibility'].includes(t.provider)) &&
     (t.reasons || []).every(reason => ['operator_disabled','manual_disabled'].includes(reason)));
 }
 
-const scopeSampleCount = (targets, models, samples) => targets.reduce((n, t) =>
-  n + availableModels(t).filter(m => models.includes(m)).length * samples, 0);
+function qualityRecoveryRecord(record) {
+  return record.state === 'disabled' && !record.upstream_condition && !record.catalog_missing_model;
+}
 
 const idByteLength = id => new TextEncoder().encode(id).length;
 const validShortcut = id => typeof id === 'string' && id.length > 0 && id.length <= 100 && idByteLength(id) <= 256 && !/[\s,，;；]/u.test(id);
@@ -1503,27 +1724,44 @@ function updateRuleQuestion(all, target) {
   $('rule-prompt-field').hidden = !custom; $('rule-standard-field').hidden = !custom;
   $('rule-control-fields').classList.toggle('hidden', all || !random || (official && !saved?.control_auth_id));
   $('rule-judge-fields').hidden = mode.value !== 'llm';
-  if (!custom) clearFieldError($('rule-prompt'));
+  for (const id of ['rule-prompt', 'rule-review-standard']) updateQuestionTextValidity($(id), custom);
   if ($('rule-control-fields').classList.contains('hidden')) clearFieldError($('rule-control-target'));
   if ($('rule-judge-fields').hidden) { clearFieldError($('rule-judge-target')); clearFieldError($('rule-judge-model')); }
 }
 
 function ruleHandling() { return $('rule-form').elements.namedItem('rule-action').value || 'observe_only'; }
 
+$('rule-upstream-options').innerHTML = Object.entries(upstreamConditions).map(([key, label]) =>
+  `<label class="setting-field">${label}<select id="rule-upstream-${key}" aria-describedby="rule-upstream-note">${Object.entries(credentialActions).map(([action, name]) => `<option value="${action}">${name}</option>`).join('')}</select></label>`
+).join('');
+
+function upstreamActions() {
+  return Object.fromEntries(Object.keys(upstreamConditions).map(key => [key, value(`rule-upstream-${key}`)]));
+}
+
 function updateRuleHandling() {
-  const action = ruleHandling(), pause = action === 'disable_credential', managing = action !== 'observe_only';
+  const action = ruleHandling(), pause = action === 'disable_credential';
+  const errorActions = Object.values(upstreamActions());
+  const managing = handlesCredential(action) || errorActions.some(handlesCredential);
   const supported = state.settings?.capabilities?.credential_management === true;
   for (const input of $('rule-form').querySelectorAll('[name="rule-action"]')) input.disabled = input.value !== 'observe_only' && !supported;
+  for (const option of $('rule-upstream-options').querySelectorAll('option')) option.disabled = handlesCredential(option.value) && !supported;
   $('rule-restore-option').hidden = !pause;
   $('rule-auto-restore').disabled = !pause;
   $('rule-restore-detail').textContent = $('rule-scope-directory').checked
-    ? '人工停用和本规则暂停的凭证均可复检，全部模型和样本答对后启用。'
-    : '本规则暂停的凭证继续参加后续检测，全部模型和样本答对后恢复。';
-  $('rule-handling-note').textContent = !managing ? '只检测并记录结果，不处理账号。'
-    : value('rule-judge-mode') !== 'deterministic' ? '暂停或移除凭证需使用标准答案判定，请调整判题方式。'
+    ? '本规则因答错暂停的凭证和无处置归属的人工停用凭证可复检。整轮全对且停用快照匹配时启用。'
+    : '本规则因答错暂停的凭证可复检。整轮全对且停用快照匹配时恢复。';
+  $('rule-handling-note').textContent = !handlesCredential(action) ? '答错时仅记录检测结果。'
     : action === 'delete_credential' ? '整轮结果完整且出现答错时，从 CPA 删除对应凭证；不会自动重新上传。网络错误与未知结果不触发删除。'
     : '整轮结果完整且出现答错时暂停对应凭证；网络错误与未知结果不触发暂停。';
-  if (managing) $('rule-handling-note').textContent += ' 当前支持 OpenAI / Codex 文件凭证，需匹配全部所选模型。';
+  let note = '“指定模型不支持”可依据可信 CPA 目录缺少所选模型，或上游 400/404 明确返回模型不支持。普通限速、超时和未识别错误只记录。';
+  if (errorActions.includes('disable_credential')) note += '按错误规则暂停后，凭证退出后续检测。';
+  if (!supported) note += '当前宿主未提供凭证处置。';
+  else if (managing) {
+    const hasControl = value('rule-control-target') && !$('rule-control-fields').classList.contains('hidden');
+    note += value('rule-judge-mode') !== 'deterministic' || hasControl ? '管理探测需使用标准答案判定，并清除对照凭证。' : 'OpenAI / Codex 文件凭证通过 CPA 管理接口答题。';
+  }
+  $('rule-upstream-note').textContent = note;
 }
 
 function updateRuleFields() {
@@ -1533,17 +1771,23 @@ function updateRuleFields() {
   if (all) clearFieldError($('rule-target'));
   const selected = draftRuleModels(), target = findTarget(value('rule-target'));
   updateRuleQuestion(all, target);
-  const candidates = all ? scopeMatches([]) : [target];
   const saved = state.rules.find(r => r.id === value('rule-id'));
   const restore = ruleHandling() === 'disable_credential' && checked('rule-auto-restore');
   const recovery = all && restore ? recoveryCandidates({ ...saved, target_scope: scope, action: 'disable_credential', auto_restore: true }) : [];
-  const models = state.targetsFresh ? [...new Set([...candidates.flatMap(availableModels), ...recovery.flatMap(availableModels), ...(recovery.length ? saved?.models || [] : [])])].sort() : [];
-  const matches = selected.some(id => models.includes(id));
-  $('rule-scope-note').textContent = all ? !state.targetsFresh ? '目录未确认，执行时重新匹配。'
-    : scope === 'all_credentials' ? `全部 ${state.targets.length} 个凭证，${restore ? `待复检的停用凭证 ${recovery.length} 个（含人工停用）。` : '人工禁用的凭证标记为跳过。'}`
-    : recovery.length ? `本规则已暂停的 ${recovery.length} 个凭证将在下轮复测。`
-    : selected.length && !matches ? '暂无匹配凭证；新启用的凭证下轮匹配。' : '新启用的匹配凭证从下一轮纳入。'
-    : !target ? '请选择一个 CPA 凭证。' : !state.targetsFresh ? '凭证目录未确认。' : selected.some(id => !models.includes(id)) ? '此凭证未注册部分已选模型。' : '仅使用指定凭证。';
+  const candidates = all ? scopeTargets(scope, recovery) : [target];
+  const models = state.targetsFresh ? [...new Set([...candidates.flatMap(availableModels), ...(recovery.length ? saved?.models || [] : [])])].sort() : [];
+  let scopeNote = '请选择一个 CPA 凭证。';
+  if (!state.targetsFresh) scopeNote = '目录未确认，执行时读取当前范围。';
+  else if (all) {
+    scopeNote = `当前范围 ${candidates.length} 个凭证。目录未确认的凭证也纳入检测。`;
+    if (scope === 'all_credentials') scopeNote += restore ? `待复检的停用凭证 ${recovery.length} 个（含无归属的人工停用）。` : '人工禁用的凭证按权限跳过。';
+    else if (recovery.length) scopeNote += `含本规则因答错暂停的 ${recovery.length} 个凭证。`;
+  } else if (target) {
+    scopeNote = errorPolicyPauses().has(targetID(target)) ? '已按错误规则暂停，退出后续检测。'
+      : !models.length ? '模型目录未确认，执行时检测。'
+      : selected.some(id => !models.includes(id)) ? '当前目录未注册部分已选模型，执行时核实并按模型不支持策略处理。' : '仅使用指定凭证。';
+  }
+  $('rule-scope-note').textContent = scopeNote;
   const picker = $('rule-model-catalog');
   const options = `<option value="">${models.length ? '从凭证目录添加' : '凭证目录暂无模型'}</option>` + models.map(m => `<option value="${escapeHTML(m)}" ${selected.includes(m) ? 'disabled' : ''}>${escapeHTML(m)}</option>`).join('');
   patchView(picker, options);
@@ -1612,6 +1856,7 @@ function editRule(rule = {}) {
   $('rule-form').elements.namedItem('rule-scope').value = rule.id ? rule.target_scope || 'single' : 'all_enabled';
   const held = ruleHeld(rule);
   $('rule-form').elements.namedItem('rule-action').value = ['disable_credential','delete_credential'].includes(rule.action) ? rule.action : 'observe_only';
+  for (const key of Object.keys(upstreamConditions)) $(`rule-upstream-${key}`).value = rule.upstream_error_actions?.[key] || 'observe_only';
   $('rule-auto-restore').checked = rule.auto_restore === true;
   const timer = $('rule-timer');
   timer.checked = !held && rule.timer_active === true;
@@ -1629,12 +1874,17 @@ async function saveRule() {
     ...config,
     name: value('rule-name'),
     action: ruleHandling(),
+    upstream_error_actions: upstreamActions(),
     auto_restore: ruleHandling() === 'disable_credential' && checked('rule-auto-restore'),
     activation: String(checked('rule-timer')) === $('rule-timer').dataset.initial ? 'keep' : checked('rule-timer') ? 'start' : 'stop',
     automatic_pause: false,
     fail_threshold: state.rules.find(r => r.id === value('rule-id'))?.fail_threshold || 3,
   };
-  if (body.action !== 'observe_only' && config.judge.mode !== 'deterministic') fieldError('rule-judge-mode', '暂停或移除凭证需使用标准答案判定。');
+  if (handlesCredential(body.action) || Object.values(body.upstream_error_actions).some(handlesCredential)) {
+    if (!state.settings?.capabilities?.credential_management) throw Error('当前宿主未提供凭证处置，请刷新后重试。');
+    if (config.judge.mode !== 'deterministic') fieldError('rule-judge-mode', '暂停或移除凭证需使用标准答案判定。');
+    if (config.control_auth_id) fieldError('rule-control-target', '管理探测需清除对照凭证。');
+  }
   const retentionMode = value('rule-retention-mode');
   if (retentionMode !== 'legacy') body.retention_mode = retentionMode;
   if (retentionMode === 'count') {
@@ -1807,8 +2057,9 @@ async function dispatchClick(event) {
   }
   const detail = button.closest('#quality-detail') ? qualityDetail : null;
   const sourceRun = detail ? detail.run : state.run;
+  const retainedSample = index => sourceRun.samples[Number(index) - (sourceRun.pruned_samples || 0)];
   if (button.dataset.copySample != null) {
-    await navigator.clipboard.writeText(sourceRun.samples[Number(button.dataset.copySample)]?.output || '');
+    await navigator.clipboard.writeText(retainedSample(button.dataset.copySample).output);
     localFeedback(button, '已复制原文');
     return;
   }
@@ -1819,14 +2070,14 @@ async function dispatchClick(event) {
   }
   if (button.dataset.previewSample != null) {
     const preview = safePreview(
-      sourceRun.samples[Number(button.dataset.previewSample)]?.output || '',
+      retainedSample(button.dataset.previewSample).output || '',
     );
     $('preview-dialog').showModal();
     $('safe-preview').srcdoc = preview;
     return;
   }
   if (button.dataset.evidenceSample != null) {
-    const sample = sourceRun.samples[Number(button.dataset.evidenceSample)];
+    const sample = retainedSample(button.dataset.evidenceSample);
     const evidenceID = sample.evidence?.auth_id;
     const label = evidenceID && evidenceID === sourceRun.config?.auth_id ? sourceRun.credential_email || credentialName(evidenceID) : credentialName(evidenceID);
     $('evidence-content').innerHTML = renderSampleEvidence(sample, sourceRun.source === 'manual_test', label);
@@ -1834,17 +2085,25 @@ async function dispatchClick(event) {
     return;
   }
   if (button.dataset.reviewSample != null) {
-    const index = Number(button.dataset.reviewSample);
+    const id = sourceRun.id || sourceRun.run_id;
+    const selection = state.reads.run;
+    const current = () => detail ? detail === qualityDetail && detailDialog.open
+      : selection === state.reads.run && (state.run?.id || state.run?.run_id) === id;
     const fields = button.closest('.sample-review');
-    await api('/runs/review', 'POST', {
-      id: sourceRun.id,
-      sample_index: index + (sourceRun.pruned_samples || 0),
-      verdict: fields.querySelector('select').value,
-      note: fields.querySelector('input').value.trim(),
-    });
+    try {
+      await api('/runs/review', 'POST', {
+        id, sample_index: Number(button.dataset.reviewSample),
+        verdict: fields.querySelector('select').value,
+        note: fields.querySelector('input').value.trim(),
+      });
+    } catch (error) {
+      if (current()) throw error;
+      return;
+    }
+    if (!current()) return;
     if (detail) await readQualityDetail(detail);
-    else if (state.run?.id === sourceRun.id) await loadRun(sourceRun.id, false);
-    localFeedback(button, '评审已保存');
+    else await loadRun(id, false);
+    if (button.isConnected) localFeedback(button, '评审已保存');
     return;
   }
   if (button.dataset.ruleEdit) {
@@ -1853,19 +2112,29 @@ async function dispatchClick(event) {
   }
   if (button.dataset.ruleRun) {
     const rule = state.rules.find((entry) => entry.id === button.dataset.ruleRun);
-    const recovery = rule?.action === 'disable_credential' && rule.auto_restore && rule.handling?.some(h => h.auth_id === rule.auth_id && h.state === 'disabled');
-    const blocked = rule ? recovery && state.connected && state.targetsFresh ? '' : blockedConfig(rule.config || rule) : '规则当前不可用';
+    if (!rule) throw new Error('规则当前不可用');
+    const config = rule.config || rule, stopped = errorPolicyPauses();
+    if ([config.auth_id, config.control_auth_id, config.judge?.auth_id].some(id => stopped.has(id))) throw new Error('已按错误规则暂停，退出后续检测。');
+    const recovery = rule?.action === 'disable_credential' && rule.auto_restore && rule.handling?.some(h => h.auth_id === rule.auth_id && qualityRecoveryRecord(h));
+    const target = findTarget(config.auth_id);
+    const checkTarget = target?.retained_pause || target?.quality_paused || (target?.manual_disabled && !recovery);
+    const blocked = blockedConfig({ ...config, auth_id: checkTarget ? config.auth_id : '' });
     if (blocked) throw new Error(blocked);
     if (!rule?.enabled || ruleHeld(rule))
       throw new Error('检测已停止。请先人工解除凭证暂停，再显式恢复检测规则。');
     const run = () => api('/rules/run', 'POST', { id: rule.id, revision: rule.revision });
     if (dynamicScopeLabel(rule.target_scope)) {
-      const models = rule.models || [], matched = scopeMatches(models);
-      const calls = scopeSampleCount(matched, models, rule.samples);
-      const directory = rule.target_scope === 'all_credentials' ? `目录共 ${state.targets.length} 个凭证。${rule.action === 'disable_credential' && rule.auto_restore ? '人工停用的凭证整轮通过后将启用。' : '人工禁用的凭证将跳过。'}` : '';
-      const managed = ['disable_credential','delete_credential'].includes(rule.action);
-      const candidates = matched.filter(t => models.every(m => availableModels(t).includes(m)));
-      actionDialog({ title: '执行范围检测？', description: directory + (managed ? `已启用且模型匹配 ${candidates.length} 个，本规则待复测 ${recoveryCandidates(rule).length} 个。执行时核对凭证状态，并按已保存的策略处理结果。` : `当前匹配 ${matched.length} 个凭证，预计调用 ${calls} 次。实际数量按提交时可用的凭证和模型确定，将消耗调用额度。`), confirm: '开始检测', submit: async () => {
+      const recoverable = recoveryCandidates(rule), candidates = scopeTargets(rule.target_scope, recoverable);
+      const directory = `当前范围 ${candidates.length} 个凭证。` + (rule.target_scope === 'all_credentials' ? (rule.action === 'disable_credential' && rule.auto_restore ? '无处置归属的人工停用凭证整轮全对且快照匹配时可启用。' : '人工禁用的凭证按权限跳过。') : '');
+      const upstream = configuredUpstreamActions(rule.upstream_error_actions);
+      const managed = handlesCredential(rule.action) || upstream.length > 0;
+      const configured = [
+        ...(handlesCredential(rule.action) ? [`整轮可判且有答错时${credentialActions[rule.action]}`] : []),
+        ...upstream.map(([condition, action]) => `${condition}时${action}`),
+      ];
+      const samples = candidates.length * (rule.models || []).length * rule.samples;
+      const summary = managed ? `本规则待复测 ${recoverable.length} 个。已保存的处理策略为${configured.join('，')}。` : `最多计划 ${samples} 份目标回答，实际答题将消耗调用额度。`;
+      actionDialog({ title: '执行范围检测？', description: directory + summary + '执行时核实凭证和模型。目录确认缺少所选模型时按模型不支持策略处理。', confirm: '开始检测', submit: async () => {
         let receipt;
         try {
           receipt = await run();
@@ -1879,13 +2148,10 @@ async function dispatchClick(event) {
           notice('提交结果未确认。请先核对规则运行记录，不要重复执行。', true);
           return;
         }
-        if (receipt.count) selectBatch(receipt.scope_batch_id);
-        let current = true;
-        try { await loadOperations(); } catch (error) { if (isDiscarded(error)) throw error; current = false; }
-        const skipped = Object.keys(receipt.skip_reasons || {});
-        const manualNote = receipt.skip_reasons?.manual_disabled ? `其中 ${receipt.skip_reasons.manual_disabled} 个人工禁用，名单见规则卡片。` : '';
-        const handlingNote = manualNote + (managed && skipped.some(reason => reason.includes('modified') || reason.includes('attention')) ? '部分凭证已变更或处置待核对。' : '');
-        notice((receipt.count ? `已排队 ${receipt.count} 个凭证，跳过 ${receipt.skipped} 个。` : '本轮没有匹配的可用凭证，未发起模型调用。') + handlingNote + (current ? '' : '运行记录读取失败，请刷新。'));
+        if (receipt.scope_batch_id) selectBatch(receipt.scope_batch_id);
+        showScopeReceipt(rule, receipt);
+        try { await loadOperations(); }
+        catch (error) { if (isDiscarded(error)) throw error; notice('已收到手动执行回执，部分列表读取失败，请刷新。', true, 'activity-read-note'); }
       } }); return;
     }
     const reply = await run();
@@ -1897,14 +2163,28 @@ async function dispatchClick(event) {
   }
   if (button.dataset.ruleDelete) {
     const rule = state.rules.find((entry) => entry.id === button.dataset.ruleDelete);
-    actionDialog({ title: '删除检测规则', description: `将删除“${rule.name || rule.id}”及其全部运行记录，此操作无法撤销。`, confirm: '删除规则', danger: true, submit: async () => {
-      await api('/rules', 'DELETE', { id: rule.id, revision: rule.revision });
-      if (state.scopeRule === rule.id || (state.scopeBatch && state.scopeBatch === rule.last_scope_batch)) {
+    if (!rule) return;
+    actionDialog({ title: '删除检测规则', description: `将删除“${rule.name || rule.id}”及其运行记录和日志。保留 CPA 凭证。此操作无法撤销。`, confirm: '删除规则', danger: true, submit: async () => {
+      const epoch = client.epoch;
+      const receipt = await cleanupRequest('/rules', { id: rule.id, revision: rule.revision });
+      const selected = state.scopeRule === rule.id || (state.scopeBatch && (state.scopeBatch === rule.last_scope_batch || state.activityRows?.some(row => (row.rule_id || row.config?.rule_id) === rule.id)));
+      if (receipt) state.rules = state.rules.filter(entry => entry.id !== rule.id);
+      if (receipt && selected) {
         state.scopeRule = '';
         selectBatch('', 0, false);
       }
-      await loadOperations();
-      if (state.page === 'operations') notice(`规则“${rule.name || rule.id}”已删除。`);
+      if (!await refreshCleanupLists(epoch)) return;
+      const listed = state.resourceStatus.rules === 'ready' ? state.rules.some(entry => entry.id === rule.id) : null;
+      if (!receipt && listed === false && selected) {
+        state.scopeRule = '';
+        selectBatch('', 0, false);
+        try { await loadActivity(); } catch (error) { if (isDiscarded(error)) throw error; }
+      }
+      if (epoch !== client.epoch || state.page !== 'operations') return;
+      if (receipt || listed === false) focusAfterCleanup('ops-all-rules');
+      const current = state.resourceStatus.rules === 'ready' && state.resourceStatus.activity === 'ready';
+      const message = receipt ? `规则“${rule.name || rule.id}”已删除。` : `删除规则的回执未确认。${listed === null ? '' : listed ? '当前规则仍在列表中。' : '当前列表中已无此规则。'}`;
+      notice(message + (current ? '' : '列表读取失败，请刷新核对。'), !receipt || !current, 'ops-all-rules');
     } });
     return;
   }
@@ -1944,11 +2224,8 @@ $('models').addEventListener('change', () => { renderReasoning(true); renderTarg
 $('reasoning').addEventListener('change', () => { renderReasoning(true); renderAdmission(); });
 $('samples').addEventListener('change', renderAdmission);
 $('question').addEventListener('change', renderQuestion);
-$('prompt').addEventListener('input', () => {
-  updateQuestionNote();
-  renderAdmission();
-});
 for (const input of $('rule-form').querySelectorAll('[name="rule-action"]')) input.addEventListener('change', updateRuleFields);
+$('rule-upstream-options').addEventListener('change', updateRuleFields);
 for (const id of ['rule-target','rule-question','rule-scope-all','rule-scope-directory','rule-scope-single','rule-auto-restore','rule-judge-mode','rule-models','rule-samples','rule-control-target','rule-max-results','rule-retention-mode']) $(id).addEventListener('input', updateRuleFields);
 for (const id of ['rule-timer','rule-convert-cron','rule-cron']) $(id).addEventListener('input', updateRuleSchedule);
 for (const button of $('rule-form').querySelectorAll('[data-sample-step]')) {
@@ -2023,7 +2300,7 @@ $('run-cancel').addEventListener('click', () =>
     const scope = feedbackScope();
     await api('/runs/cancel', 'POST', { id });
     if (id === (state.run?.id || state.run?.run_id)) {
-      if (scope === feedbackScope()) notice('已请求取消；后台会关闭对应模型操作。');
+      if (scope === feedbackScope()) notice('已请求停止，后台正在核对执行进度。');
       await loadRun(id, false);
     }
     await loadHistory();
@@ -2039,16 +2316,10 @@ $('run-rerun').addEventListener('click', () =>
 );
 $('run-export').addEventListener('click', () => exportRun(state.run));
 $('history-prev').addEventListener('click', () =>
-  safely(async () => {
-    state.historyOffset = Math.max(0, state.historyOffset - 10);
-    await loadHistory();
-  }),
+  safely(() => loadHistory(Math.max(0, state.historyOffset - 10))),
 );
 $('history-next').addEventListener('click', () =>
-  safely(async () => {
-    state.historyOffset += 10;
-    await loadHistory();
-  }),
+  safely(() => loadHistory(state.historyOffset + 10)),
 );
 $('rule-new').addEventListener('click', () => protectEditor(() => editRule()));
 $('rule-form').addEventListener('submit', (event) => {
@@ -2082,7 +2353,27 @@ $('release-confirm').addEventListener('click', () =>
   }, 'release', $('release-confirm')),
 );
 $('release-refresh').addEventListener('click', () => safely(reconcileRelease, 'release-refresh', $('release-refresh')));
+function clearScopeReceipt() {
+  state.receiptBatch = '';
+  $('ops-dispatch-receipt').hidden = true;
+  $('ops-dispatch-receipt').replaceChildren();
+}
+
+function showScopeReceipt(rule, receipt) {
+  clearScopeReceipt();
+  const panel = $('ops-dispatch-receipt');
+  const title = `手动执行回执 · ${rule.name || rule.id}`;
+  const dispatch = { matched: receipt.count, skipped: receipt.skipped, details: receipt.skip_details, skipReasons: receipt.skip_reasons };
+  state.receiptBatch = receipt.scope_batch_id || '';
+  patchView(panel, renderScopeDispatch(dispatch, title, rule.id, true));
+  const details = panel.querySelector('details');
+  if (details) details.open = true;
+  panel.hidden = false;
+  $('local-feedback').textContent = `${title}。纳入检测 ${receipt.count} 个，跳过 ${receipt.skipped} 个。`;
+}
+
 function selectBatch(batch, offset = 0, focus = true) {
+  if (!batch || batch !== state.receiptBatch) clearScopeReceipt();
   state.scopeBatch = batch; state.batchOffset = offset;
   state.activityRows = null;
   if (batch) state.scopeRule = '';
@@ -2100,18 +2391,29 @@ for (const [id, shift] of [['ops-batch-prev',-20],['ops-batch-next',20],['ops-ba
   safely(loadActivity, 'batch-page');
 });
 $('ops-history-clear').addEventListener('click', () => actionDialog({
-  title: '清空所有规则的运行记录？', description: '将删除所有规则已结束的检测记录和对应日志，清空后无法恢复。', confirm: '清空记录', danger: true,
+  title: '清空所有规则的运行记录？',
+  description: (state.scopeBatch ? '当前显示单个批次。' : state.scopeRule ? `当前显示规则“${state.rules.find(rule => rule.id === state.scopeRule)?.name || state.scopeRule}”。` : '') + '将删除所有规则已结束的检测记录及对应日志。保留进行中和处置所需的记录、手动测试记录及 CPA 凭证。',
+  confirm: '清空记录', danger: true,
   submit: async () => {
-    const result = await api('/rules/run-history', 'DELETE');
+    const epoch = client.epoch;
+    const result = await cleanupRequest('/rules/run-history');
     state.scopeRule = '';
     selectBatch('', 0, false);
-    try { await loadOperations(); }
-    catch (error) { if (!isDiscarded(error)) notice('清空已完成，列表刷新失败，请刷新查看。', true); return; }
-    notice(`已清空 ${result.deleted} 条运行记录。${result.kept ? `保留 ${result.kept} 条进行中或处置所需的记录。` : ''}`);
+    if (!await refreshCleanupLists(epoch) || state.page !== 'operations') return;
+    focusAfterCleanup('ops-activity');
+    const current = state.resourceStatus.activity === 'ready';
+    const message = result ? `已清空 ${result.deleted} 条运行记录。${result.kept ? `保留 ${result.kept} 条进行中或处置所需的记录。` : ''}` : '清空回执未确认，删除条数未知。';
+    notice(message + (current ? (result ? '' : '已重新读取全部规则记录。') : '记录读取失败，请刷新核对。'), !result || !current, 'activity-read-note');
   },
 }));
 for (const id of ['ops-scope-clear', 'ops-all-rules']) $(id).addEventListener('click', () => { state.scopeRule = ''; selectBatch('', 0, false); safely(loadActivity, 'activity-scope'); });
 $('rule-search').addEventListener('input', renderRules);
+$('rules-list').addEventListener('toggle', event => {
+  const node = event.target;
+  if (!node.matches('details[data-skip-rule]')) return;
+  const dispatch = state.rules.find(rule => rule.id === node.dataset.skipRule)?.last_scope_dispatch;
+  if (dispatch) patchView(node.querySelector('.scope-skip-body'), node.open ? renderScopeSkipDetails(dispatch) : '');
+}, true);
 $('rule-filter').addEventListener('change', renderRules);
 window.addEventListener('beforeunload', (event) => {
   if (editorDirty()) { event.preventDefault(); event.returnValue = ''; }
@@ -2149,7 +2451,7 @@ $('theme-toggle').addEventListener('change', () => {
 $('action-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const request = actionRequest;
-  if (!request || state.busy.has('dialog-action')) return;
+  if (!request || request.cleanupSent || state.busy.has('dialog-action')) return;
   if (request.input && !value('action-name')) {
     $('action-error').textContent = '请输入预设名称。';
     $('action-error').classList.remove('hidden');
@@ -2169,6 +2471,11 @@ $('action-form').addEventListener('submit', async (event) => {
     if (actionRequest === request && request.epoch === client.epoch) $('action-dialog').close();
   } catch (error) {
     if (!isDiscarded(error) && actionRequest === request && request.epoch === client.epoch) {
+      if (request.cleanupSent) {
+        $('action-dialog').close();
+        notice('清理请求已发送，读取结果失败。请刷新核对。', true);
+        return;
+      }
       $('action-error').textContent = error.message || '操作失败，请重试。';
       $('action-error').classList.remove('hidden');
       $('action-error').focus();
@@ -2192,7 +2499,10 @@ function clearFieldError(field) {
   }
 }
 document.addEventListener('input', (event) => {
-  clearFieldError(event.target);
+  const field = event.target;
+  if (field.id === 'prompt') updateQuestionNote();
+  else if (field.id === 'rule-prompt' || field.id === 'rule-review-standard') updateQuestionTextValidity(field, value('rule-question') === 'custom');
+  else clearFieldError(field);
   if (event.target.closest('#rule-dialog')) updateEditorDirty();
 });
 document.addEventListener('change', (event) => { if (event.target.closest('#rule-dialog')) updateEditorDirty(); });
@@ -2206,7 +2516,7 @@ window.addEventListener('hashchange', () => setPage(location.hash.slice(1)));
 window.addEventListener('resize', scheduleWorkspaceLayout);
 const workspaceLayoutObserver = new ResizeObserver(scheduleWorkspaceLayout);
 for (const selector of ['.app-header', '.primary-nav', '.quality-heading', '.quality-overview', '.manual-pane-switch', '#notice']) workspaceLayoutObserver.observe(document.querySelector(selector));
-renderMetrics({});
+renderMetrics();
 renderRules();
 renderActivityState();
 renderAdmission();

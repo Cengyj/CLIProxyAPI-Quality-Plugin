@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"time"
 
@@ -199,41 +200,65 @@ func (en *Engine) Prune(now time.Time) error {
 	if en.closed {
 		return nil
 	}
+	if en.fault != nil {
+		return en.fault
+	}
+	policy := historyRetention{
+		before:   now.Add(-time.Duration(en.cfg.RetentionDays) * 24 * time.Hour),
+		keepRuns: map[string]bool{}, keepActions: map[string]bool{}, cutoffs: map[string]time.Time{},
+	}
+	for _, rule := range en.rules {
+		if rule.LastRun != "" {
+			policy.keepRuns[rule.LastRun] = true
+		}
+		if rule.ActionID != "" {
+			policy.keepActions[rule.ActionID] = true
+			var a Action
+			err := en.store.Get("meta", "intent:"+rule.ActionID, &a)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("read retained pause intent: %w", err)
+			}
+			if a.EvidenceRunID != "" {
+				policy.cutoffs[a.EvidenceRunID] = time.Time{}
+			}
+		}
+	}
+	for _, d := range en.managed {
+		if d.State == "attention" || pendingCredentialAction(d.State) != "" {
+			if d.RunID != "" {
+				policy.cutoffs[d.RunID] = time.Time{}
+			}
+			if d.ActionID != "" {
+				policy.keepActions[d.ActionID] = true
+			}
+		}
+	}
 	if err := en.pruneResultCountsLocked("", ""); err != nil {
 		return err
 	}
-	before := now.Add(-time.Duration(en.cfg.RetentionDays) * 24 * time.Hour)
-	keep := map[string]bool{}
-	cutoffs := map[string]time.Time{}
-	for _, rule := range en.rules {
-		keep[rule.LastRun] = true
-		if rule.ActionID != "" {
-			var a Action
-			if en.store.Get("meta", "intent:"+rule.ActionID, &a) == nil {
-				keep[a.EvidenceRunID] = true
-			}
-		}
-	}
 	for id, r := range en.runs {
+		if _, protected := policy.cutoffs[id]; protected {
+			continue
+		}
+		if en.handlingEvidenceLocked(r) {
+			// The zero cutoff protects both the run and its linked audit entries.
+			policy.cutoffs[id] = time.Time{}
+			continue
+		}
 		if rule := en.rules[r.Config.RuleID]; rule != nil {
-			if rule.MaxResults > 0 || rule.RetentionMode == "manual" {
-				cutoffs[id] = time.Time{}
+			if rule.ActionID != "" || rule.BlockedAuthID != "" || rule.MaxResults > 0 || rule.RetentionMode == "manual" {
+				policy.cutoffs[id] = time.Time{}
 			} else if rule.RetentionDays > 0 {
-				cutoffs[id] = now.Add(-time.Duration(rule.RetentionDays) * 24 * time.Hour)
+				policy.cutoffs[id] = now.Add(-time.Duration(rule.RetentionDays) * 24 * time.Hour)
 			}
 		}
 	}
-	if e := en.store.Prune(before, keep, cutoffs); e != nil {
-		return e
+	deleted, err := en.store.prune(policy, en.runs)
+	if err != nil {
+		return err
 	}
-	for id, r := range en.runs {
-		cutoff := before
-		if custom, ok := cutoffs[id]; ok {
-			cutoff = custom
-		}
-		if !keep[id] && r.CompletedAt != nil && r.CompletedAt.Before(cutoff) {
-			delete(en.runs, id)
-		}
+	for _, id := range deleted {
+		delete(en.runs, id)
 	}
 
 	return nil

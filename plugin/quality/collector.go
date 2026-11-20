@@ -105,6 +105,9 @@ func (c *collector) event(raw []byte, stream bool) error {
 		key = "delta"
 	}
 	msg := choice.Get(key)
+	if role := msg.Get("role"); role.Exists() && role.Raw != "null" && (role.Type != ojson.String || role.String() != "" && role.String() != "assistant") {
+		return fmt.Errorf("non-assistant completion message")
+	}
 	if msg.Get("refusal").String() != "" {
 		c.refusal = true
 	}

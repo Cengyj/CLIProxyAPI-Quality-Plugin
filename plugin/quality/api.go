@@ -50,7 +50,11 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 	case "GET /runs":
 		result, err = en.QueryRuns(req.Query)
 	case "GET /runs/detail":
-		result, err = en.Run(req.Query.Get("id"))
+		if key := req.Query.Get("idempotency_key"); key != "" && req.Query.Get("id") == "" {
+			result, err = en.runByReceipt(key)
+		} else {
+			result, err = en.Run(req.Query.Get("id"))
+		}
 	case "DELETE /rules/run-history":
 		result, err = en.clearRuleHistory()
 	case "DELETE /runs":
@@ -80,12 +84,16 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 	case "POST /runs/review":
 		var body struct {
 			ID          string `json:"id"`
-			SampleIndex int    `json:"sample_index"`
+			SampleIndex *int   `json:"sample_index"`
 			Verdict     string `json:"verdict"`
 			Note        string `json:"note"`
 		}
 		if err = DecodeStrict(req.Body, &body); err == nil {
-			err = en.Review(body.ID, body.SampleIndex, body.Verdict, body.Note)
+			if body.SampleIndex == nil {
+				err = fmt.Errorf("invalid_request: sample_index required")
+			} else {
+				err = en.Review(body.ID, *body.SampleIndex, body.Verdict, body.Note)
+			}
 		}
 	case "GET /rules":
 		result = en.queryRules(req.Query)
@@ -189,7 +197,7 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 		entries, err = en.History()
 		result = page(entries, req)
 	case "GET /metrics":
-		result, err = en.Metrics()
+		result, err = en.metrics(req.Query.Get("view") == "summary")
 	case "GET /presets":
 		var items []Preset
 		items, err = en.Presets()

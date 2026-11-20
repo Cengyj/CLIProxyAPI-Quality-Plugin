@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +12,7 @@ import (
 )
 
 func scopedTarget(id string, models ...string) Target {
-	return Target{AuthID: id, AuthIndex: "ix-" + id, Provider: "offline", RuntimeStatus: "active", EffectiveAvailable: true, Models: models}
+	return Target{AuthID: id, AuthIndex: "ix-" + id, Provider: "offline", RuntimeStatus: "active", EffectiveAvailable: true, Models: models, catalogVerified: true}
 }
 
 func scopeFixture(t *testing.T, targets ...Target) (*Engine, *semanticsHost, *Rule) {
@@ -30,19 +29,19 @@ func scopeFixture(t *testing.T, targets ...Target) (*Engine, *semanticsHost, *Ru
 
 func TestScopeMembershipIsDynamicAndPerCredential(t *testing.T) {
 	ctx := context.Background()
-	b := scopedTarget("two", "b", "c")
+	b := scopedTarget("two", "a", "b", "c")
 	b.Provider = "another"
-	held, unknown, disabled, noIndex := scopedTarget("held", "a"), scopedTarget("unknown", "a"), scopedTarget("disabled", "a"), scopedTarget("no-index", "a")
+	held, unknown, disabled, noIndex := scopedTarget("held", "a"), scopedTarget("unknown", "a", "b"), scopedTarget("disabled", "a"), scopedTarget("no-index", "a")
 	unknown.RuntimeStatus = "error"
 	disabled.ManualDisabled = true
 	noIndex.AuthIndex = ""
-	en, h, r := scopeFixture(t, scopedTarget("one", "a"), b, held, unknown, disabled, noIndex, scopedTarget("none", "c"))
+	en, h, r := scopeFixture(t, scopedTarget("one", "a", "b"), b, held, unknown, disabled, noIndex, scopedTarget("none", "c"))
 	en.rules["old-owner"] = &Rule{ID: "old-owner", RunConfig: RunConfig{AuthID: "held"}, ActionID: "retained"}
 	if receipt, err := en.dispatchRule(ctx, r.ID, r.Revision+1, false); err == nil || receipt.Count != 0 {
 		t.Fatal("accepted stale revision")
 	}
 	d, err := en.dispatchRule(ctx, r.ID, r.Revision, false)
-	if err != nil || d.Count != 2 || d.Skipped != 4 || d.BatchID == "" || len(en.queue) != 1 || h.executeCalls != 0 {
+	if err != nil || d.Count != 6 || d.Skipped != 0 || d.BatchID == "" || len(en.queue) != 1 || h.executeCalls != 0 {
 		t.Fatal(d, err)
 	}
 	if _, err = en.dispatchRule(ctx, r.ID, r.Revision, false); err == nil {
@@ -50,20 +49,30 @@ func TestScopeMembershipIsDynamicAndPerCredential(t *testing.T) {
 	}
 	for _, child := range en.runs {
 		f := child.Config
-		want := []string{"a"}
+		want := r.Models
 		provider := "offline"
+		index := "ix-" + f.AuthID
 		if f.AuthID == "two" {
-			want = []string{"b"}
+			want = r.Models
 			provider = "another"
 		}
-		if f.SubjectIndex != "ix-"+f.AuthID || f.Provider != provider || !reflect.DeepEqual(f.Models, want) || f.ScopeBatchID != d.BatchID {
+		if child.Status == "blocked" {
+			want = r.Models
+			if f.AuthID == "no-index" {
+				index = ""
+			}
+			if child.PreflightDetail == nil || child.PreflightDetail.RunID != child.ID || len(child.Samples) != 0 || child.CompletedAt == nil {
+				t.Fatal("incomplete skipped child", child)
+			}
+		}
+		if f.SubjectIndex != index || f.Provider != provider || !reflect.DeepEqual(f.Models, want) || f.ScopeBatchID != d.BatchID {
 			t.Fatal("incorrect pinned child", f)
 		}
 	}
 	for task := en.nextRunnableLocked(); task != nil; task = en.nextRunnableLocked() {
 		en.executeTask(task)
 	}
-	if h.executeCalls != 2 || h.pauseCalls != 0 {
+	if h.executeCalls != 6 || h.pauseCalls != 0 {
 		t.Fatal("wrong call count", h.executeCalls)
 	}
 	h.targets = []Target{scopedTarget("later", "a", "b")}
@@ -85,7 +94,7 @@ func TestScopeMembershipIsDynamicAndPerCredential(t *testing.T) {
 	}
 	h.targets = nil
 	empty, err := en.dispatchRule(ctx, r.ID, r.Revision, false)
-	if err != nil || empty.Count != 0 || empty.BatchID != "" || len(en.runs) != 3 || h.executeCalls != 2 || en.rules["old-owner"].ActionID != "retained" {
+	if err != nil || empty.Count != 0 || empty.BatchID != "" || len(en.runs) != 7 || h.executeCalls != 6 || en.rules["old-owner"].ActionID != "retained" {
 		t.Fatal(empty, err)
 	}
 }
@@ -98,14 +107,30 @@ func TestScopeLargeDirectoryAtomicQueueAndRestart(t *testing.T) {
 	}
 	en, h, r := scopeFixture(t, targets...)
 	en.queue = make(chan string, 1)
-	if _, err := en.dispatchRule(ctx, r.ID, r.Revision, false); err == nil || !strings.Contains(err.Error(), "queue_full") || len(en.runs) != 0 || len(en.queue) != 0 {
-		t.Fatal("partial overflow admission", err)
+	checkFull := func(want int) string {
+		t.Helper()
+		receipt, err := en.dispatchRule(ctx, r.ID, r.Revision, false)
+		if err != nil || receipt.Count != 0 || receipt.Skipped != want || len(receipt.SkipDetails) != want || receipt.BatchID == "" {
+			t.Fatalf("queue-full receipt: total %d, skipped %d, batch %q, err %v", receipt.Count, receipt.Skipped, receipt.BatchID, err)
+		}
+		for _, detail := range receipt.SkipDetails {
+			run := en.runs[detail.RunID]
+			if detail.Code != "queue_full" || run == nil || run.Status != "skipped" || run.Config.ScopeBatchID != receipt.BatchID || run.CompletedAt == nil || len(run.Samples) != 0 {
+				t.Fatal("invalid overflow record", detail)
+			}
+		}
+		return receipt.BatchID
+	}
+	largeBatch := checkFull(len(targets))
+	if len(en.runs) != len(targets) || len(en.queue) != 0 {
+		t.Fatal("partial overflow admission")
 	}
 	h.targets = targets[:137]
 	en.queue <- "occupied"
 	en.runs["occupied"] = &Run{ID: "occupied", Status: "queued"}
-	if _, err := en.dispatchRule(ctx, r.ID, r.Revision, false); err == nil || len(en.runs) != 1 {
-		t.Fatal("queue overflow was not atomic", err)
+	occupiedBatch := checkFull(len(h.targets))
+	if len(en.runs) != len(targets)+len(h.targets)+1 || len(en.queue) != 1 {
+		t.Fatal("queue overflow was not atomic")
 	}
 	<-en.queue
 	delete(en.runs, "occupied")
@@ -124,12 +149,15 @@ func TestScopeLargeDirectoryAtomicQueueAndRestart(t *testing.T) {
 	if err = en.load(); err != nil {
 		t.Fatal(err)
 	}
-	for _, v := range en.runs {
-		if v.Status != "interrupted" || v.Config.ScopeBatchID != d.BatchID {
-			t.Fatal(v.Status)
+	counts := map[string]int{}
+	for _, run := range en.runs {
+		counts[run.Config.ScopeBatchID]++
+		if run.Config.ScopeBatchID == d.BatchID && run.Status != "interrupted" || run.Config.ScopeBatchID != d.BatchID && run.Status != "skipped" {
+			t.Fatal(run.Status)
 		}
 	}
-	if len(en.runs) != 137 || len(en.queue) != 0 || h.executeCalls != 0 || en.rules[r.ID].LastScopeBatch != d.BatchID {
+	if !reflect.DeepEqual(counts, map[string]int{largeBatch: len(targets), occupiedBatch: 137, d.BatchID: 137}) ||
+		len(en.queue) != 0 || h.executeCalls != 0 || en.rules[r.ID].LastScopeBatch != d.BatchID {
 		t.Fatal("restart replayed or lost membership")
 	}
 }
@@ -170,9 +198,6 @@ func TestObservationModelLimitsDoNotExpandManualOrDefaultBudgets(t *testing.T) {
 	}
 	for _, r := range en.runs {
 		want := models
-		if r.Config.AuthID == "partial" {
-			want = models[:1]
-		}
 		if !reflect.DeepEqual(r.Config.Models, want) || r.Config.Parameters.ReasoningEffort != "high" || r.Config.Samples != 2 {
 			t.Fatal("incorrect frozen model set or parameters")
 		}
@@ -196,7 +221,7 @@ func TestScopeRechecksBeforeCallAndRespectsBudget(t *testing.T) {
 		"disabled": func(t *Target) { t.ManualDisabled = true }, "cooling": func(t *Target) { t.EffectiveAvailable = false }, "unregistered": func(t *Target) { t.Models = nil }, "index": func(t *Target) { t.AuthIndex = "replaced" }, "provider": func(t *Target) { t.Provider = "replaced" }, "status": func(t *Target) { t.RuntimeStatus = "pending" }, "held": func(t *Target) { t.RetainedPause = true },
 	} {
 		t.Run(name, func(t *testing.T) {
-			en, h, r := scopeFixture(t, scopedTarget("one", "a"))
+			en, h, r := scopeFixture(t, scopedTarget("one", "a", "b"))
 			d, err := en.dispatchRule(context.Background(), r.ID, r.Revision, false)
 			if err != nil || d.Count != 1 {
 				t.Fatal(d, err)
@@ -204,7 +229,11 @@ func TestScopeRechecksBeforeCallAndRespectsBudget(t *testing.T) {
 			mutate(&h.targets[0])
 			task := en.nextRunnableLocked()
 			en.executeTask(task)
-			if en.runs[task.id].Status != "blocked" || h.executeCalls != 0 || en.budget.Calls != 0 {
+			wantStatus, wantCalls := "blocked", 0
+			if name == "cooling" || name == "status" || name == "unregistered" {
+				wantStatus, wantCalls = "completed", 2
+			}
+			if en.runs[task.id].Status != wantStatus || h.executeCalls != wantCalls || en.budget.Calls != wantCalls {
 				t.Fatal(en.runs[task.id], h.executeCalls)
 			}
 		})
@@ -285,7 +314,7 @@ func TestNativeScopeUsesPinnedLookupsAndVerifiesCatalog(t *testing.T) {
 	ctx := context.Background()
 	en, _, r := scopeFixture(t)
 	target := pluginapi.HostAuthFileEntry{ID: "one", AuthIndex: "idx", Provider: "offline", Status: "active"}
-	catalog := pluginapi.HostAuthModels{ID: "one", AuthIndex: "idx", Provider: "offline", Models: []string{"a"}}
+	catalog := pluginapi.HostAuthModels{ID: "one", AuthIndex: "idx", Provider: "offline", Models: []string{"a", "b"}}
 	var full, pinned, calls int
 	h := &NativeHost{Call: func(method string, request, response any) error {
 		switch method {
@@ -313,7 +342,7 @@ func TestNativeScopeUsesPinnedLookupsAndVerifiesCatalog(t *testing.T) {
 		return nil
 	}}
 	en.host = h
-	for _, field := range []string{"index", "provider", "id", "cooldown"} {
+	for _, field := range []string{"index", "provider", "id"} {
 		c := catalog
 		s := target
 		switch field {
@@ -327,8 +356,17 @@ func TestNativeScopeUsesPinnedLookupsAndVerifiesCatalog(t *testing.T) {
 			target.NextRetryAfter = time.Now().Add(time.Hour)
 		}
 		d, err := en.dispatchRule(ctx, r.ID, r.Revision, false)
-		if err != nil || d.Count != 0 {
+		want := 1
+		if field == "id" {
+			want = 2
+		}
+		if err != nil || d.Count != want || d.Skipped != 0 || len(en.queue) != 0 {
 			t.Fatal(field, d, err)
+		}
+		for _, run := range en.runs {
+			if run.Config.ScopeBatchID == d.BatchID && (run.Status != "blocked" || run.PreflightDetail == nil || run.PreflightDetail.Code != "identity_conflict") {
+				t.Fatal("identity conflict was not retained", run)
+			}
 		}
 		catalog = c
 		target = s
@@ -339,7 +377,7 @@ func TestNativeScopeUsesPinnedLookupsAndVerifiesCatalog(t *testing.T) {
 		t.Fatal(d, err)
 	}
 	en.executeTask(en.nextRunnableLocked())
-	if full != 2 || pinned != 1 || calls != 1 {
+	if full != 2 || pinned != 2 || calls != 2 {
 		t.Fatal("execution expanded the whole directory", full, pinned, calls)
 	}
 }

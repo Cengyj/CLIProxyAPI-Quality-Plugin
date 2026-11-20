@@ -90,6 +90,17 @@ func (en *Engine) executeTask(task *executionTask) {
 		en.notifyWorkersLocked()
 		en.mu.Unlock()
 	}()
+	if f.CatalogMissingModel != "" {
+		en.mu.Lock()
+		terminal := en.terminalDependencyLocked(f.RunConfig)
+		en.mu.Unlock()
+		if terminal {
+			en.finish(id, fmt.Errorf("blocked: credential already disabled by error policy"))
+			return
+		}
+		en.finish(id, ctx.Err())
+		return
+	}
 	phases := []bool{false}
 	if f.ControlAuthID != "" {
 		phases = []bool{true, false}
@@ -122,6 +133,10 @@ func (en *Engine) executeTask(task *executionTask) {
 				}
 				if err != nil {
 					en.finish(id, err)
+					return
+				}
+				if !control && upstreamAction(&f, &sample) != "" {
+					en.finish(id, ctx.Err())
 					return
 				}
 			}

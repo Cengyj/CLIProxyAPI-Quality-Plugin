@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const Version = "0.29.27"
+const Version = "0.29.36"
 
 const maxRuleModels = 50
 const maxManualModels = 16
@@ -107,13 +107,15 @@ type Question struct {
 	Family  string `json:"family,omitempty"`
 }
 type Frozen struct {
-	ManagedProbe       *CredentialSnapshot `json:"managed_probe,omitempty"`
-	ScopeBatchID       string              `json:"scope_batch_id,omitempty"`
-	SubjectIndex       string              `json:"subject_auth_index,omitempty"`
-	Scheduled          bool                `json:"scheduled_dispatch,omitempty"`
-	JudgeIdentity      string              `json:"judge_identity,omitempty"`
-	ControlIdentity    string              `json:"control_identity,omitempty"`
-	ComparisonIdentity string              `json:"comparison_identity,omitempty"`
+	CatalogMissingModel  string              `json:"catalog_missing_model,omitempty"`
+	UpstreamErrorActions map[string]string   `json:"upstream_error_actions,omitempty"`
+	ManagedProbe         *CredentialSnapshot `json:"managed_probe,omitempty"`
+	ScopeBatchID         string              `json:"scope_batch_id,omitempty"`
+	SubjectIndex         string              `json:"subject_auth_index,omitempty"`
+	Scheduled            bool                `json:"scheduled_dispatch,omitempty"`
+	JudgeIdentity        string              `json:"judge_identity,omitempty"`
+	ControlIdentity      string              `json:"control_identity,omitempty"`
+	ComparisonIdentity   string              `json:"comparison_identity,omitempty"`
 	RunConfig
 	Question             Question `json:"question"`
 	IdentityVersion      string   `json:"identity_version"`
@@ -140,53 +142,65 @@ type Evidence struct {
 	Path                 string `json:"path"`
 }
 type Sample struct {
-	AnswerMatch     string   `json:"answer_match,omitempty"`
-	Model           string   `json:"model"`
-	Index           int      `json:"index"`
-	ExecutionStatus string   `json:"execution_status"`
-	QualityVerdict  string   `json:"quality_verdict"`
-	Output          string   `json:"output"`
-	Error           string   `json:"error,omitempty"`
-	Reason          string   `json:"reason,omitempty"`
-	TotalMS         int64    `json:"total_ms"`
-	TTFTMS          *int64   `json:"ttft_ms"`
-	Usage           *Usage   `json:"usage"`
-	JudgeUsage      *Usage   `json:"judge_usage"`
-	ResponseModel   string   `json:"response_model,omitempty"`
-	Comparable      bool     `json:"comparable"`
-	Evidence        Evidence `json:"evidence"`
-	Review          string   `json:"review,omitempty"`
-	ReviewNote      string   `json:"review_note,omitempty"`
+	UpstreamCondition string   `json:"upstream_condition,omitempty"`
+	AnswerMatch       string   `json:"answer_match,omitempty"`
+	Model             string   `json:"model"`
+	Index             int      `json:"index"`
+	ExecutionStatus   string   `json:"execution_status"`
+	QualityVerdict    string   `json:"quality_verdict"`
+	Output            string   `json:"output"`
+	Error             string   `json:"error,omitempty"`
+	Reason            string   `json:"reason,omitempty"`
+	TotalMS           int64    `json:"total_ms"`
+	TTFTMS            *int64   `json:"ttft_ms"`
+	Usage             *Usage   `json:"usage"`
+	JudgeUsage        *Usage   `json:"judge_usage"`
+	ResponseModel     string   `json:"response_model,omitempty"`
+	Comparable        bool     `json:"comparable"`
+	Evidence          Evidence `json:"evidence"`
+	Review            string   `json:"review,omitempty"`
+	ReviewNote        string   `json:"review_note,omitempty"`
+}
+type SampleSlot struct {
+	Model string `json:"model"`
+	Index int    `json:"index"`
 }
 type Run struct {
-	CredentialEmail string     `json:"credential_email,omitempty"`
-	PrunedSamples   int        `json:"pruned_samples,omitempty"`
-	BlockReason     string     `json:"block_reason,omitempty"`
-	Controls        []Sample   `json:"controls,omitempty"`
-	ID              string     `json:"id"`
-	Status          string     `json:"status"`
-	Source          string     `json:"source"`
-	CreatedAt       time.Time  `json:"created_at"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	Config          Frozen     `json:"config"`
-	Samples         []Sample   `json:"samples"`
-	ActionStatus    string     `json:"action_status"`
-	Error           string     `json:"error,omitempty"`
-	CancelRequested bool       `json:"cancel_requested"`
+	PreflightDetail   *ScopeSkipDetail `json:"preflight_detail,omitempty"`
+	SkipDetail        *ScopeSkipDetail `json:"skip_detail,omitempty"`
+	UpstreamCondition string           `json:"upstream_condition,omitempty"`
+	CredentialAction  string           `json:"credential_action,omitempty"`
+	CredentialEmail   string           `json:"credential_email,omitempty"`
+	PrunedSamples     int              `json:"pruned_samples,omitempty"`
+	PrunedSlots       []SampleSlot     `json:"pruned_sample_slots,omitempty"`
+	BlockReason       string           `json:"block_reason,omitempty"`
+	Controls          []Sample         `json:"controls,omitempty"`
+	ID                string           `json:"id"`
+	Status            string           `json:"status"`
+	Source            string           `json:"source"`
+	CreatedAt         time.Time        `json:"created_at"`
+	CompletedAt       *time.Time       `json:"completed_at,omitempty"`
+	Config            Frozen           `json:"config"`
+	Samples           []Sample         `json:"samples"`
+	ActionStatus      string           `json:"action_status"`
+	Error             string           `json:"error,omitempty"`
+	CancelRequested   bool             `json:"cancel_requested"`
 }
 type Rule struct {
-	AutoRestore       bool `json:"auto_restore,omitempty"`
-	timerActive       bool
-	TargetScope       string   `json:"target_scope,omitempty"`
-	LastScopeBatch    string   `json:"last_scope_batch,omitempty"`
-	LastManualSkips   []string `json:"last_manual_skips,omitempty"`
-	IntentRevision    uint64   `json:"intent_revision,omitempty"`
-	Status            string   `json:"status"`
-	BlockedAuthID     string   `json:"blocked_auth_id,omitempty"`
-	EvidenceSignature string   `json:"evidence_signature,omitempty"`
-	ID                string   `json:"id"`
-	Revision          uint64   `json:"revision"`
-	Name              string   `json:"name"`
+	UpstreamErrorActions map[string]string `json:"upstream_error_actions,omitempty"`
+	AutoRestore          bool              `json:"auto_restore,omitempty"`
+	timerActive          bool
+	TargetScope          string                `json:"target_scope,omitempty"`
+	LastScopeBatch       string                `json:"last_scope_batch,omitempty"`
+	LastManualSkips      []string              `json:"last_manual_skips,omitempty"`
+	LastScopeDispatch    *ScopeDispatchSummary `json:"last_scope_dispatch,omitempty"`
+	IntentRevision       uint64                `json:"intent_revision,omitempty"`
+	Status               string                `json:"status"`
+	BlockedAuthID        string                `json:"blocked_auth_id,omitempty"`
+	EvidenceSignature    string                `json:"evidence_signature,omitempty"`
+	ID                   string                `json:"id"`
+	Revision             uint64                `json:"revision"`
+	Name                 string                `json:"name"`
 	RunConfig
 	Action             string    `json:"action"`
 	Enabled            bool      `json:"enabled"`
@@ -208,6 +222,9 @@ type Rule struct {
 	IdentityVersion    string    `json:"identity_version,omitempty"`
 }
 type Target struct {
+	identityConflict     bool
+	identityVerified     bool
+	catalogVerified      bool
 	Email                string   `json:"email,omitempty"`
 	CredentialHandling   string   `json:"credential_handling,omitempty"`
 	RuntimeStatus        string   `json:"runtime_status,omitempty"`

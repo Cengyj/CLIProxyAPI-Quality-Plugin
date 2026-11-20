@@ -167,6 +167,7 @@ func TestOfficialModeRejectsPauseRulesAndRetainsExistingOwnership(t *testing.T) 
 
 func TestOfficialObservationRulesNeverAdvanceFailureEvidence(t *testing.T) {
 	en, base, _ := semanticsEngine(t)
+	base.targets[0].AuthIndex = "fixture-index"
 	en.host = &observationHost{base}
 	en.cfg.AutomaticPause = false
 	rule, err := en.SaveRule(context.Background(), Rule{RunConfig: lifeConfig(), Enabled: true, Action: "observe_only"}, false)

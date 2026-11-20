@@ -7,7 +7,6 @@ import (
 	"maps"
 	"os"
 	"sort"
-	"strconv"
 	"sync"
 )
 
@@ -20,15 +19,12 @@ func dynamicScope(scope string) bool {
 }
 
 type ruleDispatch struct {
-	SkipReasons map[string]int `json:"skip_reasons,omitempty"`
-	RunID       string         `json:"run_id,omitempty"`
-	BatchID     string         `json:"scope_batch_id,omitempty"`
-	Count       int            `json:"count"`
-	Skipped     int            `json:"skipped"`
-}
-
-func eligibleForScope(t Target) bool {
-	return t.AuthID != "" && t.AuthIndex != "" && t.Provider != "" && t.RuntimeStatus == "active" && t.EffectiveAvailable && !t.ManualDisabled && !t.QualityPaused && !t.RetainedPause
+	SkipReasons map[string]int    `json:"skip_reasons,omitempty"`
+	SkipDetails []ScopeSkipDetail `json:"skip_details,omitempty"`
+	RunID       string            `json:"run_id,omitempty"`
+	BatchID     string            `json:"scope_batch_id,omitempty"`
+	Count       int               `json:"count"`
+	Skipped     int               `json:"skipped"`
 }
 
 // A batch is one fair queue entry, not an unbounded burst of queue reservations.
@@ -52,6 +48,9 @@ func (en *Engine) dispatchWithInventory(ctx context.Context, id string, revision
 		return result, fmt.Errorf("conflict: stale rule revision")
 	}
 	if !dynamicScope(rule.TargetScope) {
+		if en.terminalDependencyLocked(rule.RunConfig) {
+			return result, nil
+		}
 		var schedRev uint64
 		if scheduled {
 			schedRev = revision
@@ -59,7 +58,11 @@ func (en *Engine) dispatchWithInventory(ctx context.Context, id string, revision
 		r, err := en.submitLocked(ctx, RunConfig{}, id, schedRev, inventory)
 		if err == nil {
 			result.RunID = r.ID
-			result.Count = 1
+			if r.SkipDetail != nil {
+				result.BatchID, result.Skipped, result.SkipDetails = r.Config.ScopeBatchID, 1, []ScopeSkipDetail{*r.SkipDetail}
+			} else {
+				result.Count = 1
+			}
 		}
 		return result, err
 	}
@@ -78,11 +81,12 @@ func (en *Engine) dispatchWithInventory(ctx context.Context, id string, revision
 		en.snapshotSlots = make(chan struct{}, en.cfg.Workers)
 	}
 	owned := maps.Clone(en.managed)
+	ctx = en.inventoryContextLocked(ctx)
 	plan := cloneRule(rule)
 	en.mu.Unlock()
 	targets, err := inventory(ctx)
 	var profiles []scopeProfile
-	if err == nil && managedRule(plan) {
+	if err == nil && managedRule(plan) && en.Capabilities().ManagementSession {
 		profiles = en.readScopeProfiles(ctx, plan, targets, owned)
 	}
 	en.mu.Lock()
@@ -115,107 +119,141 @@ func (en *Engine) dispatchWithInventory(ctx context.Context, id string, revision
 			pending++
 		}
 	}
-	if base.QuestionID == "random-linear" && base.Seed == 0 {
-		base.Seed, err = strconv.ParseInt(ID()[:15], 16, 64)
-		if err != nil {
-			return result, err
-		}
-	}
-	q, err := FreezeQuestion(base)
+	q, err := freezeDispatchQuestion(&base)
 	if err != nil {
 		return result, err
 	}
 	batch, now, ch := ID(), en.now(), changes()
-	ids := []string{}
+	type match struct {
+		target   Target
+		config   RunConfig
+		snapshot *CredentialSnapshot
+		missing  string
+	}
+	var matches []match
 	var manualSkips []string
-	seen := map[string]bool{}
+	seen := map[string]Target{}
 	for i, t := range targets {
 		if err := ctx.Err(); err != nil {
 			return ruleDispatch{}, err
 		}
-		if seen[t.AuthID] {
+		if _, duplicate := seen[t.AuthID]; duplicate || t.AuthID == "" {
 			continue
 		}
-		seen[t.AuthID] = true
+		seen[t.AuthID] = t
 		d := en.managed[t.AuthID]
+		if errorPolicyDisabled(d).Code != "" {
+			continue
+		}
 		if (t.ManualDisabled || t.RuntimeStatus == "disabled") && !activeDisposition(d) && !canRecoverDisabled(rule, d) && !t.RetainedPause && !t.QualityPaused && en.localPause(RunConfig{AuthID: t.AuthID}) == "" {
 			if rule.TargetScope == scopeAllCredentials {
 				manualSkips = append(manualSkips, t.AuthID)
-				result.Skipped++
+				result.skip(t, ScopeSkipDetail{Code: "manual_disabled", Reason: "凭证由管理员停用，当前规则无权复检。"})
 			}
 			continue
 		}
-		cfg := cloneConfig(base)
+		cfg := base
 		cfg.AuthID, cfg.Provider = t.AuthID, t.Provider
 		if t.QualityPaused || t.RetainedPause || en.localPause(cfg) != "" {
-			result.Skipped++
+			result.skip(t, ScopeSkipDetail{Code: "quality_paused", Reason: "凭证仍受质量暂停保护，禁止检测。"})
+			continue
+		}
+		if t.identityConflict {
+			result.skip(t, ScopeSkipDetail{Code: "identity_conflict", Reason: "CPA 返回的凭证或模型目录标识互相冲突。"})
+			continue
+		}
+		if activeDisposition(d) && d.State != "disabled" {
+			result.skip(t, ScopeSkipDetail{Code: "handling_blocked", Reason: "上次凭证处置尚待核对。"})
+			continue
+		}
+		if !managedRule(rule) && !ruleSubjectEnabled(t) {
+			if t.ManualDisabled || t.RuntimeStatus == "disabled" {
+				result.skip(t, recoveryDenied(rule, d))
+			} else {
+				result.skip(t, runtimeSkip(t))
+			}
 			continue
 		}
 		var managed *CredentialSnapshot
 		if managedRule(rule) {
+			if profiles == nil || !en.Capabilities().ManagementSession {
+				result.skip(t, sessionSkip())
+				continue
+			}
 			admissionErr := profiles[i].err
 			if owned[t.AuthID] != en.managed[t.AuthID] {
-				admissionErr = fmt.Errorf("blocked: credential ownership changed during scan")
+				admissionErr = rejectScope("blocked: credential ownership changed during scan", "ownership_changed", "扫描期间凭证的处置归属已变更。")
 			}
 			if admissionErr == nil {
-				t, managed, admissionErr = en.admitSnapshotLocked(rule, t, profiles[i].snapshot)
+				t, managed, admissionErr = en.admitSnapshotLocked(rule, t, profiles[i].snapshot, false)
 			}
 			if admissionErr != nil {
-				result.Skipped++
-				if result.SkipReasons == nil {
-					result.SkipReasons = map[string]int{}
-				}
-				result.SkipReasons[scrubError(admissionErr)]++
+				result.skipManaged(t, admissionErr)
 				continue
 			}
 		}
-		if !eligibleForScope(t) {
-			result.Skipped++
+		if !ruleSubjectEnabled(t) {
+			result.skip(t, runtimeSkip(t))
 			continue
 		}
-		cfg.Models = nil
-		for _, model := range base.Models {
-			if contains(t.Models, model) {
-				cfg.Models = append(cfg.Models, model)
-			}
+		var missing string
+		if managed == nil || !managed.Disabled {
+			missing = firstMissingModel(t, cfg.Models)
 		}
-		if len(cfg.Models) == 0 {
-			result.Skipped++
-			continue
-		}
-		if pending+len(ids) >= maxScopePending {
-			return ruleDispatch{}, fmt.Errorf("queue_full: all-enabled pending limit is %d; nothing was queued", maxScopePending)
-		}
-		f := Frozen{RunConfig: cfg, Question: q, RuleID: id, RuleRevision: rule.Revision, ScopeBatchID: batch, SubjectIndex: t.AuthIndex, Scheduled: scheduled, IdentityVersion: t.IdentityVersion, ComparisonIdentity: t.ComparisonIdentity, PayloadConfigVersion: t.PayloadConfigVersion}
-		f.ManagedProbe = managed
-		f.Fingerprint = fingerprint(f)
-		r := &Run{ID: ID(), CredentialEmail: t.Email, Status: "queued", Source: "scheduled_probe", CreatedAt: now, Config: f, Samples: []Sample{}, ActionStatus: "observe_only"}
-		ch.runs[r.ID] = r
-		ids = append(ids, r.ID)
+		matches = append(matches, match{t, cfg, managed, missing})
 	}
-	if len(ids) > 0 || rule.TargetScope == scopeAllCredentials {
-		next := cloneRule(rule)
-		sort.Strings(manualSkips)
-		if len(manualSkips) > 0 {
-			if result.SkipReasons == nil {
-				result.SkipReasons = map[string]int{}
-			}
-			result.SkipReasons["manual_disabled"] = len(manualSkips)
-		}
-		next.LastManualSkips = manualSkips
-		next.LastScopeBatch = ""
-		if len(ids) > 0 {
-			next.LastScopeBatch = batch
-		}
-		ch.rules[id] = next
-	}
-	if len(ids) > 0 {
+	workers := len(matches)
+	if workers > 0 {
 		en.compactQueueLocked()
-		if len(en.queue) >= cap(en.queue) {
-			return ruleDispatch{}, fmt.Errorf("queue_full: retry later; nothing was queued")
-		}
 	}
-	ch.audits = append(ch.audits, en.audit("scope_dispatched", id, "", "", fmt.Sprintf("匹配 %d 个凭证，跳过 %d 个", len(ids), result.Skipped)))
+	full := workers > 0 && (len(en.queue) >= cap(en.queue) || pending+workers > maxScopePending)
+	var ids []string
+	for _, m := range matches {
+		if full {
+			result.skip(m.target, queueSkip())
+			continue
+		}
+		run := newScopedRun(rule, m.target, m.config, q, batch, scheduled, now, m.snapshot)
+		if m.missing != "" {
+			queueCatalogRun(run, m.missing)
+		}
+		ch.runs[run.ID] = run
+		ids = append(ids, run.ID)
+	}
+	matched := len(ids)
+	skips := result.SkipDetails[:0]
+	for i := range result.SkipDetails {
+		detail := result.SkipDetails[i]
+		run := newScopedRun(rule, seen[detail.AuthID], base, q, batch, scheduled, now, nil)
+		markDispatchSkip(run, &detail, now)
+		if run.PreflightDetail != nil {
+			matched++
+			result.Skipped--
+		} else {
+			skips = append(skips, detail)
+		}
+		ch.runs[run.ID] = run
+	}
+	result.SkipDetails = skips
+	next := cloneRule(rule)
+	next.LastScopeDispatch = cloneScopeDispatch(&ScopeDispatchSummary{At: now, Matched: matched, Skipped: result.Skipped, Details: result.SkipDetails})
+	sort.Strings(manualSkips)
+	if len(manualSkips) > 0 {
+		if result.SkipReasons == nil {
+			result.SkipReasons = map[string]int{}
+		}
+		result.SkipReasons["manual_disabled"] = len(manualSkips)
+	}
+	next.LastManualSkips = manualSkips
+	next.LastScopeBatch = ""
+	if len(ch.runs) != 0 {
+		next.LastScopeBatch, result.BatchID = batch, batch
+	}
+	ch.rules[id] = next
+	ch.audits = append(ch.audits, en.audit("scope_dispatched", id, "", "", fmt.Sprintf("匹配 %d 个凭证，跳过 %d 个", matched, result.Skipped)))
+	if err := ctx.Err(); err != nil {
+		return ruleDispatch{}, err
+	}
 	if err = en.commitLocked(ch); err != nil {
 		return ruleDispatch{}, err
 	}
@@ -230,11 +268,15 @@ func (en *Engine) dispatchWithInventory(ctx context.Context, id string, revision
 		en.roundRemaining[batch] = len(ids)
 		en.queue <- batch
 		en.notifyWorkersLocked()
-		result.BatchID = batch
 	} else {
 		en.noteRoundEndLocked(id)
 	}
-	result.Count = len(ids)
+	if result.Skipped > 0 && rule.MaxResults > 0 {
+		if err := en.pruneResultCountsLocked(id, ""); err != nil {
+			en.persistFailure(err)
+		}
+	}
+	result.Count = matched
 	return result, nil
 }
 
@@ -244,9 +286,6 @@ func (en *Engine) checkScopeLocked(rule *Rule, scheduled bool) error {
 	}
 	if (rule.Action != "observe_only" && !managedRule(rule)) || rule.AutomaticPause || en.Capabilities().QualityPause {
 		return unsupportedQuality()
-	}
-	if managedRule(rule) && !en.Capabilities().ManagementSession {
-		return fmt.Errorf("management_session_required: reconnect the authenticated plugin panel")
 	}
 	if !rule.Enabled || ruleStatus(rule) != "detecting" || scheduled && !en.timerAllowed(rule) {
 		return fmt.Errorf("blocked: rule or scheduling is stopped")
@@ -272,12 +311,22 @@ func (en *Engine) readScopeProfiles(ctx context.Context, rule *Rule, targets []T
 	var wg sync.WaitGroup
 	for i, t := range targets {
 		if !supported || t.QualityPaused || t.RetainedPause {
-			profiles[i].err = fmt.Errorf("blocked: credential unavailable for managed probes")
+			profiles[i].err = rejectScope("blocked: credential unavailable for managed probes", "management_unavailable", "宿主不支持凭证管理探测。")
 			continue
 		}
 		d := owned[t.AuthID]
-		if !eligibleForScope(t) && !(t.RuntimeStatus == "disabled" && canRecoverDisabled(rule, d)) {
-			profiles[i].err = fmt.Errorf("blocked: credential is disabled or unavailable")
+		if errorPolicyDisabled(d).Code != "" {
+			continue
+		}
+		if !ruleSubjectEnabled(t) && !(t.RuntimeStatus == "disabled" && canRecoverDisabled(rule, d)) {
+			detail := runtimeSkip(t)
+			if t.RuntimeStatus == "disabled" {
+				detail = recoveryDenied(rule, d)
+			}
+			profiles[i].err = &scopeRejection{"blocked: credential is disabled or unavailable", detail}
+			continue
+		}
+		if activeDisposition(d) && d.State != "disabled" {
 			continue
 		}
 		select {
@@ -288,6 +337,16 @@ func (en *Engine) readScopeProfiles(ctx context.Context, rule *Rule, targets []T
 		}
 		wg.Go(func() {
 			defer func() { <-en.snapshotSlots }()
+			// A different worker may finish a credential action while this
+			// profile is waiting for its shared read slot.
+			en.mu.Lock()
+			live := en.managed[t.AuthID]
+			changed := live != d || errorPolicyDisabled(live).Code != ""
+			en.mu.Unlock()
+			if changed {
+				profiles[i].err = rejectScope("blocked: credential ownership changed during scan", "ownership_changed", "等待读取期间凭证处置归属已变更。")
+				return
+			}
 			profiles[i].snapshot, profiles[i].err = host.CredentialSnapshot(ctx, t.AuthID, t.AuthIndex)
 		})
 	}

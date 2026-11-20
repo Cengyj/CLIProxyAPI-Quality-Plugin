@@ -6,8 +6,13 @@ import (
 )
 
 func (en *Engine) Metrics() (map[string]any, error) {
+	return en.metrics(false)
+}
+
+func (en *Engine) metrics(summary bool) (map[string]any, error) {
 	en.mu.Lock()
-	correct, incorrect, unknown, planned := 0, 0, 0, 0
+	correct, incorrect, unknown := 0, 0, 0
+	covered, planned, unlocatedPruned := 0, 0, 0
 	errors := map[string]int{}
 	latencies := []int64{}
 	ttfts := []int64{}
@@ -15,7 +20,13 @@ func (en *Engine) Metrics() (map[string]any, error) {
 	judgeUnknown, controlUnknown := 0, 0
 	unknownUsage := 0
 	for _, r := range en.runs {
-		planned += max(0, len(r.Config.Models)*r.Config.Samples-r.PrunedSamples)
+		if r.PreflightDetail != nil || r.SkipDetail != nil || r.Status == "skipped" {
+			continue
+		}
+		runCovered, runPlanned := retainedCoverage(r)
+		covered += runCovered
+		planned += runPlanned
+		unlocatedPruned += max(0, r.PrunedSamples-len(r.PrunedSlots))
 		for _, s := range r.Controls {
 			if s.Usage != nil {
 				controlTokens += s.Usage.Total
@@ -38,9 +49,14 @@ func (en *Engine) Metrics() (map[string]any, error) {
 					judgeUnknown++
 				}
 			}
-			latencies = append(latencies, s.TotalMS)
-			if s.TTFTMS != nil {
-				ttfts = append(ttfts, *s.TTFTMS)
+			if !summary {
+				latencies = append(latencies, s.TotalMS)
+				if s.TTFTMS != nil {
+					ttfts = append(ttfts, *s.TTFTMS)
+				}
+				if s.ExecutionStatus != "completed" {
+					errors[s.ExecutionStatus]++
+				}
 			}
 			switch s.QualityVerdict {
 			case "correct":
@@ -49,9 +65,6 @@ func (en *Engine) Metrics() (map[string]any, error) {
 				incorrect++
 			default:
 				unknown++
-			}
-			if s.ExecutionStatus != "completed" {
-				errors[s.ExecutionStatus]++
 			}
 			if s.Usage != nil {
 				knownTokens += s.Usage.Total
@@ -65,10 +78,18 @@ func (en *Engine) Metrics() (map[string]any, error) {
 		rate = float64(correct) / float64(correct+incorrect)
 	}
 	if planned > 0 {
-		coverage = float64(correct+incorrect) / float64(planned)
+		coverage = float64(covered) / float64(planned)
 	}
 	budget := en.budget
 	en.mu.Unlock()
+	result := map[string]any{
+		"correct": correct, "incorrect": incorrect, "unknown": unknown, "planned": planned, "covered": covered,
+		"quality_pass_rate": rate, "coverage": coverage, "known_tokens": knownTokens + judgeTokens + controlTokens,
+		"unknown_usage": unknownUsage, "dropped_usage_events": en.dropped.Load(), "unlocated_pruned_samples": unlocatedPruned,
+	}
+	if summary {
+		return result, nil
+	}
 	sources := map[string]map[string]int64{}
 	err := en.store.All("usage", func(raw []byte) error {
 		var event UsageEvent
@@ -95,7 +116,59 @@ func (en *Engine) Metrics() (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unavailable: read usage metrics: %w", err)
 	}
-	return map[string]any{"latency_ms": percentiles(latencies), "ttft_ms": percentiles(ttfts), "traffic_sources": sources, "correct": correct, "incorrect": incorrect, "unknown": unknown, "planned": planned, "quality_pass_rate": rate, "coverage": coverage, "known_tokens": knownTokens + judgeTokens + controlTokens, "subject_known_tokens": knownTokens, "judge_known_tokens": judgeTokens, "control_known_tokens": controlTokens, "judge_unknown_usage": judgeUnknown, "control_unknown_usage": controlUnknown, "unknown_usage": unknownUsage, "error_types": errors, "budget": budget, "dropped_usage_events": en.dropped.Load(), "usage_semantics": "execution attempts, not inbound requests"}, nil
+	result["latency_ms"] = percentiles(latencies)
+	result["ttft_ms"] = percentiles(ttfts)
+	result["traffic_sources"] = sources
+	result["subject_known_tokens"] = knownTokens
+	result["judge_known_tokens"] = judgeTokens
+	result["control_known_tokens"] = controlTokens
+	result["judge_unknown_usage"] = judgeUnknown
+	result["control_unknown_usage"] = controlUnknown
+	result["error_types"] = errors
+	result["budget"] = budget
+	result["usage_semantics"] = "execution attempts, not inbound requests"
+	return result, nil
+}
+
+// Coverage counts positions in the frozen plan. A retained duplicate can still
+// occupy a pruned position. Older count-only trims cannot identify a position
+// to remove from the denominator, so their coverage is a lower bound.
+func retainedCoverage(r *Run) (covered, planned int) {
+	if r.Config.Samples <= 0 {
+		return 0, 0
+	}
+	models := map[string]bool{}
+	for _, model := range r.Config.Models {
+		if model != "" {
+			models[model] = true
+		}
+	}
+	planned = len(models) * r.Config.Samples
+	seen := map[SampleSlot]bool{}
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		if !models[s.Model] || s.Index < 0 || s.Index >= r.Config.Samples {
+			continue
+		}
+		slot := SampleSlot{Model: s.Model, Index: s.Index}
+		judged := s.ExecutionStatus == "completed" && s.Error == "" && (s.QualityVerdict == "correct" || s.QualityVerdict == "incorrect")
+		seen[slot] = seen[slot] || judged
+	}
+	for _, judged := range seen {
+		if judged {
+			covered++
+		}
+	}
+	for _, slot := range r.PrunedSlots {
+		if !models[slot.Model] || slot.Index < 0 || slot.Index >= r.Config.Samples {
+			continue
+		}
+		if _, occupied := seen[slot]; !occupied {
+			planned--
+			seen[slot] = false
+		}
+	}
+	return covered, planned
 }
 
 func percentiles(values []int64) any {

@@ -2,11 +2,52 @@ package quality
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strconv"
+	"os"
 
 	bolt "go.etcd.io/bbolt"
 )
+
+type runReceipt struct{ ID, Hash string }
+
+// The receipt is committed with the run. A surviving receipt also prevents
+// replay after history retention or an administrator removes the run.
+func (en *Engine) submittedRunLocked(key, requestHash string) (*Run, error) {
+	if key == "" {
+		return nil, nil
+	}
+	var receipt runReceipt
+	if err := en.store.Get("idempotency", key, &receipt); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("unavailable: read submission receipt: %w", err)
+	}
+	if requestHash != "" && requestHash != receipt.Hash {
+		return nil, fmt.Errorf("conflict: idempotency key reused with different input")
+	}
+	if r := en.runs[receipt.ID]; r != nil {
+		return r, nil
+	}
+	return nil, fmt.Errorf("gone: idempotent run was removed")
+}
+
+func (en *Engine) runByReceipt(key string) (*Run, error) {
+	if len(key) > 128 {
+		return nil, fmt.Errorf("invalid_request: idempotency key too long")
+	}
+	en.mu.Lock()
+	defer en.mu.Unlock()
+	r, err := en.submittedRunLocked(key, "")
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, fmt.Errorf("not_found: submission receipt")
+	}
+	return runForDisplay(r), nil
+}
 
 func (en *Engine) validateManual(c *RunConfig) error {
 	if len(c.Models) > maxManualModels {
@@ -133,17 +174,15 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 		return nil, validationErr
 	}
 	requestHash := fingerprint(c)
-	if c.IdempotencyKey != "" {
-		var prior struct{ ID, Hash string }
-		if e := en.store.Get("idempotency", c.IdempotencyKey, &prior); e == nil {
-			if prior.Hash != requestHash {
-				return nil, fmt.Errorf("conflict: idempotency key reused with different input")
-			}
-			if r := en.runs[prior.ID]; r != nil {
-				return cloneRun(r), nil
-			}
-			return nil, fmt.Errorf("gone: idempotent run was removed")
-		}
+	prior, err := en.submittedRunLocked(c.IdempotencyKey, requestHash)
+	if err != nil {
+		return nil, err
+	}
+	if prior != nil {
+		return cloneRun(prior), nil
+	}
+	if en.terminalDependencyLocked(c) {
+		return nil, fmt.Errorf("blocked: credential already disabled by error policy")
 	}
 	if err := en.storageAdmission(); err != nil {
 		return nil, err
@@ -151,57 +190,102 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 	if len(en.queue) >= cap(en.queue) {
 		en.compactQueueLocked()
 	}
-	if len(en.queue) >= cap(en.queue) {
+	queueFull := len(en.queue) >= cap(en.queue)
+	if queueFull && (rule == nil || en.Capabilities().QualityPause) {
 		return nil, fmt.Errorf("queue_full: retry later")
 	}
-	targets, e := inventory(ctx)
+	targets, e := inventory(en.inventoryContextLocked(ctx))
 	if e != nil {
 		return nil, fmt.Errorf("host targets unavailable: %w", e)
 	}
-	if d := en.managed[c.AuthID]; d != nil && d.RuleID == ruleID {
-		found := false
-		for _, t := range targets {
-			if t.AuthID == c.AuthID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			en.noteRoundEndLocked(ruleID)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	subject := Target{AuthID: c.AuthID, Provider: c.Provider}
+	subjectIndex := -1
+	for i, t := range targets {
+		if t.AuthID == c.AuthID {
+			subject, subjectIndex = t, i
+			break
 		}
 	}
 	var managed *CredentialSnapshot
-	targets, managed, e = en.managedTargetsLocked(ctx, rule, targets)
+	plan := rule
+	reject := func(cause error, detail ScopeSkipDetail) (*Run, error) {
+		if rule == nil || en.Capabilities().QualityPause {
+			return nil, cause
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := en.mutableLocked(); err != nil {
+			return nil, err
+		}
+		q, err := freezeDispatchQuestion(&c)
+		if err != nil {
+			return nil, err
+		}
+		run := newScopedRun(plan, subject, c, q, ID(), scheduledRevision != 0, en.now(), nil)
+		markDispatchSkip(run, &detail, run.CreatedAt)
+		return en.recordFixedAdmissionLocked(rule, run)
+	}
+	if d := en.managed[c.AuthID]; d != nil && d.RuleID == ruleID && subjectIndex < 0 {
+		en.noteRoundEndLocked(ruleID)
+	}
+	if rule != nil && subject.identityConflict {
+		return reject(fmt.Errorf("blocked: credential identity conflict"), ScopeSkipDetail{Code: "identity_conflict", Reason: "CPA 返回的凭证或模型目录标识互相冲突。"})
+	}
+	if rule != nil && activeDisposition(en.managed[c.AuthID]) && en.managed[c.AuthID].State != "disabled" {
+		return reject(fmt.Errorf("blocked: unresolved credential handling"), ScopeSkipDetail{Code: "handling_blocked", Reason: "上次凭证处置尚待核对。"})
+	}
+	if managedRule(rule) && subjectIndex >= 0 && !en.Capabilities().ManagementSession {
+		return reject(fmt.Errorf("management_session_required: reconnect the authenticated plugin panel"), sessionSkip())
+	}
+	targets, managed, e = en.managedTargetsLocked(ctx, rule, targets, false)
 	if e != nil {
-		return nil, e
+		var rejected *scopeRejection
+		if errors.As(e, &rejected) {
+			return reject(e, rejected.detail)
+		}
+		switch {
+		case subjectIndex < 0:
+			return reject(e, missingCredentialSkip())
+		case subject.QualityPaused || subject.RetainedPause || en.localPause(c) != "":
+			return reject(e, ScopeSkipDetail{Code: "quality_paused", Reason: "凭证仍受质量暂停保护，禁止检测。"})
+		default:
+			return reject(e, ScopeSkipDetail{Code: "snapshot_unavailable", Reason: "无法从 CPA 核对本轮凭证快照。"})
+		}
 	}
 	if paused := pausedTarget(c, targets); paused != "" {
+		plan = cloneRule(rule)
 		if err := en.haltCredentialLocked(paused, "", "quality_paused"); err != nil {
 			return nil, err
 		}
 	}
-	if err := en.checkTargetsLocked(c, targets); err != nil {
-		return nil, err
-	}
-	var target *Target
-	for i := range targets {
-		if targets[i].AuthID == c.AuthID {
-			target = &targets[i]
-			break
+	if err := en.checkTargetsForRunLocked(c, targets, rule != nil && !en.Capabilities().QualityPause); err != nil {
+		switch {
+		case en.localPause(c) != "" || pausedTarget(c, targets) != "":
+			return reject(err, ScopeSkipDetail{Code: "quality_paused", Reason: "规则所需凭证仍受质量暂停保护，禁止检测。"})
+		case subjectIndex < 0:
+			return reject(err, missingCredentialSkip())
+		case subject.ManualDisabled || subject.RuntimeStatus == "disabled":
+			return reject(err, ScopeSkipDetail{Code: "manual_disabled", Reason: "凭证由管理员停用，当前规则无权复检。"})
+		case !subject.EffectiveAvailable:
+			return reject(err, runtimeSkip(subject))
+		default:
+			return reject(err, ScopeSkipDetail{Code: "dependency_unavailable", Reason: "规则所需的对照或判题凭证不可用。"})
 		}
 	}
-	if target == nil {
-		return nil, fmt.Errorf("blocked: credential missing")
-	}
+	target := &targets[subjectIndex]
 	if target.Provider != c.Provider {
-		return nil, fmt.Errorf("provider mismatch")
+		return reject(fmt.Errorf("provider mismatch"), ScopeSkipDetail{Code: "provider_mismatch", Reason: "当前凭证提供方与规则保存的提供方不一致。"})
 	}
 	if target.ManualDisabled {
-		return nil, fmt.Errorf("blocked: operator disabled")
+		return reject(fmt.Errorf("blocked: operator disabled"), ScopeSkipDetail{Code: "manual_disabled", Reason: "凭证由管理员停用，当前规则无权复检。"})
 	}
 	for _, m := range c.Models {
-		if !contains(target.Models, m) {
-			return nil, fmt.Errorf("model not available for target: %s", m)
+		if (rule == nil || en.Capabilities().QualityPause) && !contains(target.Models, m) {
+			return reject(fmt.Errorf("model not available for target: %s", m), modelCatalogSkip(*target, m, "凭证没有注册该选定模型。"))
 		}
 	}
 	var judge *Target
@@ -213,10 +297,10 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 			}
 		}
 		if judge == nil || judge.Provider != c.Judge.Provider || !judge.EffectiveAvailable || !contains(judge.Models, c.Judge.Model) {
-			return nil, fmt.Errorf("blocked: judge target unavailable")
+			return reject(fmt.Errorf("blocked: judge target unavailable"), ScopeSkipDetail{Code: "judge_unavailable", Reason: "判题凭证无法运行规则选定的判题模型。"})
 		}
 		if target.ComparisonIdentity == "" || judge.ComparisonIdentity == "" || target.ComparisonIdentity == judge.ComparisonIdentity {
-			return nil, fmt.Errorf("blocked: independent judge identity cannot be established")
+			return reject(fmt.Errorf("blocked: independent judge identity cannot be established"), ScopeSkipDetail{Code: "judge_identity", Reason: "无法核实判题凭证与被测凭证相互独立。"})
 		}
 	}
 	var control *Target
@@ -228,25 +312,21 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 			}
 		}
 		if control == nil || control.Provider != c.ControlProvider || !control.EffectiveAvailable {
-			return nil, fmt.Errorf("blocked: control target unavailable")
+			return reject(fmt.Errorf("blocked: control target unavailable"), ScopeSkipDetail{Code: "control_unavailable", Reason: "规则指定的对照凭证不可用。"})
 		}
 		if target.ComparisonIdentity == "" || control.ComparisonIdentity == "" || target.ComparisonIdentity == control.ComparisonIdentity {
-			return nil, fmt.Errorf("blocked: independent control identity cannot be established")
+			return reject(fmt.Errorf("blocked: independent control identity cannot be established"), ScopeSkipDetail{Code: "control_identity", Reason: "无法核实对照凭证与被测凭证相互独立。"})
 		}
 		for _, m := range c.Models {
 			if !contains(control.Models, m) {
-				return nil, fmt.Errorf("control model unavailable")
+				return reject(fmt.Errorf("control model unavailable"), ScopeSkipDetail{Code: "control_model_unavailable", Model: m, Reason: "对照凭证没有注册该选定模型。"})
 			}
 		}
 	}
-	if c.QuestionID == "random-linear" && c.Seed == 0 {
-		seed, err := strconv.ParseInt(ID()[:15], 16, 64)
-		if err != nil {
-			return nil, err
-		}
-		c.Seed = seed
+	if queueFull {
+		return reject(fmt.Errorf("queue_full: retry later"), queueSkip())
 	}
-	q, e := FreezeQuestion(c)
+	q, e := freezeDispatchQuestion(&c)
 	if e != nil {
 		return nil, e
 	}
@@ -259,6 +339,7 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 		r.Config.Scheduled = scheduledRevision != 0
 		r.ActionStatus = "observe_only"
 		r.Config.ManagedProbe = managed
+		r.Config.UpstreamErrorActions = rule.UpstreamErrorActions
 	}
 	r.CredentialEmail = target.Email
 	if judge != nil {
@@ -270,12 +351,20 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 		r.Config.BatchID = ID()
 	}
 	r.Config.Fingerprint = fingerprint(r.Config)
+	if rule != nil && !en.Capabilities().QualityPause {
+		if managed == nil || !managed.Disabled {
+			if model := firstMissingModel(*target, c.Models); model != "" {
+				queueCatalogRun(r, model)
+			}
+		}
+		return en.recordFixedAdmissionLocked(rule, r)
+	}
 	if e = en.store.Write(func(tx *bolt.Tx) error {
 		if e := put(tx, "runs", r.ID, r); e != nil {
 			return e
 		}
 		if c.IdempotencyKey != "" {
-			return put(tx, "idempotency", c.IdempotencyKey, struct{ ID, Hash string }{r.ID, requestHash})
+			return put(tx, "idempotency", c.IdempotencyKey, runReceipt{r.ID, requestHash})
 		}
 		return nil
 	}); e != nil {

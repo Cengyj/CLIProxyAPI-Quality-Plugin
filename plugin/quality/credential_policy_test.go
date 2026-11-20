@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,11 +25,13 @@ type managementFixture struct {
 	fileStatus     int
 	incomplete     bool
 	upstreamStatus int
+	upstreamBody   string
 	patches        []bool
 	deletes        int
 	probes         int
 	disabledProbes int
 	nativeCalls    int
+	targetReads    int
 	host           *NativeHost
 	engine         *Engine
 }
@@ -91,6 +92,9 @@ func managementTestFixture(t *testing.T) *managementFixture {
 			bodyText := "data: " + string(raw) + "\n\n"
 			if f.incomplete {
 				bodyText = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"4\"}\n\n"
+			}
+			if f.upstreamBody != "" {
+				bodyText = f.upstreamBody
 			}
 			write(map[string]any{"status_code": status, "body": bodyText})
 		case "GET /v8/management/credentials/download":
@@ -171,6 +175,9 @@ func managementTestFixture(t *testing.T) *managementFixture {
 			return json.Unmarshal(raw, out)
 		case "host.auth.models":
 			req := in.(pluginapi.HostAuthModelsRequest)
+			if req.AuthIndex != "" {
+				f.targetReads++
+			}
 			var rows []pluginapi.HostAuthModels
 			for _, a := range f.entries {
 				if req.AuthIndex != "" && req.AuthIndex != a.AuthIndex {
@@ -185,6 +192,7 @@ func managementTestFixture(t *testing.T) *managementFixture {
 			out.(*pluginapi.HostAuthModelsResponse).Credentials = rows
 			return nil
 		case "host.auth.get_runtime":
+			f.targetReads++
 			a, ok := f.entries[in.(pluginapi.HostAuthGetRequest).AuthIndex]
 			if !ok {
 				return fmt.Errorf("missing")
@@ -192,6 +200,7 @@ func managementTestFixture(t *testing.T) *managementFixture {
 			out.(*pluginapi.HostAuthGetRuntimeResponse).Auth = a
 			return nil
 		case "host.auth.get":
+			f.targetReads++
 			a, ok := f.entries[in.(pluginapi.HostAuthGetRequest).AuthIndex]
 			if !ok {
 				return fmt.Errorf("missing")
@@ -295,7 +304,7 @@ func TestManagedPauseAndWholeRoundRestoreWithoutGlobalEnable(t *testing.T) {
 				t.Fatal("management evidence impersonated host business evidence")
 			}
 			runs, err = f.round(t, r)
-			if err != nil || runs[0].ActionStatus != "credential_suspended" || len(f.patches) != 1 {
+			if err != nil || runs[0].ActionStatus != "credential_kept_disabled" || len(f.patches) != 1 {
 				t.Fatal("partly correct round restored credential", runs, err)
 			}
 			f.answers["a"] = "4"
@@ -343,6 +352,52 @@ func TestManagedPolicyDoesNotTreatErrorsOrIncompleteResultsAsWrong(t *testing.T)
 	}
 }
 
+func TestManagedResponsesRequireTextEvidence(t *testing.T) {
+	// A malformed part must invalidate the entire answer even if another part
+	// supplies a strictly judgeable integer.
+	for _, tc := range []struct{ name, model, content string }{
+		{"number", `"b"`, `[{"type":"output_text","text":5}]`},
+		{"null", `"b"`, `[{"type":"output_text","text":null},{"type":"output_text","text":"5"}]`},
+		{"absent", `"b"`, `[{"type":"output_text"},{"type":"output_text","text":"5"}]`},
+		{"object_content", `"b"`, `{"type":"output_text","text":"5"}`},
+		{"number_model", "123", `[{"type":"output_text","text":"5"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`data: {"type":"response.completed","response":{"status":"completed","model":%s,"output":[{"type":"message","status":"completed","content":%s}]}}`, tc.model, tc.content)
+			if _, _, _, err := parseManagedResponses(body); err == nil {
+				t.Fatal("malformed answer accepted as management probe evidence")
+			}
+		})
+	}
+}
+
+func TestManagedResponsesSelectOneFinalAssistantAnswer(t *testing.T) {
+	const legacy = `{"type":"message","status":"completed","content":[{"type":"output_text","text":"4"}]}`
+	message := func(fields string, text string) string {
+		return fmt.Sprintf(`{"type":"message","status":"completed",%s,"content":[{"type":"output_text","text":%q}]}`, fields, text)
+	}
+	progress := message(`"role":"assistant","phase":"commentary"`, "5")
+	final := message(`"role":"assistant","phase":"final_answer"`, "4")
+	for _, tc := range []struct{ name, items, want string }{
+		{"legacy", legacy, "4"},
+		{"legacy null phase", message(`"role":"assistant","phase":null`, "4"), "4"},
+		{"commentary before final", progress + "," + final, "4"},
+		{"commentary only", progress, ""},
+		{"multiple unphased messages", legacy + "," + legacy, ""},
+		{"additional message after final", final + "," + progress, ""},
+		{"input role", message(`"role":"user"`, "4"), ""},
+		{"unknown phase", message(`"phase":"other"`, "4"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`data: {"type":"response.completed","response":{"status":"completed","model":"model-a","output":[%s]}}`, tc.items)
+			got, _, _, err := parseManagedResponses(body)
+			if got != tc.want || (err != nil) != (tc.want == "") {
+				t.Fatalf("answer %q, error %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestManagedRecoveryRejectsManualInterferenceAndReplacement(t *testing.T) {
 	for _, mode := range []string{"operator-disable", "replacement", "recovery-off", "rule-stopped"} {
 		t.Run(mode, func(t *testing.T) {
@@ -374,8 +429,20 @@ func TestManagedRecoveryRejectsManualInterferenceAndReplacement(t *testing.T) {
 				}
 			}
 			before := f.probes
-			if _, err := f.round(t, r); err == nil {
-				t.Fatal("blocked recovery was admitted")
+			receipt, err := f.engine.dispatchRule(context.Background(), r.ID, f.engine.rules[r.ID].Revision, false)
+			if mode == "rule-stopped" {
+				if err == nil || receipt.BatchID != "" || len(f.engine.runs) != 1 {
+					t.Fatal("stopped rule produced another round", receipt, err)
+				}
+			} else {
+				want := "snapshot_changed"
+				if mode == "recovery-off" {
+					want = "recovery_disabled"
+				}
+				if err != nil || receipt.Count != 0 || receipt.Skipped != 1 || len(receipt.SkipDetails) != 1 || receipt.SkipDetails[0].Code != want ||
+					receipt.RunID == "" || receipt.SkipDetails[0].RunID != receipt.RunID || f.engine.runs[receipt.RunID].Status != "skipped" || len(f.engine.queue) != 0 {
+					t.Fatal("recovery refusal missing from history", receipt, err)
+				}
 			}
 			if f.probes != before || len(f.patches) != 1 || !f.entries["one"].Disabled {
 				t.Fatal("interference caused a restore")
@@ -387,6 +454,11 @@ func TestManagedRecoveryRejectsManualInterferenceAndReplacement(t *testing.T) {
 func TestManagedUncertainWriteIsDurableAndNeverReplayed(t *testing.T) {
 	f := managementTestFixture(t)
 	r := f.rule(t, disableCredential, true, true)
+	r.Samples = 2
+	r, err := f.engine.SaveRule(context.Background(), *r, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.answers["a"] = "5"
 	f.statusFailure = true
 	runs, err := f.round(t, r)
@@ -395,16 +467,25 @@ func TestManagedUncertainWriteIsDurableAndNeverReplayed(t *testing.T) {
 	}
 	f.statusFailure = false
 	f.answers["a"] = "4"
-	if err := f.engine.loadDispositions(); err != nil {
+	if err := f.engine.Close(); err != nil {
 		t.Fatal(err)
 	}
+	f.engine, err = New(f.engine.cfg, f.host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := f.engine.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	for range 3 {
-		runs, err = f.round(t, r)
-		if err != nil || len(runs) != 0 {
-			t.Fatal(runs, err)
+		receipt, err := f.engine.dispatchRule(context.Background(), r.ID, r.Revision, false)
+		if err != nil || receipt.Count != 1 || receipt.Skipped != 0 || len(f.engine.queue) != 0 {
+			t.Fatal(receipt, err)
 		}
 	}
-	if len(f.patches) != 1 || f.probes != 2 || f.engine.managed["one"].State != "attention" {
+	if len(f.patches) != 1 || f.probes != 4 || !f.entries["one"].Disabled || f.engine.managed["one"].State != "attention" {
 		t.Fatal("uncertain mutation was replayed")
 	}
 	if _, err := f.engine.PrepareCredentialLogin(context.Background(), CredentialLoginPrepareRequest{AuthID: "one", PreparationID: "new-login"}); err == nil {
@@ -475,11 +556,7 @@ func TestAllCredentialsRestoresManualAndOwnedDisablesOnlyAfterFullPass(t *testin
 		t.Fatal(partial, err)
 	}
 	for _, run := range partial {
-		want := "credential_suspended"
-		if run.Config.AuthID == "operator" {
-			want = "credential_kept_disabled"
-		}
-		if run.ActionStatus != want {
+		if run.ActionStatus != "credential_kept_disabled" {
 			t.Fatal(run.Config.AuthID, run.ActionStatus)
 		}
 	}
@@ -560,7 +637,7 @@ func TestAllEnabledCronKeepsTestingAfterLastCredentialSuspended(t *testing.T) {
 	}
 	for _, step := range []struct{ a, b, action string }{
 		{"5", "5", "credential_suspended"},
-		{"4", "5", "credential_suspended"},
+		{"4", "5", "credential_kept_disabled"},
 		{"4", "4", "credential_restored"},
 		{"4", "4", "observe_only"},
 	} {
@@ -707,8 +784,14 @@ func TestManagementSessionAndURLBoundaries(t *testing.T) {
 	f := managementTestFixture(t)
 	r := f.rule(t, disableCredential, true, true)
 	f.host.Management.key = ""
-	if _, err := f.round(t, r); err == nil || !strings.Contains(err.Error(), "management_session_required") {
-		t.Fatal(err)
+	receipt, err := f.engine.dispatchRule(context.Background(), r.ID, r.Revision, false)
+	if err != nil || receipt.Count != 1 || receipt.Skipped != 0 || len(f.engine.runs) != 1 {
+		t.Fatal(receipt, err)
+	}
+	for _, run := range f.engine.runs {
+		if run.Status != "blocked" || run.PreflightDetail == nil || run.PreflightDetail.Code != "management_session_required" {
+			t.Fatal(run)
+		}
 	}
 	if f.probes != 0 || len(f.patches) != 0 {
 		t.Fatal("missing session used ambient authority")
@@ -741,6 +824,108 @@ func TestManagedManualEvaluationAndMissingSamplesNeverMutate(t *testing.T) {
 	run.Samples = run.Samples[:1]
 	if got := managedRoundVerdict(run); got != "unknown" {
 		t.Fatal("missing sample accepted", got)
+	}
+}
+
+func TestManagedInvalidSampleSetsNeverWrite(t *testing.T) {
+	for _, action := range []string{disableCredential, deleteCredential} {
+		t.Run(action, func(t *testing.T) {
+			f := managementTestFixture(t)
+			r := f.rule(t, action, false, false)
+			r.Samples = 2
+			r, err := f.engine.SaveRule(context.Background(), *r, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			good, err := f.round(t, r)
+			if err != nil || len(good) != 1 || len(good[0].Samples) != 4 {
+				t.Fatal(good, err)
+			}
+			for _, cause := range []string{"missing", "duplicate", "cancelled"} {
+				t.Run(cause, func(t *testing.T) {
+					run := cloneRun(good[0])
+					run.ID = ID()
+					run.Samples[0].Output, run.Samples[0].QualityVerdict = "5", "incorrect"
+					switch cause {
+					case "missing":
+						run.Samples = run.Samples[:3]
+					case "duplicate":
+						run.Samples[3] = run.Samples[2]
+					case "cancelled":
+						run.Status = "cancelled"
+					}
+					f.engine.decideLocked(run)
+					if f.engine.runs[run.ID].ActionStatus != "insufficient_evidence" ||
+						len(f.patches) != 0 || f.deletes != 0 || f.entries["one"].Disabled {
+						t.Fatal("invalid round produced an action", f.engine.runs[run.ID].ActionStatus, f.patches, f.deletes)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestManualDisabledRecoveryCannotBorrowAnotherRulesAuthority(t *testing.T) {
+	f := managementTestFixture(t)
+	ctx := context.Background()
+	var restricted []*Rule
+	for _, tc := range []struct {
+		scope, action string
+		restore       bool
+	}{
+		{"single", disableCredential, true},
+		{scopeAll, disableCredential, true},
+		{scopeAllCredentials, disableCredential, false},
+		{scopeAllCredentials, "observe_only", false},
+		{scopeAllCredentials, deleteCredential, false},
+	} {
+		r := f.rule(t, tc.action, tc.scope != "single", tc.restore)
+		r.Samples, r.TargetScope = 2, tc.scope
+		saved, err := f.engine.SaveRule(ctx, *r, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restricted = append(restricted, saved)
+	}
+	authorized := f.rule(t, disableCredential, true, true)
+	authorized.Samples, authorized.TargetScope = 2, scopeAllCredentials
+	authorized, err := f.engine.SaveRule(ctx, *authorized, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := f.entries["one"]
+	entry.Disabled, entry.Status = true, "disabled"
+	f.entries["one"] = entry
+	for _, r := range restricted {
+		receipt, err := f.engine.dispatchRule(ctx, r.ID, r.Revision, false)
+		if err != nil || receipt.Count != 0 || len(f.engine.queue) != 0 {
+			t.Fatal("operator-disabled credential entered an unapproved rule", r.Action, r.TargetScope, receipt, err)
+		}
+		if r.TargetScope == scopeAll {
+			if receipt.Skipped != 0 || receipt.BatchID != "" {
+				t.Fatal("all-enabled rule included an operator-disabled credential", receipt)
+			}
+		} else if receipt.Skipped != 1 || receipt.BatchID == "" || len(receipt.SkipDetails) != 1 || f.engine.runs[receipt.SkipDetails[0].RunID].Status != "skipped" {
+			t.Fatal("missing history for known disabled credential", receipt)
+		}
+	}
+	if f.probes != 0 || f.nativeCalls != 0 || f.deletes != 0 || len(f.patches) != 0 {
+		t.Fatal("restricted rule used a disabled credential")
+	}
+	restore, err := f.round(t, authorized)
+	if err != nil || len(restore) != 1 || restore[0].ActionStatus != "credential_restored" ||
+		f.disabledProbes != 4 || len(f.patches) != 1 || f.patches[0] {
+		t.Fatal("manual disable was not restored after all four checks", err, f.disabledProbes, f.patches)
+	}
+	f.answers["a"] = "5"
+	owner := restricted[1]
+	if runs, err := f.round(t, owner); err != nil || len(runs) != 1 || runs[0].ActionStatus != "credential_suspended" {
+		t.Fatal("could not establish a different rule's disposition", runs, err)
+	}
+	f.answers["a"] = "4"
+	if runs, err := f.round(t, authorized); err != nil || len(runs) != 0 || f.disabledProbes != 4 ||
+		f.engine.managed["one"].RuleID != owner.ID || !f.entries["one"].Disabled || len(f.patches) != 2 {
+		t.Fatal("all-credentials manual recovery overrode another rule's disposition", runs, err)
 	}
 }
 

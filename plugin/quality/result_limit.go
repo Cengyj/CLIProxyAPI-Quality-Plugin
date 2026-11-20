@@ -16,6 +16,13 @@ type historyClearResult struct {
 	Kept    int `json:"kept"`
 }
 
+// Confirmed actions keep their recovery snapshot independently of run history.
+// An outstanding write still needs its complete run and audit for reconciliation.
+func (en *Engine) handlingEvidenceLocked(run *Run) bool {
+	d := en.managed[run.Config.AuthID]
+	return en.active[run.ID] != nil || (activeDisposition(d) && d.State != "disabled" && d.State != "deleted" && d.RunID == run.ID)
+}
+
 func (en *Engine) clearRuleHistory() (historyClearResult, error) {
 	en.mu.Lock()
 	defer en.mu.Unlock()
@@ -29,7 +36,7 @@ func (en *Engine) clearRuleHistory() (historyClearResult, error) {
 			continue
 		}
 		r := en.rules[run.Config.RuleID]
-		if run.CompletedAt == nil || en.active[id] != nil || (r != nil && (r.ActionID != "" || r.BlockedAuthID != "")) {
+		if run.CompletedAt == nil || en.handlingEvidenceLocked(run) || (r != nil && (r.ActionID != "" || r.BlockedAuthID != "")) {
 			liveBatches[run.Config.ScopeBatchID] = true
 			result.Kept++
 			continue
@@ -39,7 +46,8 @@ func (en *Engine) clearRuleHistory() (historyClearResult, error) {
 	updates := map[string]*Rule{}
 	for id, r := range en.rules {
 		clearBatch := r.LastScopeBatch != "" && !liveBatches[r.LastScopeBatch]
-		if !drop[r.LastRun] && !clearBatch {
+		clearLinks := r.LastScopeDispatch != nil && slices.ContainsFunc(r.LastScopeDispatch.Details, func(d ScopeSkipDetail) bool { return drop[d.RunID] })
+		if !drop[r.LastRun] && !clearBatch && !clearLinks {
 			continue
 		}
 		n := cloneRule(r)
@@ -48,6 +56,13 @@ func (en *Engine) clearRuleHistory() (historyClearResult, error) {
 		}
 		if clearBatch {
 			n.LastScopeBatch = ""
+		}
+		if clearLinks {
+			for i, detail := range n.LastScopeDispatch.Details {
+				if drop[detail.RunID] {
+					n.LastScopeDispatch.Details[i].RunID = ""
+				}
+			}
 		}
 		updates[id] = n
 	}
@@ -145,7 +160,7 @@ func (en *Engine) pruneResultCountsLocked(ruleID, authID string) error {
 	type key struct{ rule, auth string }
 	groups := make(map[key][]*Run)
 	for _, r := range en.runs {
-		if r.Source != "scheduled_probe" || r.CompletedAt == nil || r.Status == "running" || r.Status == "queued" || (ruleID != "" && (r.Config.RuleID != ruleID || r.Config.AuthID != authID)) {
+		if r.Source != "scheduled_probe" || r.CompletedAt == nil || r.Status == "running" || r.Status == "queued" || (ruleID != "" && r.Config.RuleID != ruleID) || (authID != "" && r.Config.AuthID != authID) {
 			continue
 		}
 		rule := en.rules[r.Config.RuleID]
@@ -171,16 +186,25 @@ func (en *Engine) pruneResultCountsLocked(ruleID, authID string) error {
 			switch {
 			case remaining >= weight:
 				remaining -= weight
+			case en.handlingEvidenceLocked(r):
+				remaining = 0
 			case remaining == 0:
 				if rule.LastRun != r.ID {
 					drops = append(drops, r.ID)
 				}
 			default:
 				n := cloneRun(r)
-				n.PrunedSamples += weight - remaining
-				n.Samples = slices.Clone(n.Samples[weight-remaining:])
+				removed := weight - remaining
+				removedSamples := n.Samples[:removed]
+				for _, sample := range removedSamples {
+					n.PrunedSlots = append(n.PrunedSlots, SampleSlot{Model: sample.Model, Index: sample.Index})
+				}
+				n.PrunedSamples += removed
+				n.Samples = slices.Clone(n.Samples[removed:])
+				// Controls run first. An unreached subject can still have a diagnostic control answer.
 				n.Controls = slices.DeleteFunc(n.Controls, func(c Sample) bool {
-					return !slices.ContainsFunc(n.Samples, func(s Sample) bool { return s.Model == c.Model && s.Index == c.Index })
+					sameSlot := func(s Sample) bool { return s.Model == c.Model && s.Index == c.Index }
+					return slices.ContainsFunc(removedSamples, sameSlot) && !slices.ContainsFunc(n.Samples, sameSlot)
 				})
 				trims = append(trims, n)
 				remaining = 0

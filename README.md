@@ -1,0 +1,39 @@
+# CPA Credential Ops
+
+A native plugin for official [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) that combines account login, credential management, model evaluation, and scheduled quality operations.
+
+[中文说明](README_CN.md) · [Releases](https://github.com/Cengyj/cpa-credential-ops/releases) · [Credential policies](docs/QUALITY_CREDENTIAL_ACTIONS_CN.md) · [Error policies](docs/QUALITY_UPSTREAM_ERRORS_CN.md)
+
+## Features
+
+- OpenAI account management with an embedded Go/Sobek login runtime, 2FA login, credential conversion, and explicit account security actions.
+- Manual model tests with frozen questions, multiple answers, history, exports, and isolated HTML previews.
+- Scheduled credential checks with configurable scope and separate actions for wrong answers, HTTP 401/402, exhausted account quota, and unsupported models.
+- Durable operation records, bounded concurrency and storage, and explicit handling of uncertain credential writes.
+
+## Install or upgrade
+
+Version **0.29.36** includes UI **13.6.35** and the embedded login runtime **2.2.1**. The published Linux arm64 package is built and tested against unmodified official CPA **8.0.76**. Go native plugins must match the host's platform, toolchain, and dependency build; compatibility with a different CPA build is not assumed.
+
+1. Download the package and checksums from [the release page](https://github.com/Cengyj/cpa-credential-ops/releases/tag/v0.29.36).
+2. Back up the existing plugin and persistent data while CPA is stopped.
+3. Install the ZIP using CPA's plugin management, or replace the existing `model-quality.so` in the configured plugin directory and restart CPA.
+4. Refresh the authenticated management panel and open **CPA Credential Ops**. Opening the panel reestablishes the in-memory management session needed for scheduled credential operations.
+
+The display name and repository have changed. The native plugin ID, library filename, configuration key, API paths, and data directory remain `model-quality` so existing installations retain their accounts, rules, and history. Do not install a second copy under a different library filename.
+
+## Quality operation behavior
+
+Rule scope selects the credentials to inspect. An enabled credential's error state or cooldown does not exclude it from an authorized quality check. A verified model catalog can establish that a requested model is unsupported; otherwise the configured model is checked through the applicable execution channel. Historical status text alone is not sufficient evidence for an error action.
+
+After an error policy successfully disables a credential, that credential leaves subsequent quality operations. The plugin does not poll its state, retest it, repeat the action, or generate repeated skipped records. The original error and disposition remain available. Wrong-answer recovery is a separate opt-in policy.
+
+No account action or scheduled test is enabled merely by installing the plugin. Official CPA has no atomic conditional credential status/delete API; the plugin checks snapshots before and after writes and preserves uncertain outcomes without replaying them.
+
+## Development
+
+The plugin is an independent Go module under `plugin/`. The embedded login runtime is under `login-runtime-go/`. Host source is kept in a separate, verified checkout and is not modified. See [build and installation instructions](docs/INSTALL_CN.md) and [the CPA 8.0.76 build notes](docs/DOCKER_8_0_76_CN.md).
+
+Development verification uses synthetic credentials and fake upstreams. Local runtime data, credentials, databases, and generated artifacts are excluded from Git.
+
+See [0.29.36 verification](docs/QUALITY_VERIFICATION_0_29_36_CN.md) for the current scope and error-policy checks. Historical documentation uses the former name, Model Quality.

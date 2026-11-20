@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { questionTestSelection, reasonLabel, renderManualVerdict, renderRunEvidence, statusTag, verdictTag } from '../plugin/ui/view.js';
+import { auditLabel, questionTestSelection, reasonLabel, renderManualVerdict, renderRunEvidence, statusTag, verdictTag } from '../plugin/ui/view.js';
 
 const question = { id: 'logic-candy', prompt: 'Only this exact prompt owns the reference answer.', version: 'v1' };
 assert.deepEqual(questionTestSelection(question, question.prompt), { question_id: 'logic-candy' });
@@ -39,6 +39,35 @@ assert.match(partial.metaHTML, /1 \/ 2 样本已结束/);
 assert.match(partial.metaHTML, /整轮判定依据不足，未处理凭证/);
 assert.doesNotMatch(partial.samplesHTML, /证据不足/);
 
+// Duplicate and out-of-plan records stay readable without completing a missing position.
+const duplicate = { ...run, config: { ...run.config, samples: 2 }, samples: [
+  { ...run.samples[0], output: 'duplicate A', answer_match: 'correct' },
+  { ...run.samples[0], output: 'duplicate B', answer_match: 'correct' },
+] };
+assert.match(renderManualVerdict(duplicate), /部分已判定/);
+const anomalous = renderRunEvidence({ ...duplicate, samples: [...duplicate.samples,
+  { ...run.samples[0], model: 'other-model', output: 'unplanned model' },
+  { ...run.samples[0], index: -1, output: 'negative index' },
+  { ...run.samples[0], index: 4, output: 'out of range' },
+  { ...run.samples[0], index: undefined, output: 'unspecified index' },
+] });
+assert.equal(anomalous.completed, 1);
+assert.equal(anomalous.planned, 2);
+for (const answer of ['duplicate A', 'duplicate B', 'unplanned model', 'negative index', 'out of range', 'unspecified index']) {
+  assert(anomalous.samplesHTML.includes('>' + answer + '</pre>'));
+}
+assert.match(anomalous.samplesHTML, /回答缺失/);
+const trimmed = { ...run, source: 'scheduled_probe', pruned_samples: 1,
+  config: { ...run.config, samples: 3 }, samples: [{ ...run.samples[0], index: 1 }],
+  pruned_sample_slots: [{ model: 'example-model', index: 2 }],
+};
+const knownSlots = renderRunEvidence(trimmed);
+assert.match(knownSlots.samplesHTML, /样本 1<\/span><\/h4><span class="tag warn">样本缺失/);
+assert.match(knownSlots.samplesHTML, /样本 3<\/span><\/h4><span class="tag neutral">历史已裁剪/);
+const partiallyKnown = renderRunEvidence({ ...trimmed, pruned_samples: 2 });
+assert.match(partiallyKnown.samplesHTML, /样本 1<\/span><\/h4><span class="tag neutral">无留存回答/);
+assert.match(partiallyKnown.samplesHTML, /样本 3<\/span><\/h4><span class="tag neutral">历史已裁剪/);
+
 const failed = renderRunEvidence({ ...run, status: 'failed', error: 'network unavailable', samples: [{ ...run.samples[0], execution_status: 'failed', output: '', error: 'upstream disconnected' }] });
 assert.match(failed.metaHTML, /network unavailable/);
 assert.match(failed.samplesHTML, /upstream disconnected/);
@@ -58,6 +87,8 @@ assert.match(mixed.samplesHTML, /tag good">答案正确/);
 assert.match(mixed.samplesHTML, /tag warn">答案错误/);
 for (const reason of ['cancelled', 'context canceled']) assert.equal(reasonLabel(reason), '测试已取消');
 assert.equal(reasonLabel('unmapped upstream error'), 'unmapped upstream error');
+assert.equal(auditLabel('credential_external_enable'), '已识别 CPA 人工启用');
+assert.equal(auditLabel('credential_external_change'), '已识别 CPA 当前凭证变更');
 const cancelledSample = { ...run.samples[0], execution_status: 'cancelled', error: 'context canceled', output: '' };
 const cancelled = renderRunEvidence({ ...run, status: 'cancelled', samples: [cancelledSample] });
 assert.match(cancelled.samplesHTML, /测试已取消/);

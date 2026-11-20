@@ -89,26 +89,45 @@ func (s *Store) All(bucket string, fn func([]byte) error) error {
 
 // Prune only terminal history; actions and rule ownership are never expired.
 func (s *Store) Prune(before time.Time, keep map[string]bool, cutoffs map[string]time.Time) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	_, err := s.prune(historyRetention{before: before, keepRuns: keep, cutoffs: cutoffs}, nil)
+	return err
+}
+
+type historyRetention struct {
+	before      time.Time
+	keepRuns    map[string]bool
+	keepActions map[string]bool
+	cutoffs     map[string]time.Time
+}
+
+// The engine holds its mutex for this transaction. Its committed runs carry
+// the same completion timestamps as the stored rows, including after reload.
+func (s *Store) prune(policy historyRetention, loaded map[string]*Run) ([]string, error) {
+	var deletedRuns []string
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		for _, bucket := range []string{"runs", "usage", "audit"} {
 			b := tx.Bucket([]byte(bucket))
 			c := b.Cursor()
+			var expired []string
 			for k, v := c.First(); k != nil; k, v = c.Next() {
-				if bucket == "runs" && keep[string(k)] {
+				if bucket == "runs" && policy.keepRuns[string(k)] {
 					continue
 				}
-				cutoff := before
+				cutoff := policy.before
 				if bucket == "runs" {
-					if custom, ok := cutoffs[string(k)]; ok {
+					if custom, ok := policy.cutoffs[string(k)]; ok {
 						cutoff = custom
 					}
 				}
 				var ts time.Time
 				switch bucket {
 				case "runs":
-					var r Run
-					if e := json.Unmarshal(v, &r); e != nil {
-						return e
+					r := loaded[string(k)]
+					if r == nil {
+						r = new(Run)
+						if err := decode(v, r); err != nil {
+							return err
+						}
 					}
 					if r.CompletedAt != nil {
 						ts = *r.CompletedAt
@@ -124,18 +143,31 @@ func (s *Store) Prune(before time.Time, keep map[string]bool, cutoffs map[string
 					if e := json.Unmarshal(v, &r); e != nil {
 						return e
 					}
+					if policy.keepActions[r.ActionID] {
+						continue
+					}
 					ts = r.Time
-					if custom, ok := cutoffs[r.RunID]; ok {
+					if custom, ok := policy.cutoffs[r.RunID]; ok {
 						cutoff = custom
 					}
 				}
 				if !ts.IsZero() && ts.Before(cutoff) {
-					if e := c.Delete(); e != nil {
-						return e
-					}
+					expired = append(expired, string(k))
 				}
+			}
+			for _, key := range expired {
+				if err := b.Delete([]byte(key)); err != nil {
+					return err
+				}
+			}
+			if bucket == "runs" {
+				deletedRuns = expired
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return deletedRuns, nil
 }

@@ -30,6 +30,13 @@ func (en *Engine) sortedRuleIDsLocked() []string {
 
 func (en *Engine) ruleForDisplayLocked(r *Rule) Rule {
 	next := cloneRule(r)
+	if next.LastScopeDispatch != nil {
+		for i, detail := range next.LastScopeDispatch.Details {
+			if en.runs[detail.RunID] == nil {
+				next.LastScopeDispatch.Details[i].RunID = ""
+			}
+		}
+	}
 	if en.unsupportedRule(next) {
 		next.Enabled = false
 		next.Status = "unsupported"
@@ -56,8 +63,11 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 		return nil, unsupportedQuality()
 	}
 	old := en.rules[in.ID]
+	if err := prepareUpstreamActions(&in, old); err != nil {
+		return nil, err
+	}
 	if activation != "" {
-		if en.Capabilities().QualityPause || (in.Action != "" && in.Action != "observe_only" && !managedRule(&in)) || in.AutomaticPause || (update && old != nil && en.unsupportedRule(old)) {
+		if en.Capabilities().QualityPause || (in.Action != "" && in.Action != "observe_only" && !credentialMutation(in.Action)) || in.AutomaticPause || (update && old != nil && en.unsupportedRule(old)) {
 			return nil, unsupportedQuality()
 		}
 		in.Enabled, in.SchedulingEnabled = true, false
@@ -87,7 +97,7 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 	if in.TargetScope != "" && in.TargetScope != "single" && !scoped {
 		return nil, fmt.Errorf("invalid_request: unknown target scope")
 	}
-	if scoped && (in.AutomaticPause || (in.Action != "" && in.Action != "observe_only" && !managedRule(&in)) || en.Capabilities().QualityPause) {
+	if scoped && (in.AutomaticPause || (in.Action != "" && in.Action != "observe_only" && !credentialMutation(in.Action)) || en.Capabilities().QualityPause) {
 		return nil, fmt.Errorf("unsupported: dynamic scope is for official-host observation only")
 	}
 	if update && old != nil {
@@ -120,7 +130,7 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 	if in.Action == "" {
 		in.Action = "observe_only"
 	}
-	if in.Action != "observe_only" && in.Action != "pause_credential" && !managedRule(&in) {
+	if in.Action != "observe_only" && in.Action != "pause_credential" && !credentialMutation(in.Action) {
 		return nil, fmt.Errorf("unsupported action")
 	}
 	if err := en.validateManagedRule(&in, old); err != nil {
@@ -179,8 +189,10 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 	in.LastRun = ""
 	in.LastScopeBatch = ""
 	in.LastManualSkips = nil
+	in.LastScopeDispatch = nil
 	if old != nil {
 		in.LastRun, in.LastScopeBatch = old.LastRun, old.LastScopeBatch
+		in.LastScopeDispatch = cloneScopeDispatch(old.LastScopeDispatch)
 		if in.TargetScope == old.TargetScope {
 			in.LastManualSkips = old.LastManualSkips
 		}
@@ -199,19 +211,26 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 		}
 	}
 	var targets []Target
-	if !scoped {
-		targets, err = en.host.Targets(ctx)
+	retired := !scoped && en.terminalDependencyLocked(in.RunConfig)
+	if !scoped && !retired {
+		targets, err = en.host.Targets(en.inventoryContextLocked(ctx))
 		if err != nil {
 			return nil, err
 		}
 		if managedRule(&in) {
 			validationRule := in
 			if update {
+				// Validate the saved target even when this rule already disabled
+				// it. The permission is local to validation; no probe is queued.
+				validationRule.Action = disableCredential
 				validationRule.AutoRestore = true
 			}
-			targets, _, err = en.managedTargetsLocked(ctx, &validationRule, targets)
+			targets, _, err = en.managedTargetsLocked(ctx, &validationRule, targets, true)
 			if err != nil {
-				return nil, err
+				rejection, ok := err.(*scopeRejection)
+				if !ok || preflightStatus(rejection.detail.Code) != "failed" {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -230,8 +249,10 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 		if in.ActionID != "" {
 			return nil, fmt.Errorf("blocked: owned pause requires manual release")
 		}
-		if err = en.checkTargetsLocked(in.RunConfig, targets); err != nil {
-			return nil, err
+		if !retired {
+			if err = en.checkTargetsForRunLocked(in.RunConfig, targets, !en.Capabilities().QualityPause); err != nil {
+				return nil, err
+			}
 		}
 		in.BlockedAuthID = ""
 	} else if blocked := pausedTarget(in.RunConfig, targets); blocked != "" {
@@ -328,12 +349,14 @@ func (en *Engine) PauseRule(id string, rev uint64, paused bool) error {
 		if r.ActionID != "" || !en.Capabilities().QualityPause && r.BlockedAuthID != "" {
 			return fmt.Errorf("blocked: owned pause requires manual release")
 		}
-		targets, err := en.host.Targets(en.ctx)
-		if err != nil {
-			return err
-		}
-		if err = en.checkTargetsLocked(r.RunConfig, targets); err != nil {
-			return err
+		if !en.terminalDependencyLocked(r.RunConfig) {
+			targets, err := en.host.Targets(en.inventoryContextLocked(en.ctx))
+			if err != nil {
+				return err
+			}
+			if err = en.checkTargetsForRunLocked(r.RunConfig, targets, !en.Capabilities().QualityPause); err != nil {
+				return err
+			}
 		}
 		next.BlockedAuthID = ""
 	}

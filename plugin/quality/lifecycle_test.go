@@ -3,10 +3,15 @@ package quality
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/json"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type lifecycleHost struct {
@@ -91,6 +96,49 @@ func TestQueueIdempotencyAndSameKeyConflict(t *testing.T) {
 		t.Fatal("job not durable before queue")
 	}
 }
+
+func TestManualReceiptReadAndRetention(t *testing.T) {
+	en, host := lifeFixture(t)
+	config := lifeConfig()
+	config.IdempotencyKey = "synthetic-request"
+	lookup := func(want int) *Run {
+		t.Helper()
+		req := pluginapi.ManagementRequest{Method: http.MethodGet, Path: "/v0/management/plugins/model-quality/runs/detail", Query: url.Values{"idempotency_key": {config.IdempotencyKey}}}
+		res := en.Handle(context.Background(), req)
+		if res.StatusCode != want {
+			t.Fatalf("status %d, want %d: %s", res.StatusCode, want, res.Body)
+		}
+		if want != http.StatusOK {
+			return nil
+		}
+		var run Run
+		if err := json.Unmarshal(res.Body, &run); err != nil {
+			t.Fatal(err)
+		}
+		return &run
+	}
+	lookup(http.StatusNotFound)
+	run, err := en.Submit(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lookup(http.StatusOK); got.ID != run.ID || got.Config.Question.Prompt == "" || got.Config.IdempotencyKey != config.IdempotencyKey {
+		t.Fatal("receipt did not identify the original frozen run")
+	}
+	if err := en.Cancel(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := en.DeleteManualRun(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	lookup(http.StatusGone)
+	if len(en.runs) != 0 || len(host.calls) != 0 {
+		t.Fatal("receipt lookup executed or recreated a run")
+	}
+	config.IdempotencyKey = strings.Repeat("k", 129)
+	lookup(http.StatusBadRequest)
+}
+
 func TestCancelRunningJobAndBudgetNoReplay(t *testing.T) {
 	en, h := lifeFixture(t)
 	entered := make(chan struct{})

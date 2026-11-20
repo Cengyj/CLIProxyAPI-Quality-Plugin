@@ -166,6 +166,9 @@ func (en *Engine) localPause(c RunConfig) string {
 	return ""
 }
 func (en *Engine) checkTargetsLocked(c RunConfig, targets []Target) error {
+	return en.checkTargetsForRunLocked(c, targets, false)
+}
+func (en *Engine) checkTargetsForRunLocked(c RunConfig, targets []Target, ruleProbe bool) error {
 	if en.fault != nil {
 		return fmt.Errorf("unavailable: persistent state requires operator attention")
 	}
@@ -183,10 +186,14 @@ func (en *Engine) checkTargetsLocked(c RunConfig, targets []Target) error {
 		if found == nil {
 			return fmt.Errorf("blocked: credential missing")
 		}
-		if found.QualityPaused {
+		if found.QualityPaused || found.RetainedPause {
 			return fmt.Errorf("blocked: credential quality pause awaits manual release")
 		}
-		if found.ManualDisabled || !found.EffectiveAvailable {
+		if ruleProbe && id == c.AuthID {
+			if !ruleSubjectEnabled(*found) {
+				return fmt.Errorf("blocked: credential unavailable")
+			}
+		} else if found.ManualDisabled || !found.EffectiveAvailable {
 			return fmt.Errorf("blocked: credential unavailable")
 		}
 	}
@@ -261,6 +268,13 @@ func (en *Engine) checkExecution(ctx context.Context, runID string, f Frozen) er
 	}
 	var targets []Target
 	var err error
+	en.mu.Lock()
+	if en.terminalDependencyLocked(f.RunConfig) {
+		en.mu.Unlock()
+		return fmt.Errorf("blocked: credential already disabled by error policy")
+	}
+	ctx = en.inventoryContextLocked(ctx)
+	en.mu.Unlock()
 	if host, ok := en.host.(interface {
 		pinnedTarget(context.Context, string, string) (Target, error)
 	}); ok && f.ScopeBatchID != "" {
@@ -273,6 +287,12 @@ func (en *Engine) checkExecution(ctx context.Context, runID string, f Frozen) er
 	if err != nil {
 		return fmt.Errorf("unavailable: credential status cannot be verified")
 	}
+	en.mu.Lock()
+	if en.terminalDependencyLocked(f.RunConfig) {
+		en.mu.Unlock()
+		return fmt.Errorf("blocked: credential already disabled by error policy")
+	}
+	en.mu.Unlock()
 	if expected := f.ManagedProbe; expected != nil {
 		h, ok := en.host.(managedHost)
 		if !ok || !en.Capabilities().ManagementSession {
@@ -313,7 +333,7 @@ func (en *Engine) checkExecution(ctx context.Context, runID string, f Frozen) er
 			return err
 		}
 	}
-	if err = en.checkTargetsLocked(r.Config.RunConfig, targets); err != nil {
+	if err = en.checkTargetsForRunLocked(r.Config.RunConfig, targets, r.Source == "scheduled_probe" && !en.Capabilities().QualityPause); err != nil {
 		return err
 	}
 	if err = frozenIdentityError(r.Config, targets); err != nil {
@@ -324,13 +344,8 @@ func (en *Engine) checkExecution(ctx context.Context, runID string, f Frozen) er
 			if t.AuthID != r.Config.AuthID {
 				continue
 			}
-			if !eligibleForScope(t) || t.AuthIndex != r.Config.SubjectIndex || t.Provider != r.Config.Provider {
+			if !ruleSubjectEnabled(t) || t.AuthIndex != r.Config.SubjectIndex || t.Provider != r.Config.Provider {
 				return fmt.Errorf("blocked: scoped target changed")
-			}
-			for _, m := range r.Config.Models {
-				if !contains(t.Models, m) {
-					return fmt.Errorf("blocked: scoped model no longer registered")
-				}
 			}
 		}
 	}

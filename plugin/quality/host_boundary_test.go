@@ -201,3 +201,30 @@ func TestCollectorRejectsAnswerAfterFinishAndInvalidUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestChatAnswerRole(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		valid        bool
+	}{
+		{"implicit assistant", "", true},
+		{"assistant", `"role":"assistant",`, true},
+		{"user echo", `"role":"user",`, false},
+		{"tool output", `"role":"tool",`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, stream := range []bool{false, true} {
+				key := "message"
+				if stream {
+					key = "delta"
+				}
+				raw := fmt.Sprintf(`{"choices":[{%q:{%s"content":"4"},"finish_reason":"stop"}]}`, key, tc.fields)
+				c := newCollector(4096)
+				err := c.event([]byte(raw), stream)
+				if (err == nil) != tc.valid {
+					t.Errorf("stream=%v: got %v, want valid=%v", stream, err, tc.valid)
+				}
+			}
+		})
+	}
+}

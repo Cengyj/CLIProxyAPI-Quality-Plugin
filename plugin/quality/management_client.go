@@ -195,33 +195,43 @@ func (h *NativeHost) credentialProfile(ctx context.Context, id, index string) (C
 	var raw pluginapi.HostAuthGetResponse
 	var empty CredentialSnapshot
 	if id == "" || index == "" {
-		return empty, runtime.Auth, nil, fmt.Errorf("blocked: credential identity is missing")
+		return empty, runtime.Auth, nil, rejectScope("blocked: credential identity is missing", "identity_missing", "凭证标识或索引缺失，无法读取快照。")
 	}
 	if err := h.call(ctx, "host.auth.get_runtime", pluginapi.HostAuthGetRequest{AuthIndex: index}, &runtime); err != nil {
-		return empty, runtime.Auth, nil, fmt.Errorf("blocked: credential no longer exists")
+		return empty, runtime.Auth, nil, rejectScope("blocked: credential no longer exists", "snapshot_unavailable", "CPA 未能按索引返回该凭证的运行信息。")
 	}
 	a := runtime.Auth
 	provider := a.Provider
 	if provider == "" {
 		provider = a.Type
 	}
-	if a.ID != id || a.AuthIndex != index || a.RuntimeOnly || a.Source != "file" || a.Name == "" || filepath.Base(a.Name) != a.Name || strings.ContainsAny(a.Name, "/\\") || !strings.HasSuffix(strings.ToLower(a.Name), ".json") || a.UpdatedAt.IsZero() {
-		return empty, a, nil, fmt.Errorf("unsupported: automatic handling requires one identifiable file credential")
+	const unsupportedFile = "unsupported: automatic handling requires one identifiable file credential"
+	if a.ID != id || a.AuthIndex != index {
+		return empty, a, nil, rejectScope(unsupportedFile, "identity_conflict", "CPA 返回的凭证标识或索引与本轮目标不一致。")
+	}
+	if a.RuntimeOnly || a.Source != "file" || a.Name == "" || filepath.Base(a.Name) != a.Name || strings.ContainsAny(a.Name, "/\\") || !strings.HasSuffix(strings.ToLower(a.Name), ".json") {
+		return empty, a, nil, rejectScope(unsupportedFile, "unsupported_file", "管理探测需要可单独标识的 JSON 文件凭证。")
+	}
+	if a.UpdatedAt.IsZero() {
+		return empty, a, nil, rejectScope(unsupportedFile, "snapshot_unavailable", "CPA 缺少凭证的运行更新时间，无法核对快照。")
 	}
 	if provider != "codex" && provider != "openai" && provider != "openai-compatibility" {
-		return empty, a, nil, fmt.Errorf("unsupported: management probes currently support OpenAI and Codex file credentials")
+		return empty, a, nil, rejectScope("unsupported: management probes currently support OpenAI and Codex file credentials", "unsupported_provider", "当前提供方不支持凭证管理探测。")
 	}
 	if err := h.call(ctx, "host.auth.get", pluginapi.HostAuthGetRequest{AuthIndex: index}, &raw); err != nil {
-		return empty, a, nil, fmt.Errorf("blocked: credential snapshot is unavailable")
+		return empty, a, nil, rejectScope("blocked: credential snapshot is unavailable", "snapshot_unavailable", "CPA 未能返回该凭证的文件快照。")
 	}
 	var data map[string]any
-	if raw.AuthIndex != index || raw.Name != a.Name || json.Unmarshal(raw.JSON, &data) != nil || data == nil {
-		return empty, a, nil, fmt.Errorf("blocked: credential snapshot identity changed")
+	if raw.AuthIndex != index || raw.Name != a.Name {
+		return empty, a, nil, rejectScope("blocked: credential snapshot identity changed", "identity_conflict", "CPA 返回的文件名或索引与运行信息不一致。")
+	}
+	if json.Unmarshal(raw.JSON, &data) != nil || data == nil {
+		return empty, a, nil, rejectScope("blocked: credential snapshot identity changed", "snapshot_unavailable", "无法解析凭证文件快照。")
 	}
 	// Expanded sources, SIWC, and ambiguous routing need their native executor.
 	for _, field := range []string{"use_siwc", "virtual", "projects", "project_ids"} {
 		if value := data[field]; value != nil && value != false && value != "false" && value != "" {
-			return empty, a, nil, fmt.Errorf("unsupported: credential requires native routing")
+			return empty, a, nil, rejectScope("unsupported: credential requires native routing", "native_routing_required", "该凭证需要使用宿主原生路由。")
 		}
 	}
 	delete(data, "disabled")
@@ -317,6 +327,7 @@ func (h *NativeHost) executeManaged(ctx context.Context, e Execution) (s Sample)
 		s.TotalMS = time.Since(start).Milliseconds()
 		if ctx.Err() != nil {
 			s.ExecutionStatus = "cancelled"
+			s.UpstreamCondition = ""
 			s.Error = "cancelled"
 		}
 	}()
@@ -389,8 +400,25 @@ func (h *NativeHost) executeManaged(ctx context.Context, e Execution) (s Sample)
 		s.Error = scrubError(err)
 		return
 	}
+	confirmProbe := func() bool {
+		after, readErr := h.CredentialSnapshot(ctx, expected.AuthID, expected.AuthIndex)
+		if readErr != nil || !sameSnapshot(after, expected) {
+			s.Error = "credential changed during management probe"
+			s.Evidence.ConditionsChanged = true
+			return false
+		}
+		s.Evidence.AuthID = e.AuthID
+		s.Evidence.RequestedModel = e.Model
+		s.Evidence.PayloadFingerprint = fingerprint(fields)
+		return true
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		s.Error = fmt.Sprintf("upstream HTTP %d", response.StatusCode)
+		if len(response.Body) <= limit {
+			if condition := managedUpstreamCondition(response.StatusCode, response.Body, e.Model); condition != "" && confirmProbe() {
+				s.UpstreamCondition = condition
+			}
+		}
 		return
 	}
 	if len(response.Body) > limit {
@@ -415,17 +443,11 @@ func (h *NativeHost) executeManaged(ctx context.Context, e Execution) (s Sample)
 		s.ExecutionStatus = "incomplete"
 		return
 	}
-	current, err = h.CredentialSnapshot(ctx, expected.AuthID, expected.AuthIndex)
-	if err != nil || !sameSnapshot(current, expected) {
-		s.Error = "credential changed during management probe"
-		s.Evidence.ConditionsChanged = true
+	if !confirmProbe() {
 		return
 	}
 	s.ExecutionStatus = "completed"
-	s.Evidence.AuthID = e.AuthID
-	s.Evidence.RequestedModel = e.Model
 	s.Evidence.ResolvedModel = s.ResponseModel
-	s.Evidence.PayloadFingerprint = fingerprint(fields)
 	return
 }
 
@@ -466,25 +488,61 @@ func parseManagedResponses(body string) (string, string, *Usage, error) {
 	if terminal.Get("status").String() != "completed" || terminal.Get("error").Raw != "" && terminal.Get("error").Raw != "null" {
 		return "", "", nil, fmt.Errorf("missing completed responses result")
 	}
+	output := terminal.Get("output")
+	if !output.IsArray() {
+		return "", "", nil, fmt.Errorf("invalid responses output")
+	}
 	var text strings.Builder
-	for _, item := range terminal.Get("output").Array() {
+	answerSeen := false
+	var completionErr error
+	for _, item := range output.Array() {
 		if item.Get("type").String() == "reasoning" {
 			continue
 		}
-		if item.Get("type").String() != "message" || item.Get("status").String() != "completed" {
+		if item.Get("type").String() != "message" {
 			return "", "", nil, fmt.Errorf("non-answer responses output")
 		}
-		for _, part := range item.Get("content").Array() {
-			if part.Get("type").String() != "output_text" {
+		if item.Get("status").String() != "completed" {
+			completionErr = fmt.Errorf("unconfirmed responses message status")
+		}
+		if role := item.Get("role"); role.Exists() && (role.Type != ojson.String || role.String() != "assistant") {
+			return "", "", nil, fmt.Errorf("non-assistant responses message")
+		}
+		// Older endpoints omit phase. A single unphased message can be the answer.
+		phase := item.Get("phase")
+		commentary := phase.Type == ojson.String && phase.String() == "commentary"
+		if phase.Exists() && phase.Raw != "null" && !commentary && (phase.Type != ojson.String || phase.String() != "final_answer") {
+			return "", "", nil, fmt.Errorf("unknown responses message phase")
+		}
+		if answerSeen {
+			return "", "", nil, fmt.Errorf("unexpected message after final answer")
+		}
+		content := item.Get("content")
+		if !content.IsArray() {
+			return "", "", nil, fmt.Errorf("invalid responses message content")
+		}
+		for _, part := range content.Array() {
+			value := part.Get("text")
+			if part.Get("type").String() != "output_text" || value.Type != ojson.String {
 				return "", "", nil, fmt.Errorf("refused or non-text answer")
 			}
-			text.WriteString(part.Get("text").String())
+			if !commentary {
+				text.WriteString(value.String())
+			}
 		}
+		answerSeen = !commentary
+	}
+	if !answerSeen {
+		return "", "", nil, fmt.Errorf("missing final responses answer")
+	}
+	model := terminal.Get("model")
+	if model.Exists() && model.Raw != "null" && model.Type != ojson.String {
+		return text.String(), "", nil, fmt.Errorf("invalid response model")
 	}
 	u := terminal.Get("usage")
 	doc := ojson.NewDocString(`{}`)
 	_ = doc.Set("prompt_tokens", u.Get("input_tokens").Value())
 	_ = doc.Set("completion_tokens", u.Get("output_tokens").Value())
 	_ = doc.Set("total_tokens", u.Get("total_tokens").Value())
-	return text.String(), terminal.Get("model").String(), parseUsage(ojson.ParseBytes(doc.Bytes())), nil
+	return text.String(), strings.TrimSpace(model.String()), parseUsage(ojson.ParseBytes(doc.Bytes())), completionErr
 }

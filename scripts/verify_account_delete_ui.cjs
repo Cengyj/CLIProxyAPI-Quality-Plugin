@@ -69,7 +69,9 @@ async function main() {
     assert.deepEqual(writes, []); assert.deepEqual(detailReads, []);
 
     await page.setViewportSize({ width: 1440, height: 900 });
-    await action('fixture-new', 'edit').click(); await el('#account-editor-save:enabled').waitFor();
+    await action('fixture-new', 'more').click();
+    await el('#account-actions-menu').getByRole('button', { name: '账号资料' }).click();
+    await el('#account-editor-save:enabled').waitFor();
     await el('#account-label').fill('Unsaved fixture note'); await el('#account-delete-open').click(); await dialog.waitFor();
     await page.keyboard.press('Escape'); await dialog.waitFor({ state: 'hidden' });
     assert(await editor.evaluate(n => n.matches(':modal'))); assert(await focused(el('#account-delete-open')));

@@ -32,6 +32,17 @@ func Questions() []Question {
 		{ID: "custom", Version: "1", Title: "自定义题目", Kind: "custom"},
 	}
 }
+func freezeDispatchQuestion(config *RunConfig) (Question, error) {
+	if config.QuestionID == "random-linear" && config.Seed == 0 {
+		seed, err := strconv.ParseInt(ID()[:15], 16, 64)
+		if err != nil {
+			return Question{}, err
+		}
+		config.Seed = seed
+	}
+	return FreezeQuestion(*config)
+}
+
 func FreezeQuestion(c RunConfig) (Question, error) {
 	for _, q := range Questions() {
 		if q.ID != c.QuestionID {

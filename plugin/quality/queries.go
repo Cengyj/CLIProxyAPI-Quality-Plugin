@@ -3,6 +3,7 @@ package quality
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 
@@ -60,11 +61,59 @@ func (en *Engine) QueryRuns(query url.Values) (map[string]any, error) {
 		offset = total
 	}
 	end := offset + min(limit, total-offset)
-	entries := make([]Run, 0, end-offset)
-	for _, run := range refs[offset:end] {
-		entries = append(entries, *runForDisplay(run))
+	rows := refs[offset:end]
+	result := map[string]any{"total": total, "offset": offset, "limit": limit}
+	if query.Get("view") == "summary" {
+		entries := make([]map[string]any, len(rows))
+		for i, run := range rows {
+			entries[i] = runListSummary(run)
+		}
+		result["items"] = entries
+	} else {
+		entries := make([]Run, len(rows))
+		for i, run := range rows {
+			entries[i] = *runForDisplay(run)
+		}
+		result["items"] = entries
 	}
-	return map[string]any{"items": entries, "total": total, "offset": offset, "limit": limit}, nil
+	return result, nil
+}
+
+// List rows contain just the frozen labels, states and verdicts rendered before opening a run.
+func runListSummary(r *Run) map[string]any {
+	type verdict struct {
+		Model           string `json:"model"`
+		Index           int    `json:"index"`
+		ExecutionStatus string `json:"execution_status"`
+		QualityVerdict  string `json:"quality_verdict"`
+		AnswerMatch     string `json:"answer_match,omitempty"`
+		Review          string `json:"review,omitempty"`
+		Error           string `json:"error,omitempty"`
+	}
+	samples := make([]verdict, len(r.Samples))
+	for i := range r.Samples {
+		s := &r.Samples[i]
+		samples[i] = verdict{Model: s.Model, Index: s.Index, ExecutionStatus: s.ExecutionStatus, QualityVerdict: s.QualityVerdict, AnswerMatch: displayAnswerMatch(r, s), Review: s.Review, Error: s.Error}
+	}
+	cfg := &r.Config
+	row := map[string]any{
+		"id": r.ID, "source": r.Source, "status": r.Status, "created_at": r.CreatedAt,
+		"credential_email": r.CredentialEmail, "action_status": r.ActionStatus, "credential_action": r.CredentialAction, "upstream_condition": r.UpstreamCondition, "pruned_samples": r.PrunedSamples,
+		"error": r.Error, "block_reason": r.BlockReason, "samples": samples,
+		"config": map[string]any{
+			"auth_id": cfg.AuthID, "rule_id": cfg.RuleID, "scope_batch_id": cfg.ScopeBatchID,
+			"models": slices.Clone(cfg.Models), "samples": cfg.Samples, "question_id": cfg.QuestionID,
+			"question":   map[string]string{"id": cfg.Question.ID, "title": cfg.Question.Title},
+			"parameters": map[string]string{"reasoning_effort": cfg.Parameters.ReasoningEffort},
+		},
+	}
+	if r.SkipDetail != nil {
+		row["skip_detail"] = cloneValue(r.SkipDetail)
+	}
+	if r.PreflightDetail != nil {
+		row["preflight_detail"] = cloneValue(r.PreflightDetail)
+	}
+	return row
 }
 
 // Read the page and its handling records under the same engine revision.
@@ -83,7 +132,7 @@ func (en *Engine) queryRules(query url.Values) map[string]any {
 	}
 	for _, d := range en.managed {
 		if i, ok := positions[d.RuleID]; ok && activeDisposition(d) {
-			views[i].Handling = append(views[i].Handling, HandlingSummary{Email: d.Email, AuthID: d.AuthID, ActionID: d.ActionID, State: d.State})
+			views[i].Handling = append(views[i].Handling, HandlingSummary{Email: d.Email, AuthID: d.AuthID, ActionID: d.ActionID, State: d.State, UpstreamCondition: d.UpstreamCondition, CatalogMissingModel: d.CatalogMissingModel})
 		}
 	}
 	for _, v := range views {
@@ -140,15 +189,18 @@ func (en *Engine) Run(id string) (*Run, error) {
 // manual runs. This display result does not enter quality policy or metrics.
 func runForDisplay(run *Run) *Run {
 	out := cloneRun(run)
-	if out.Source == "manual_test" && out.Config.Judge.Mode == "manual" {
-		for i := range out.Samples {
-			s := &out.Samples[i]
-			if s.ExecutionStatus == "completed" && s.Error == "" && s.Review == "" && s.QualityVerdict != "correct" && s.QualityVerdict != "incorrect" {
-				s.AnswerMatch, _ = DeterministicJudge(out.Config.Question, s.Output)
-			}
-		}
+	for i := range out.Samples {
+		out.Samples[i].AnswerMatch = displayAnswerMatch(out, &out.Samples[i])
 	}
 	return out
+}
+
+func displayAnswerMatch(r *Run, s *Sample) string {
+	if r.Source == "manual_test" && r.Config.Judge.Mode == "manual" && s.ExecutionStatus == "completed" && s.Error == "" && s.Review == "" && s.QualityVerdict != "correct" && s.QualityVerdict != "incorrect" {
+		match, _ := DeterministicJudge(r.Config.Question, s.Output)
+		return match
+	}
+	return s.AnswerMatch
 }
 
 func (en *Engine) Runs() []Run {
