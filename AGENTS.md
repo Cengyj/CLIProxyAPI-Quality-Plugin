@@ -2,6 +2,15 @@
 
 This workspace is for a standalone CLIProxyAPI native plugin with manual model evaluation and credential quality operations.
 
+## GitHub release target
+
+The user specified on 2026-11-20 that GitHub releases only require a Linux
+amd64 (x86_64) build. Publish the full native plugin with the embedded Go/Sobek
+login runtime and account management. Use the full `plugin-artifacts` Docker
+target with `--platform linux/amd64`. The current CPA store registry should
+list the full Linux amd64 package for the published version. Build additional
+platforms only when explicitly requested.
+
 ## Current official-host compatibility decision
 
 The user approved the official-host compatibility plan on 2026-11-17. Keep CPA

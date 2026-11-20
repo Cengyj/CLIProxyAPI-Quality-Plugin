@@ -13,13 +13,13 @@ A native plugin for official [CLIProxyAPI](https://github.com/router-for-me/CLIP
 
 ## Install or upgrade
 
-Version **0.29.36** includes UI **13.6.35** for official CPA **8.0.76**. Both Linux packages support manual model tests and scheduled credential checks. On **amd64 (x86_64)**, sign in through CPA's **OAuth Login** page and manage credentials under **Auth Files**. On **arm64 (aarch64)**, the plugin includes its account management page and embedded login runtime **2.2.1**.
+Version **0.29.37** ships for **Linux amd64 (x86_64)** and requires glibc **2.34** or later. It includes UI **13.6.35**, the account management page, embedded Go/Sobek login runtime **2.2.1**, manual model tests, and scheduled credential checks for official CPA **8.0.76**.
 
-For store installation, enable the plugin system and add `https://raw.githubusercontent.com/Cengyj/cpa-credential-ops/main/registry.json` to **Third-party plugin sources**. Save your settings, refresh the plugin store, then select **Credential Ops → Install**. CPA selects the package for its platform.
+For store installation, enable the plugin system and add `https://raw.githubusercontent.com/Cengyj/cpa-credential-ops/main/registry.json` to **Third-party plugin sources**. Save your settings, refresh the plugin store, then open **Credential Ops** and select **Install** or **Update**. CPA selects the package for its platform. Restart CPA if prompted.
 
-1. Download the package and checksums from [the release page](https://github.com/Cengyj/cpa-credential-ops/releases/tag/v0.29.36).
+1. Download the package and checksums from [the release page](https://github.com/Cengyj/cpa-credential-ops/releases/tag/v0.29.37).
 2. Back up the existing plugin and persistent data while CPA is stopped.
-3. Install the ZIP using CPA's plugin management, or replace the existing `model-quality.so` in the configured plugin directory and restart CPA.
+3. For a fresh manual installation, extract `model-quality.so` to the configured plugin directory and enable it. For a manual upgrade, use the plugin's `path` from `GET /v8/management/plugins` to locate the current library. If it has a versioned filename, use the store update so CPA also updates the configured version. Restart CPA after a manual installation.
 4. Refresh the authenticated management panel and open **Credential Ops**. Opening the panel reestablishes the in-memory management session needed for scheduled credential operations.
 
 The display name and repository have changed. The native plugin ID, library filename, configuration key, API paths, and data directory remain `model-quality` so existing installations retain their accounts, rules, and history. Do not install a second copy under a different library filename.

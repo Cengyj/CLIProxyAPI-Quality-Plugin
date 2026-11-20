@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const Version = "0.29.36"
+const Version = "0.29.37"
 
 const maxRuleModels = 50
 const maxManualModels = 16
