@@ -42,6 +42,7 @@ async function main() {
       questionNote: document.querySelector('#question-read-note:not([hidden])')?.textContent || '',
       historyText: document.querySelector('#history-list .empty-line')?.textContent || '',
       historyTotal: document.querySelector('#history-total').textContent,
+      canClearHistory: !document.querySelector('#history-clear-all').disabled,
       historyPage: document.querySelector('#history-page').textContent,
       firstHistory: document.querySelector('#history-list [data-run]')?.dataset.run || '',
       qualityRows: document.querySelectorAll('#operations-history [data-run]').length,
@@ -139,7 +140,9 @@ async function main() {
       return { initial, failed, recovered: await status(page) };
     }, { width: 1440, height: 640, theme: 'white' });
     await scenario('catalog_failure', async ({ page, outer, control, connect, choose, refresh }) => {
-      await connect(); await choose();
+      await connect();
+      const connected = await status(page);
+      await choose();
       control.failure = 'targets';
       await refresh();
       const failed = await status(page);
@@ -149,7 +152,7 @@ async function main() {
       const recovered = await status(page);
       control.failure = 'metrics'; control.code = 401;
       await refresh();
-      return { failed, recovered, unauthorized: await status(page) };
+      return { connected, failed, recovered, unauthorized: await status(page) };
     }, { width: 320, height: 720, theme: 'white', embedded: true });
     await scenario('catalog_with_slow_metrics', async ({ page, outer, control, connect, choose, settle }) => {
       await connect(); await choose();
@@ -181,7 +184,8 @@ async function main() {
     assert(initial.failed.connected && initial.failed.saved && initial.failed.canSubmit);
     assert(initial.failed.warning && initial.failed.qualityRows > 0);
     assert.match(initial.failed.historyText, /读取失败/);
-    assert.doesNotMatch(initial.failed.historyTotal, /^0 个任务$/);
+    assert.equal(initial.failed.historyTotal, '');
+    assert(!initial.failed.canClearHistory && initial.recovered.canClearHistory);
     assert(initial.recovered.firstHistory && !initial.recovered.warning);
     const metrics = results.metrics_failure;
     assert(metrics.failed.warning && metrics.failed.canSubmit);
@@ -194,9 +198,11 @@ async function main() {
     assert.equal(history.initial.firstHistory, history.failed.firstHistory);
     assert.equal(history.failed.historyPage, '第 1 页');
     assert.match(history.failed.historyNote, /读取失败/);
+    assert(!history.failed.canClearHistory && history.recovered.canClearHistory);
     assert.equal(history.recovered.historyPage, '第 2 页');
     assert.notEqual(history.failed.firstHistory, history.recovered.firstHistory);
     const catalog = results.catalog_failure;
+    assert(catalog.connected.firstHistory && catalog.connected.canClearHistory, 'A direct manual workspace connection enables history cleanup immediately');
     assert(catalog.failed.connected && !catalog.failed.canSubmit);
     assert.match(catalog.failed.credentialNote, /未确认|读取失败/);
     assert(!catalog.recovered.warning && catalog.recovered.canSubmit);

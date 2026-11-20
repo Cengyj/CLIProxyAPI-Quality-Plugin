@@ -84,6 +84,10 @@ func New(c Config, h Host) (*Engine, error) {
 	return en, nil
 }
 func (en *Engine) load() error {
+	previousProviders, err := en.previousProviderSetting()
+	if err != nil {
+		return err
+	}
 	if err := en.loadDispositions(); err != nil {
 		return err
 	}
@@ -135,6 +139,9 @@ func (en *Engine) load() error {
 		return nil
 	}); e != nil {
 		return e
+	}
+	if err := en.migrateRuleScopes(previousProviders); err != nil {
+		return err
 	}
 	var interrupted []*Run
 	if e := en.store.All("runs", func(raw []byte) error {
@@ -222,6 +229,9 @@ func (en *Engine) Config() Config {
 	return c
 }
 func (en *Engine) UpdateConfig(c Config) error {
+	return en.updateConfig(c, false)
+}
+func (en *Engine) updateConfig(c Config, keepProviderTargets bool) error {
 	if e := c.Validate(); e != nil {
 		return e
 	}
@@ -235,6 +245,9 @@ func (en *Engine) UpdateConfig(c Config) error {
 	}
 	if c.DataDir != en.cfg.DataDir || c.Workers != en.cfg.Workers || c.Queue != en.cfg.Queue {
 		return fmt.Errorf("data_dir/workers/queue require host reconfiguration")
+	}
+	if keepProviderTargets {
+		c.IncludeProviderTargets = en.cfg.IncludeProviderTargets
 	}
 	if e := en.writeScheduleSettings(c, en.cfg.SchedulingEnabled && !c.SchedulingEnabled); e != nil {
 		return e

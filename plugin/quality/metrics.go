@@ -20,7 +20,7 @@ func (en *Engine) metrics(summary bool) (map[string]any, error) {
 	judgeUnknown, controlUnknown := 0, 0
 	unknownUsage := 0
 	for _, r := range en.runs {
-		if r.PreflightDetail != nil || r.SkipDetail != nil || r.Status == "skipped" {
+		if r.HistoryCleared || r.PreflightDetail != nil || r.SkipDetail != nil || r.Status == "skipped" {
 			continue
 		}
 		runCovered, runPlanned := retainedCoverage(r)
@@ -58,7 +58,11 @@ func (en *Engine) metrics(summary bool) (map[string]any, error) {
 					errors[s.ExecutionStatus]++
 				}
 			}
-			switch s.QualityVerdict {
+			verdict := s.QualityVerdict
+			if s.ExecutionStatus != "completed" || s.Error != "" {
+				verdict = "unknown"
+			}
+			switch verdict {
 			case "correct":
 				correct++
 			case "incorrect":

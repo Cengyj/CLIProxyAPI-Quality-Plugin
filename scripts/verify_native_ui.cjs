@@ -140,8 +140,10 @@ async function finish(id) {
   );
   await page.waitForFunction(
     () =>
-      document.querySelectorAll('.sample').length === 2 &&
-      document.getElementById('run-meta').textContent.includes('已完成'),
+      document.querySelectorAll('#sample-list .answer-text').length === 2 &&
+      [...document.querySelectorAll('#sample-list .answer-text')].every(node => node.textContent === '21') &&
+      document.getElementById('run-progress').parentElement.hidden &&
+      !document.getElementById('run-rerun').classList.contains('hidden'),
   );
   await page.evaluate(() => scrollTo(0, 0));
   await page.screenshot({

@@ -133,7 +133,7 @@ async function main() {
       const dimensions = await page.locator('#quality-detail').evaluate(d => {
         const scroll = d.querySelector('.quality-detail-scroll');
         const root = document.documentElement;
-        return { dialogWidth: d.offsetWidth, scrollWidth: scroll.scrollWidth, clientWidth: scroll.clientWidth, bodyOverflow: root.scrollWidth - root.clientWidth };
+        return { dialogWidth: d.offsetWidth, scrollWidth: scroll.scrollWidth, clientWidth: scroll.clientWidth, bodyOverflow: Math.max(0, root.scrollWidth - root.clientWidth) };
       });
       assert.equal(dimensions.bodyOverflow, 0);
       assert.equal(dimensions.scrollWidth, dimensions.clientWidth);

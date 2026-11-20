@@ -31,8 +31,11 @@ class Upstream(BaseHTTPRequestHandler):
             if self.headers['Authorization'] == 'Bearer ' + credential['access_token']:
                 break
         else:
-            self.send_error(500, 'Unknown synthetic credential')
-            return
+            name = plan.get('provider_keys', {}).get(self.headers.get('Authorization', ''))
+            if not name:
+                self.send_error(500, 'Unknown synthetic credential')
+                return
+            credential = {'email': name}
         if 'accounts' in plan:
             email = credential['email']
             position = sum(json.loads(line)['account'] == email for line in lines)
@@ -81,6 +84,8 @@ class Upstream(BaseHTTPRequestHandler):
             elif outcome == 'user_message':
                 message.update(role='user', content=[{'type': 'output_text', 'text': '4'}])
             events = [{'type': 'response.completed', 'response': response}]
+            if plan.get('emit_text_delta'):
+                events.insert(0, {'type': 'response.output_text.delta', 'delta': outcome})
         body = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events).encode()
         self.respond('text/event-stream', body)
 
@@ -134,6 +139,8 @@ class RecordingRelay(BaseHTTPRequestHandler):
                 stream.write(json.dumps(write) + '\n')
         self.send_response(response.status)
         self.send_header('Content-Type', response.getheader('Content-Type', 'application/json'))
+        if response.getheader('ETag'):
+            self.send_header('ETag', response.getheader('ETag'))
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)

@@ -23,12 +23,14 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 	switch req.Method + " " + path {
 	case "GET /targets":
 		var items []Target
-		items, err = en.visibleTargets(ctx)
+		coverage := &providerInventoryStatus{Verified: true}
+		items, err = en.visibleTargets(context.WithValue(ctx, providerInventoryStatusKey{}, coverage))
 		rows := page(items, req)
 		if h, ok := en.host.(*NativeHost); ok && h.Management != nil && h.Management.ready() {
 			h.Management.addModelReasoning(ctx, rows["items"].([]Target))
 		}
 		rows["capabilities"] = en.Capabilities()
+		rows["provider_directory_verified"] = coverage.Verified
 		result = rows
 	case "GET /questions":
 		items := Questions()
@@ -57,6 +59,12 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 		}
 	case "DELETE /rules/run-history":
 		result, err = en.clearRuleHistory()
+	case "DELETE /runs/history":
+		if len(req.Query) != 0 || len(req.Body) != 0 {
+			err = fmt.Errorf("invalid_request: clearing all manual tests does not take parameters")
+		} else {
+			result, err = en.clearManualHistory()
+		}
 	case "DELETE /runs":
 		var body struct {
 			ID string `json:"id"`
@@ -94,6 +102,11 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 			} else {
 				err = en.Review(body.ID, *body.SampleIndex, body.Verdict, body.Note)
 			}
+		}
+	case "POST /rules/scope-preview":
+		var body ruleWrite
+		if body, err = decodeRuleWrite(req.Body, true); err == nil {
+			result, err = en.previewRuleScope(ctx, body.Rule)
 		}
 	case "GET /rules":
 		result = en.queryRules(req.Query)
@@ -220,9 +233,12 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 	case "GET /settings":
 		result = en.settingsResponse()
 	case "PUT /settings":
-		var c Config
-		if err = DecodeStrict(req.Body, &c); err == nil {
-			err = en.UpdateConfig(c)
+		var body struct {
+			Config
+			IncludeProviderTargets *bool `json:"include_provider_targets"`
+		}
+		if err = DecodeStrict(req.Body, &body); err == nil {
+			err = en.updateConfig(body.Config, true)
 			result = en.settingsResponse()
 		}
 	default:
@@ -245,8 +261,10 @@ func (en *Engine) Handle(ctx context.Context, req pluginapi.ManagementRequest) p
 }
 
 func (en *Engine) settingsResponse() any {
+	cfg := en.Config()
 	return struct {
 		Config
-		Capabilities HostCapabilities `json:"capabilities"`
-	}{en.Config(), en.Capabilities()}
+		IncludeProviderTargets bool             `json:"include_provider_targets"`
+		Capabilities           HostCapabilities `json:"capabilities"`
+	}{cfg, cfg.IncludeProviderTargets, en.Capabilities()}
 }

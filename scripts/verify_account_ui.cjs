@@ -841,14 +841,14 @@ const server = http.createServer(async (req,res) => {
   assert.equal(accounts[0].auth_id,target.auth_id);checks.push('Deleting a saved account requires confirmation and leaves the CPA credential intact');
   await page.locator('#account-import-open').click();await page.locator('#account-import-text').fill('clear-on-401@example.test----unsaved-password----JBSWY3DPEHPK3PXP');
   assert.notEqual(await page.locator('#account-import-text').inputValue(),'');
-  unauthorized=true;await page.locator('#refresh').evaluate(n=>n.click());await page.locator('#login-disconnected').waitFor();assert.equal(await page.locator('[data-login-secret]').evaluateAll(nodes=>nodes.some(n=>n.value)),false);
+  unauthorized=true;await page.locator('#refresh').evaluate(n=>n.click());await page.locator('#connection-open').waitFor();assert.equal(await page.locator('[data-login-secret]').evaluateAll(nodes=>nodes.some(n=>n.value)),false);
   assert.equal(await page.locator('#account-import-dialog').evaluate(n=>n.open),false);
   assert.equal(await page.locator('#account-list .account-row').count(),0);
   await page.locator('#login-connect').click();await page.locator('#management-key').fill('offline-key');await page.locator('#connection-form button[type=submit]').click();await page.locator('#account-import-open:enabled').waitFor();
   const unauthorizedHeld=holdDetail();
   const unauthorizedResponse=accountCompletion(accounts[0].id);
   await row().locator('[data-account-action=edit]').click();await unauthorizedHeld.received;
-  unauthorized=true;await page.locator('#login-refresh').evaluate(n=>n.click());await page.locator('#login-disconnected').waitFor();
+  unauthorized=true;await page.locator('#login-refresh').evaluate(n=>n.click());await page.locator('#connection-open').waitFor();
   unauthorizedHeld.release();await unauthorizedResponse;await settle();
   assert.equal(await page.locator('[data-login-secret]').evaluateAll(nodes=>nodes.some(n=>n.value)),false);assert.equal(await page.locator('#account-list .account-row').count(),0);
   checks.push('A delayed or cancelled detail response after 401 cannot restore saved plaintext or account identity');

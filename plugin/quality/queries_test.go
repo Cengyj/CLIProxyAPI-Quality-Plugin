@@ -61,6 +61,81 @@ func TestHistorySummaryOmitsLongEvidenceOnlyOnListRequests(t *testing.T) {
 			if err != nil || detail.Config.Question.Prompt != "frozen prompt" || detail.Samples[0].Output != long {
 				t.Fatal("summary affected detail")
 			}
+			if tc.source == "manual_test" {
+				preview := row.AnswerPreview
+				if preview == nil || preview.Model != row.Config.Models[0] || preview.Index != 0 || preview.Kind != "text" || !preview.Truncated || preview.Text != strings.TrimRight(long[:96], " ") || detail.AnswerPreview == nil || *detail.AnswerPreview != *preview {
+					t.Fatal("list and detail should carry the same bounded answer preview")
+				}
+				if en.runs[row.ID].AnswerPreview != nil || row.Samples[0].Output != "" {
+					t.Fatal("summary modified storage or included a full output")
+				}
+			} else if strings.Contains(string(short.Body), "\"answer_preview\"") || detail.AnswerPreview != nil {
+				t.Fatal("scheduled rows must not include manual answer previews")
+			}
+		})
+	}
+}
+
+func TestScheduledSummaryKeepsOriginalErrorSource(t *testing.T) {
+	for _, row := range []*Run{
+		{Source: "scheduled_probe", ActionStatus: "observe_only", Samples: []Sample{
+			{ExecutionStatus: "failed", Error: "upstream HTTP 429", UpstreamCondition: "quota_exhausted"},
+			{ExecutionStatus: "failed", Error: "upstream HTTP 429"},
+		}},
+		{Source: "scheduled_probe", Config: Frozen{CatalogMissingModel: "removed-model"}, Status: "skipped"},
+	} {
+		raw, err := json.Marshal(runListSummary(row))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var summary Run
+		if err := json.Unmarshal(raw, &summary); err != nil {
+			t.Fatal(err)
+		}
+		if summary.UpstreamCondition != "" || summary.Config.CatalogMissingModel != row.Config.CatalogMissingModel || len(summary.Samples) != len(row.Samples) {
+			t.Fatal("summary changed the recorded source")
+		}
+		for i, sample := range row.Samples {
+			if summary.Samples[i].UpstreamCondition != sample.UpstreamCondition || summary.Samples[i].Error != sample.Error {
+				t.Fatal("summary lost sample evidence on an observation-only rule")
+			}
+		}
+	}
+}
+
+func TestManualAnswerPreviewUsesFirstRetainedText(t *testing.T) {
+	limit := strings.Repeat("答🙂", 48)
+	for _, tc := range []struct {
+		name, output, kind, text string
+		truncated                bool
+	}{
+		{"collapsed whitespace", " \t甲\n\u3000 乙\r\n 🙂 ", "text", "甲 乙 🙂", false},
+		{"exactly 96 runes", limit + "\n", "text", limit, false},
+		{"over 96 runes", limit + "尾", "text", limit, true},
+		{"padded answer", strings.Repeat(" ", 4100) + "21", "text", "21", false},
+		{"utf8 scan boundary", "答" + strings.Repeat(" ", 4092) + "🙂", "text", "答", true},
+		{"html", "<!DOCTYPE html>\n<html><body>Synthetic markup</body></html>", "html", "", false},
+		{"fenced svg", "```svg\n<?xml version=\"1.0\"?>\n<!-- icon -->\n<SVG/>\n```", "svg", "", false},
+		{"visual mention in text", "An <svg> element", "text", "An <svg> element", false},
+		{"empty", "\t \u3000\r\n", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := &Run{Source: "manual_test", Samples: []Sample{
+				{Model: "a", ExecutionStatus: "failed", Error: "no response"},
+				{Model: "a", Index: 1, Output: " \n"},
+				{Model: "b", Index: 3, ExecutionStatus: "incomplete", Output: tc.output},
+			}}
+			preview := manualAnswerPreview(run)
+			if tc.kind == "" {
+				if preview != nil || runListSummary(run)["answer_preview"] != nil || runForDisplay(run).AnswerPreview != nil {
+					t.Fatal("empty answers should omit the preview")
+				}
+				return
+			}
+			want := AnswerPreview{SampleSlot: SampleSlot{Model: "b", Index: 3}, Kind: tc.kind, Text: tc.text, Truncated: tc.truncated}
+			if preview == nil || *preview != want {
+				t.Fatalf("got %#v, want %#v", preview, want)
+			}
 		})
 	}
 }
@@ -199,6 +274,63 @@ func TestDeleteManualRunPersistsAndPreservesIdempotency(t *testing.T) {
 		if err := en.DeleteManualRun(probe.ID); err == nil {
 			t.Fatal("deleted rule evidence")
 		}
+	}
+}
+
+func TestClearManualHistoryAcrossPages(t *testing.T) {
+	en, host := lifeFixture(t)
+	cfg := lifeConfig()
+	var deletedIDs []string
+	for i := range 12 {
+		cfg.IdempotencyKey = fmt.Sprintf("clear-manual-%d", i)
+		run, err := en.Submit(context.Background(), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := en.Cancel(run.ID); err != nil {
+			t.Fatal(err)
+		}
+		deletedIDs = append(deletedIDs, run.ID)
+	}
+	at := en.now()
+	kept := []*Run{
+		{ID: "queued", Source: "manual_test", Status: "queued"},
+		{ID: "worker", Source: "manual_test", Status: "completed", CompletedAt: &at},
+		{ID: "historical-rule-link", Source: "manual_test", Status: "completed", CompletedAt: &at, Config: Frozen{RuleID: "rule"}},
+		{ID: "probe", Source: "scheduled_probe", Status: "completed", CompletedAt: &at},
+	}
+	for _, r := range kept {
+		en.runs[r.ID] = r
+		if err := en.store.Put("runs", r.ID, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	en.active["worker"] = func() { t.Error("clearing history cancelled an active worker") }
+	req := pluginapi.ManagementRequest{Method: http.MethodDelete, Path: "/v0/management/plugins/model-quality/runs/history"}
+	filtered := req
+	filtered.Query = url.Values{"id": {deletedIDs[0]}}
+	if res := en.Handle(context.Background(), filtered); res.StatusCode != http.StatusBadRequest || len(en.runs) != len(deletedIDs)+len(kept) {
+		t.Fatal("filtered request unexpectedly cleared history", res.StatusCode)
+	}
+	for _, deleted := range []int{len(deletedIDs), 0} {
+		res := en.Handle(context.Background(), req)
+		var counts historyClearResult
+		if res.StatusCode != http.StatusOK || json.Unmarshal(res.Body, &counts) != nil || counts.Deleted != deleted || counts.Kept != 3 {
+			t.Fatalf("clear response %d: %s", res.StatusCode, res.Body)
+		}
+	}
+	for _, id := range deletedIDs {
+		if en.runs[id] != nil || !errors.Is(en.store.Get("runs", id, &Run{}), os.ErrNotExist) {
+			t.Fatal("finished manual test survived clear", id)
+		}
+	}
+	for _, r := range kept {
+		if en.runs[r.ID] != r || en.store.Get("runs", r.ID, &Run{}) != nil {
+			t.Fatal("lost retained run", r.ID)
+		}
+	}
+	if _, err := en.Submit(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "gone:") || len(host.calls) != 0 {
+		t.Fatal("clearing history allowed a previous test to replay", err)
 	}
 }
 

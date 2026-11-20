@@ -15,6 +15,28 @@ func scopedTarget(id string, models ...string) Target {
 	return Target{AuthID: id, AuthIndex: "ix-" + id, Provider: "offline", RuntimeStatus: "active", EffectiveAvailable: true, Models: models, catalogVerified: true}
 }
 
+func TestVisibleTargetsSeparatesLiveAvailabilityFromHistoricalError(t *testing.T) {
+	en, _, _ := scopeFixture(t, scopedTarget("a", "current"), scopedTarget("b", "current"), scopedTarget("c", "current"))
+	en.managed = map[string]*CredentialDisposition{
+		"a": {AuthID: "a", State: "disabled", CatalogMissingModel: "old-model"},
+		"b": {AuthID: "b", State: "disabled"},
+		"c": {AuthID: "c", State: "acknowledged", UpstreamCondition: "unauthorized"},
+	}
+	targets, err := en.visibleTargets(context.Background())
+	if err != nil || len(targets) != 3 {
+		t.Fatal(targets, err)
+	}
+	current := targets[0]
+	history := current.ErrorPolicyBlock
+	if !current.EffectiveAvailable || current.ManualDisabled || current.CredentialHandling != "disabled" ||
+		history == nil || history.Code != "error_policy_disabled" || history.Model != "old-model" || history.Reason != "CPA 注册目录缺少所选模型" {
+		t.Fatalf("lost or conflated the live and historical states: %+v, %+v", current, history)
+	}
+	if targets[1].ErrorPolicyBlock != nil || targets[2].ErrorPolicyBlock != nil {
+		t.Fatal("non-error and acknowledged dispositions must not appear as error suspensions")
+	}
+}
+
 func scopeFixture(t *testing.T, targets ...Target) (*Engine, *semanticsHost, *Rule) {
 	t.Helper()
 	en, h, _ := semanticsEngine(t)
@@ -313,7 +335,7 @@ func TestScopeSchedulingAndLegacyConfiguration(t *testing.T) {
 func TestNativeScopeUsesPinnedLookupsAndVerifiesCatalog(t *testing.T) {
 	ctx := context.Background()
 	en, _, r := scopeFixture(t)
-	target := pluginapi.HostAuthFileEntry{ID: "one", AuthIndex: "idx", Provider: "offline", Status: "active"}
+	target := pluginapi.HostAuthFileEntry{ID: "one", AuthIndex: "idx", Provider: "offline", Source: "file", Status: "active"}
 	catalog := pluginapi.HostAuthModels{ID: "one", AuthIndex: "idx", Provider: "offline", Models: []string{"a", "b"}}
 	var full, pinned, calls int
 	h := &NativeHost{Call: func(method string, request, response any) error {

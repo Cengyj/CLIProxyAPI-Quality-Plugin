@@ -18,9 +18,10 @@ func TestScopeDispatchPersistsEveryCountedSkip(t *testing.T) {
 	for id, entry := range f.entries {
 		entry.Email = id + "@example.test"
 		switch id {
-		case "one":
+		case "one", "kimi":
 			entry.Disabled, entry.Status = true, "disabled"
-		case "kimi":
+		}
+		if id == "kimi" {
 			entry.Provider = "kimi"
 		}
 		f.entries[id] = entry
@@ -44,14 +45,20 @@ func TestScopeDispatchPersistsEveryCountedSkip(t *testing.T) {
 	if err != nil || receipt.Count != 2 || receipt.Skipped != 1 || len(receipt.SkipDetails) != 1 || receipt.BatchID == "" {
 		t.Fatal(receipt, err)
 	}
-	if receipt.SkipDetails[0].AuthID != "one" || receipt.SkipDetails[0].Code != "manual_disabled" {
+	if receipt.SkipDetails[0].AuthID != "kimi" || receipt.SkipDetails[0].Code != "unsupported_provider" || !receipt.SkipDetails[0].NotExecuted {
 		t.Fatal(receipt)
 	}
 	for task := f.engine.nextRunnableLocked(); task != nil; task = f.engine.nextRunnableLocked() {
 		f.engine.executeTask(task)
 	}
-	codes := map[string]string{"one": "manual_disabled", "partial": "missing_model", "kimi": "unsupported_provider"}
+	codes := map[string]string{"partial": "missing_model", "kimi": "unsupported_provider"}
 	for _, run := range f.engine.runs {
+		if run.Config.AuthID == "one" {
+			if run.Status != "completed" || len(run.Samples) != 2 || run.Config.ManagedProbe == nil || !run.Config.ManagedProbe.Disabled || run.ActionStatus != "credential_kept_disabled" {
+				t.Fatal("manually disabled account was not observed in place", run)
+			}
+			continue
+		}
 		detail := run.PreflightDetail
 		if detail == nil {
 			detail = run.SkipDetail
@@ -59,7 +66,7 @@ func TestScopeDispatchPersistsEveryCountedSkip(t *testing.T) {
 		if detail == nil || detail.Code != codes[run.Config.AuthID] || detail.RunID != run.ID || detail.Email != run.Config.AuthID+"@example.test" || detail.Reason == "" {
 			t.Fatal("missing check evidence", run)
 		}
-		want := map[string]string{"one": "skipped", "partial": "completed", "kimi": "failed"}[run.Config.AuthID]
+		want := map[string]string{"partial": "completed", "kimi": "skipped"}[run.Config.AuthID]
 		if run.Status != want || len(run.Samples) != 0 || run.CompletedAt == nil || run.Config.Question.Prompt == "" || !reflect.DeepEqual(run.Config.Models, r.Models) || run.Config.ScopeBatchID != receipt.BatchID {
 			t.Fatal("invalid frozen result", run)
 		}
@@ -77,7 +84,7 @@ func TestScopeDispatchPersistsEveryCountedSkip(t *testing.T) {
 		}
 		delete(codes, run.Config.AuthID)
 	}
-	if len(codes) != 0 || f.probes != 0 || f.nativeCalls != 0 || len(f.patches) != 0 || f.deletes != 0 {
+	if len(codes) != 0 || f.probes != 2 || f.disabledProbes != 2 || f.nativeCalls != 0 || len(f.patches) != 0 || f.deletes != 0 {
 		t.Fatal(codes, "preflight called or wrote")
 	}
 	page, err := f.engine.QueryRuns(url.Values{"view": {"summary"}, "rule_id": {r.ID}, "scope_batch_id": {receipt.BatchID}})
@@ -85,6 +92,9 @@ func TestScopeDispatchPersistsEveryCountedSkip(t *testing.T) {
 		t.Fatal(page, err)
 	}
 	for _, item := range page["items"].([]map[string]any) {
+		if item["config"].(map[string]any)["auth_id"] == "one" {
+			continue
+		}
 		detail, _ := item["preflight_detail"].(*ScopeSkipDetail)
 		if detail == nil {
 			detail, _ = item["skip_detail"].(*ScopeSkipDetail)
@@ -95,7 +105,7 @@ func TestScopeDispatchPersistsEveryCountedSkip(t *testing.T) {
 		detail.Reason = "changed list copy"
 	}
 	metrics, err := f.engine.metrics(true)
-	if err != nil || metrics["planned"] != 0 || metrics["unknown"] != 0 || metrics["covered"] != 0 || metrics["quality_pass_rate"] != nil {
+	if err != nil || metrics["planned"] != 2 || metrics["unknown"] != 0 || metrics["covered"] != 2 || metrics["quality_pass_rate"] != 1.0 {
 		t.Fatal("checks counted as answers", metrics, err)
 	}
 	original := cloneScopeDispatch(f.engine.rules[r.ID].LastScopeDispatch)
@@ -117,6 +127,9 @@ func TestScopeDispatchPersistsEveryCountedSkip(t *testing.T) {
 		t.Fatal("lost history on reload")
 	}
 	for _, run := range f.engine.runs {
+		if run.Config.AuthID == "one" {
+			continue
+		}
 		detail := run.PreflightDetail
 		if detail == nil {
 			detail = run.SkipDetail

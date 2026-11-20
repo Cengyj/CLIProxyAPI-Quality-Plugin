@@ -43,19 +43,21 @@ func (en *Engine) unsupportedRule(r *Rule) bool {
 }
 
 type Config struct {
-	DataDir           string `json:"data_dir" yaml:"data_dir"`
-	SchedulingEnabled bool   `json:"scheduling_enabled" yaml:"scheduling_enabled"`
-	AutomaticPause    bool   `json:"automatic_pause" yaml:"automatic_pause"`
-	Workers           int    `json:"workers" yaml:"workers"`
-	Queue             int    `json:"queue" yaml:"queue"`
-	MaxModels         int    `json:"max_models" yaml:"max_models"`
-	MaxSamples        int    `json:"max_samples" yaml:"max_samples"`
-	MaxOutputTokens   int    `json:"max_output_tokens" yaml:"max_output_tokens"`
-	MaxResponseBytes  int    `json:"max_response_bytes" yaml:"max_response_bytes"`
-	DailyCalls        int    `json:"daily_calls" yaml:"daily_calls"`
-	DailyTokens       int64  `json:"daily_tokens" yaml:"daily_tokens"`
-	RetentionDays     int    `json:"retention_days" yaml:"retention_days"`
-	MaxStorageBytes   int64  `json:"max_storage_bytes" yaml:"max_storage_bytes"`
+	// Omitting the default keeps existing host configuration fingerprints stable.
+	IncludeProviderTargets bool   `json:"include_provider_targets,omitempty" yaml:"include_provider_targets"`
+	DataDir                string `json:"data_dir" yaml:"data_dir"`
+	SchedulingEnabled      bool   `json:"scheduling_enabled" yaml:"scheduling_enabled"`
+	AutomaticPause         bool   `json:"automatic_pause" yaml:"automatic_pause"`
+	Workers                int    `json:"workers" yaml:"workers"`
+	Queue                  int    `json:"queue" yaml:"queue"`
+	MaxModels              int    `json:"max_models" yaml:"max_models"`
+	MaxSamples             int    `json:"max_samples" yaml:"max_samples"`
+	MaxOutputTokens        int    `json:"max_output_tokens" yaml:"max_output_tokens"`
+	MaxResponseBytes       int    `json:"max_response_bytes" yaml:"max_response_bytes"`
+	DailyCalls             int    `json:"daily_calls" yaml:"daily_calls"`
+	DailyTokens            int64  `json:"daily_tokens" yaml:"daily_tokens"`
+	RetentionDays          int    `json:"retention_days" yaml:"retention_days"`
+	MaxStorageBytes        int64  `json:"max_storage_bytes" yaml:"max_storage_bytes"`
 }
 
 func DefaultConfig() Config {
@@ -107,15 +109,21 @@ type Question struct {
 	Family  string `json:"family,omitempty"`
 }
 type Frozen struct {
-	CatalogMissingModel  string              `json:"catalog_missing_model,omitempty"`
-	UpstreamErrorActions map[string]string   `json:"upstream_error_actions,omitempty"`
-	ManagedProbe         *CredentialSnapshot `json:"managed_probe,omitempty"`
-	ScopeBatchID         string              `json:"scope_batch_id,omitempty"`
-	SubjectIndex         string              `json:"subject_auth_index,omitempty"`
-	Scheduled            bool                `json:"scheduled_dispatch,omitempty"`
-	JudgeIdentity        string              `json:"judge_identity,omitempty"`
-	ControlIdentity      string              `json:"control_identity,omitempty"`
-	ComparisonIdentity   string              `json:"comparison_identity,omitempty"`
+	RecoveryCheck            bool                `json:"recovery_check,omitempty"`
+	ProviderName             string              `json:"provider_name,omitempty"`
+	ProviderObservation      bool                `json:"provider_observation,omitempty"`
+	ProviderDependencies     []string            `json:"provider_dependencies,omitempty"`
+	ManualAccountFingerprint string              `json:"manual_account_fingerprint,omitempty"`
+	ManualPolicyActionID     string              `json:"manual_policy_action_id,omitempty"`
+	CatalogMissingModel      string              `json:"catalog_missing_model,omitempty"`
+	UpstreamErrorActions     map[string]string   `json:"upstream_error_actions,omitempty"`
+	ManagedProbe             *CredentialSnapshot `json:"managed_probe,omitempty"`
+	ScopeBatchID             string              `json:"scope_batch_id,omitempty"`
+	SubjectIndex             string              `json:"subject_auth_index,omitempty"`
+	Scheduled                bool                `json:"scheduled_dispatch,omitempty"`
+	JudgeIdentity            string              `json:"judge_identity,omitempty"`
+	ControlIdentity          string              `json:"control_identity,omitempty"`
+	ComparisonIdentity       string              `json:"comparison_identity,omitempty"`
 	RunConfig
 	Question             Question `json:"question"`
 	IdentityVersion      string   `json:"identity_version"`
@@ -165,7 +173,15 @@ type SampleSlot struct {
 	Model string `json:"model"`
 	Index int    `json:"index"`
 }
+type AnswerPreview struct {
+	SampleSlot
+	Kind      string `json:"kind"`
+	Text      string `json:"text,omitempty"`
+	Truncated bool   `json:"truncated"`
+}
 type Run struct {
+	HistoryCleared    bool             `json:"history_cleared,omitempty"`
+	AnswerPreview     *AnswerPreview   `json:"answer_preview,omitempty"` // Derived on reads.
 	PreflightDetail   *ScopeSkipDetail `json:"preflight_detail,omitempty"`
 	SkipDetail        *ScopeSkipDetail `json:"skip_detail,omitempty"`
 	UpstreamCondition string           `json:"upstream_condition,omitempty"`
@@ -187,20 +203,27 @@ type Run struct {
 	CancelRequested   bool             `json:"cancel_requested"`
 }
 type Rule struct {
-	UpstreamErrorActions map[string]string `json:"upstream_error_actions,omitempty"`
-	AutoRestore          bool              `json:"auto_restore,omitempty"`
-	timerActive          bool
-	TargetScope          string                `json:"target_scope,omitempty"`
-	LastScopeBatch       string                `json:"last_scope_batch,omitempty"`
-	LastManualSkips      []string              `json:"last_manual_skips,omitempty"`
-	LastScopeDispatch    *ScopeDispatchSummary `json:"last_scope_dispatch,omitempty"`
-	IntentRevision       uint64                `json:"intent_revision,omitempty"`
-	Status               string                `json:"status"`
-	BlockedAuthID        string                `json:"blocked_auth_id,omitempty"`
-	EvidenceSignature    string                `json:"evidence_signature,omitempty"`
-	ID                   string                `json:"id"`
-	Revision             uint64                `json:"revision"`
-	Name                 string                `json:"name"`
+	ObjectTypes               []string          `json:"object_types,omitempty"`
+	TargetGroup               string            `json:"target_group,omitempty"`
+	TargetAuthIndex           string            `json:"target_auth_index,omitempty"`
+	AuthorizedGroups          []string          `json:"authorized_groups,omitempty"`
+	LegacyScope               bool              `json:"legacy_scope,omitempty"`
+	LegacyProviderObservation bool              `json:"legacy_provider_observation,omitempty"`
+	AdoptScope                bool              `json:"adopt_scope,omitempty"`
+	UpstreamErrorActions      map[string]string `json:"upstream_error_actions,omitempty"`
+	AutoRestore               bool              `json:"auto_restore,omitempty"`
+	timerActive               bool
+	TargetScope               string                `json:"target_scope,omitempty"`
+	LastScopeBatch            string                `json:"last_scope_batch,omitempty"`
+	LastManualSkips           []string              `json:"last_manual_skips,omitempty"`
+	LastScopeDispatch         *ScopeDispatchSummary `json:"last_scope_dispatch,omitempty"`
+	IntentRevision            uint64                `json:"intent_revision,omitempty"`
+	Status                    string                `json:"status"`
+	BlockedAuthID             string                `json:"blocked_auth_id,omitempty"`
+	EvidenceSignature         string                `json:"evidence_signature,omitempty"`
+	ID                        string                `json:"id"`
+	Revision                  uint64                `json:"revision"`
+	Name                      string                `json:"name"`
 	RunConfig
 	Action             string    `json:"action"`
 	Enabled            bool      `json:"enabled"`
@@ -222,29 +245,38 @@ type Rule struct {
 	IdentityVersion    string    `json:"identity_version,omitempty"`
 }
 type Target struct {
+	providerProbeModels  map[string]bool
+	providerFamilyName   string
+	ProviderGroupID      string `json:"provider_group_id,omitempty"`
+	ProviderDisableUnit  string `json:"provider_disable_unit,omitempty"`
+	ProviderProbeReason  string `json:"provider_probe_reason,omitempty"`
+	ObjectType           string `json:"object_type,omitempty"`
+	IsProvider           bool   `json:"is_provider,omitempty"`
+	ProviderName         string `json:"provider_name,omitempty"`
 	identityConflict     bool
 	identityVerified     bool
 	catalogVerified      bool
-	Email                string   `json:"email,omitempty"`
-	CredentialHandling   string   `json:"credential_handling,omitempty"`
-	RuntimeStatus        string   `json:"runtime_status,omitempty"`
-	RetainedPause        bool     `json:"retained_pause,omitempty"`
-	PayloadConfigVersion string   `json:"payload_config_version"`
-	ComparisonIdentity   string   `json:"comparison_identity,omitempty"`
-	AuthID               string   `json:"auth_id"`
-	AuthIndex            string   `json:"auth_index"`
-	Provider             string   `json:"provider"`
-	Type                 string   `json:"type"`
-	Models               []string `json:"models"`
-	Reasoning            any      `json:"reasoning"`
-	IdentityVersion      string   `json:"identity_version"`
-	ManualDisabled       bool     `json:"manual_disabled"`
-	QualityPaused        bool     `json:"quality_paused"`
-	EffectiveAvailable   bool     `json:"effective_available"`
-	Reasons              []string `json:"reasons"`
-	CanPause             bool     `json:"can_pause"`
-	CanRetest            bool     `json:"can_retest"`
-	UnsupportedReason    string   `json:"unsupported_reason,omitempty"`
+	Email                string           `json:"email,omitempty"`
+	CredentialHandling   string           `json:"credential_handling,omitempty"`
+	ErrorPolicyBlock     *ScopeSkipDetail `json:"error_policy_block,omitempty"`
+	RuntimeStatus        string           `json:"runtime_status,omitempty"`
+	RetainedPause        bool             `json:"retained_pause,omitempty"`
+	PayloadConfigVersion string           `json:"payload_config_version"`
+	ComparisonIdentity   string           `json:"comparison_identity,omitempty"`
+	AuthID               string           `json:"auth_id"`
+	AuthIndex            string           `json:"auth_index"`
+	Provider             string           `json:"provider"`
+	Type                 string           `json:"type"`
+	Models               []string         `json:"models"`
+	Reasoning            any              `json:"reasoning"`
+	IdentityVersion      string           `json:"identity_version"`
+	ManualDisabled       bool             `json:"manual_disabled"`
+	QualityPaused        bool             `json:"quality_paused"`
+	EffectiveAvailable   bool             `json:"effective_available"`
+	Reasons              []string         `json:"reasons"`
+	CanPause             bool             `json:"can_pause"`
+	CanRetest            bool             `json:"can_retest"`
+	UnsupportedReason    string           `json:"unsupported_reason,omitempty"`
 }
 type Action struct {
 	Status          string    `json:"status,omitempty"`

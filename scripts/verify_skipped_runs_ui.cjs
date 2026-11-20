@@ -39,8 +39,8 @@ async function main() {
     const legacyConfig = { ...config, scope_batch_id: 'earlier', auth_id: catalog.auth_id, catalog_missing_model: catalog.model };
     const legacy = (id, change) => ({ ...base, id, status: 'skipped', config: legacyConfig, skip_detail: { ...catalog, run_id: id }, ...change });
     const oldCases = [
-      { row: legacy('old-queue-full', { block_reason: 'queue_full' }), state: '跳过', explanation: '队列容量不足，本轮未入队。' },
-      { row: legacy('old-budget', { block_reason: 'budget_exhausted' }), state: '跳过', explanation: '调用预算已用尽，本轮未执行。' },
+      { row: legacy('old-queue-full', { block_reason: 'queue_full' }), state: '未执行', explanation: '队列容量不足，本轮未入队。' },
+      { row: legacy('old-budget', { block_reason: 'budget_exhausted' }), state: '未执行', explanation: '调用预算已用尽，本轮未执行。' },
       { row: legacy('old-cancelled', { status: 'cancelled', cancel_requested: true, error: 'context canceled' }), state: '已取消', explanation: '测试已取消' },
       { row: legacy('old-action', { action_status: 'credential_suspended', credential_action: 'disable_credential' }), state: '已检测', explanation: catalog.reason },
     ];
@@ -76,9 +76,14 @@ async function main() {
         }
         return route.continue();
       }
+      if (api === '/rules/scope-preview' && req.method() === 'POST') return route.continue();
       assert.equal(req.method(), 'POST'); assert.equal(api, '/rules/run');
       writes.push(req.postDataJSON());
       if (writes.at(-1).id === 'single-runtime') return route.fulfill({ json: { run_id: 'read-failure', count: 1, skipped: 0 } });
+      const id = writes.at(-1).id;
+      if (id === catalog.auth_id) return route.fulfill({json:{count:0,skipped:0,reason:'对象已按错误规则暂停，退出运维检测。'}});
+      if (id === 'manual-disabled' || id === 'retained') return route.fulfill({json:{count:0,skipped:1,skip_details:[{auth_id:id,
+        code:id === 'retained' ? 'quality_paused' : 'manual_disabled',reason:id === 'retained' ? '历史质量暂停仍然生效。' : '指定对象已被人工停用。'}]}});
       assert.equal(writes.at(-1).id, 'rule');
       rule.last_scope_batch = 'mixed';
       rule.last_scope_dispatch = { at: stamp, matched: 1, skipped: 1, details: [protectedSkip] };
@@ -92,32 +97,36 @@ async function main() {
     };
     await page.goto(url); await page.click('#connection-open'); await page.fill('#management-key', management_key);
     await page.click('#connection-form button[type=submit]'); await page.waitForSelector('body.connected'); await page.click('[data-page=operations]');
+    await page.click('[data-rule-select=rule]');
+    await el('#ops-rule-context [data-rule-handling] > summary').click();
     for (const [index, state] of ['disabled', 'deleted', 'attention'].entries()) {
-      const record = el('.quality-handling-records > div').nth(index);
+      const record = el('#ops-rule-context .quality-handling-records > div').nth(index);
       assert.match(await record.innerText(), /CPA 注册目录缺少 missing-pro/); assert.doesNotMatch(await record.innerText(), /400\/404/);
       const action = record.locator('[data-handling-ack]');
       assert.equal(await action.isVisible(), state === 'attention');
       if (state !== 'attention') { assert.match(await record.innerText(), state === 'disabled' ? /已按错误规则暂停，退出后续检测/ : /无需人工标记/); await record.locator('summary').click(); assert(await action.isVisible()); await record.locator('summary').click(); }
     }
+    await page.click('#ops-all-rules');
     await page.click('[data-rule-edit=rule]'); assert.match(await el('#rule-upstream-note').innerText(), /CPA 目录.*400\/404/);
     await page.click('#rule-form .editor-footer [data-close]');
     await page.click('[data-rule-run=rule]'); await page.click('#action-confirm'); await el('#action-dialog').waitFor({ state: 'hidden' });
     assert.equal(writes.length, 1); await el('#ops-batch-summary').filter({ hasText: '1–2 / 2' }).waitFor();
     assert.equal(await el('#operations-history [data-run]').count(), 2);
-    assert.match(await el('#ops-dispatch-receipt').innerText(), /纳入检测 1 个 · 跳过 1 个/);
+    assert.match(await el('#ops-dispatch-receipt').innerText(), /检测 1 个 · 未执行 1 个/);
     assert.equal(await el('#ops-dispatch-receipt [data-run=catalog]').count(), 0);
     await shot('mixed-batch');
     for (const [index, row] of rows.slice(0, 2).entries()) {
       const rendered = el('#operations-history tr').filter({ has: el('[data-run="' + row.id + '"]') });
       const text = await rendered.innerText();
       const detail = row.preflight_detail || row.skip_detail;
-      assert(text.includes(row.config.auth_id) && text.includes(email) && text.includes(detail.reason));
+      assert(text.includes(row.config.auth_id) && text.includes(email));
+      assert(text.includes(index ? detail.reason : '未请求上游'));
       assert(!text.includes('暂无判定') && !text.includes('400/404')); assert.equal(await rendered.locator('time').getAttribute('datetime'), stamp);
       const link = index ? el('#ops-dispatch-receipt [data-run="' + row.id + '"]') : rendered.locator('[data-run]');
-      if (!index) assert.match(text, /已检测[\s\S]*模型不支持（CPA 目录）/);
+      if (!index) assert.match(text, /已检测[\s\S]*CPA 目录未注册所选模型/);
       await link.click(); await content.getByText(detail.reason, { exact: true }).waitFor();
       assert.equal(await content.locator('.sample, [data-review-sample]').count(), 0);
-      assert.match(await content.innerText(), index ? /未发起模型请求/ : /目录检查已确认不支持所选模型，未发起答题/); assert.doesNotMatch(await content.innerText(), /样本缺失|上游错误|400\/404/);
+      assert.match(await content.innerText(), index ? /未发起模型请求/ : /CPA 目录未注册所选模型，本次未请求上游/); assert.doesNotMatch(await content.innerText(), /样本缺失|上游响应|上游 HTTP/);
       const doc = await download(); assert.equal(doc.status, row.status); assert.deepEqual(doc.skip_detail, row.skip_detail); assert.deepEqual(doc.preflight_detail, row.preflight_detail); assert.deepEqual(doc.samples, []);
       assert(!doc.upstream_condition); assert.equal(doc.action_status, row.action_status);
       if (index === 0) for (const [width, theme] of [[1440,'light'],[390,'dark'],[320,'white']]) {
@@ -133,7 +142,7 @@ async function main() {
     assert.equal(await content.locator('.sample').count(), 0); pending = false;
     await content.getByText('已暂停凭证', { exact: true }).waitFor(); await page.keyboard.press('Escape');
     await page.click('#ops-batch-clear'); await el('#operations-history [data-run=http]').click();
-    await content.getByText('400/404 指定模型不支持', { exact: true }).first().waitFor();
+    await content.getByText('上游已确认指定模型不支持', { exact: true }).first().waitFor();
     assert.equal(await content.locator('.sample').count(), 1); const actual = await download(); assert.equal(actual.samples[0].upstream_condition, 'model_unsupported');
     await shot('upstream-probe'); await page.keyboard.press('Escape');
     await page.click('#operations-history [data-run=changed]');
@@ -159,18 +168,18 @@ async function main() {
       const facts = await content.locator('.quality-detail-facts').innerText();
       for (const surface of [list, facts]) {
         assert(surface.includes(state), row.id + ' state: ' + surface);
-        assert(surface.includes(explanation), row.id + ' reason: ' + surface);
-        if (state !== '已检测') assert.doesNotMatch(surface, /已检测|模型不支持（CPA 目录）|已暂停凭证|目录检查已确认/);
+        assert(surface.includes(surface === list && state === '已检测' ? '未请求上游' : explanation), row.id + ' reason: ' + surface);
+        if (state !== '已检测') assert.doesNotMatch(surface, /已检测|CPA 目录未注册所选模型|已暂停凭证/);
       }
       assert.equal(await content.locator('.sample').count(), 0);
       assert.deepEqual(await download(), row); await page.keyboard.press('Escape');
     }
-    for (const [id, message] of [['manual-disabled', '人工禁用'], ['retained', '质量暂停'], [catalog.auth_id, '按错误规则暂停']]) {
+    for (const [id, message] of [['manual-disabled', '人工停用'], ['retained', '质量暂停'], [catalog.auth_id, '按错误规则暂停']]) {
       await page.click('[data-rule-run="' + id + '"]');
-      await el('#notice').filter({ hasText: message }).waitFor(); assert.equal(writes.length, 1);
+      await el('#ops-dispatch-receipt').filter({ hasText: message }).waitFor();
     }
     await page.click('[data-rule-run="single-runtime"]'); await content.getByText('当前凭证状态检查', { exact: true }).waitFor();
-    assert.deepEqual(writes.map(write => write.id), ['rule', 'single-runtime']); await page.keyboard.press('Escape');
+    assert.deepEqual(writes.map(write => write.id), ['rule', 'manual-disabled', 'retained', catalog.auth_id, 'single-runtime']); await page.keyboard.press('Escape');
     assert.deepEqual(errors, []);
     if (out) await fs.writeFile(path.join(out, 'skipped-history-ui.json'), JSON.stringify({ writes, reads, exported, captures, modelCalls: 0, credentialWrites: 0 }, null, 2) + '\n');
     console.log('Verified current and legacy catalog checks, mixed-batch counts, protected skips, preflight failures, real HTTP evidence and original exports.');

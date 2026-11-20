@@ -8,7 +8,6 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/robfig/cron/v3"
-	bolt "go.etcd.io/bbolt"
 )
 
 const defaultRuleCron = "*/30 * * * *"
@@ -35,18 +34,12 @@ func (en *Engine) changedTimer(id string, on bool) map[string]bool {
 
 // An explicit instance-wide stop revokes individual authorizations as well.
 func (en *Engine) writeScheduleSettings(c Config, revokeTimers bool) error {
-	err := en.store.Write(func(tx *bolt.Tx) error {
-		if revokeTimers {
-			if err := tx.Bucket([]byte("meta")).Delete([]byte(ruleTimersKey)); err != nil {
-				return err
-			}
-		}
-		return put(tx, "meta", "settings", c)
-	})
-	if err == nil && revokeTimers {
-		en.timers = nil
+	update := changes()
+	update.settings = &c
+	if revokeTimers {
+		update.timers = map[string]bool{}
 	}
-	return err
+	return en.commitLocked(update)
 }
 
 var fiveFieldCron = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)

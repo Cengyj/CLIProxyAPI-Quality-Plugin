@@ -2,6 +2,14 @@
 
 This workspace is for a standalone CLIProxyAPI native plugin with manual model evaluation and credential quality operations.
 
+## Local CPA updates
+
+On 2026-11-20 the user authorized updating the plugin in the local CPA at
+`http://127.0.0.1:8317/management.html#/plugin-pages/model-quality/0` after
+plugin changes without asking again. Build the full plugin for the running
+instance's architecture, preserve its data, and verify the assets served by
+that instance. Follow any later request to defer building or deployment.
+
 ## GitHub release target
 
 The user specified on 2026-11-20 that GitHub releases only require a Linux

@@ -34,6 +34,10 @@ async function main() {
     let fixtureReads = 0, detailReads = 0; const writes = [], checks = [], manual_checks = [], account_checks = [], served = {};
     await context.route('**/*', async route => {
       const req = route.request(), u = new URL(req.url());
+      if (u.origin === origin && u.pathname === '/v0/management/plugins/model-quality/rules/scope-preview' && req.method() === 'POST') {
+        assert.equal(req.headers().authorization, 'Bearer ' + fixture.management_key);
+        return route.fulfill({json:{verified:true,candidates:{oauth:0,provider:0},count:0,skipped:0,recovery_count:0}});
+      }
       if (req.method() !== 'GET') { writes.push(req.method()); return route.abort(); }
       if (u.origin !== origin) return route.abort();
       if (u.pathname.startsWith(prefix) && allowed.has(u.pathname)) {
@@ -93,8 +97,8 @@ async function main() {
       await back.click();await editor.waitFor({state:'hidden'});await opener.click();await editor.waitFor();
       assert(await frame.locator('#rule-scope-all').isChecked()); assert(await frame.locator('#rule-target-field').isHidden());
       assert.equal(await frame.locator('#rule-max-tokens,#settings-open,#settings-dialog').count(), 0);
-      assert.match(await frame.locator('#rule-scope-note').textContent(), /暂无匹配凭证/);
-      assert.deepEqual(await frame.locator('#rule-model-selection code').allTextContents(),['gpt-6-astra']);
+      await frame.locator('#rule-scope-note').filter({hasText:'OAuth 账户 0 个'}).waitFor();
+      assert.deepEqual(await frame.locator('#rule-model-selection code').allTextContents(),['gpt-6.2-sol']);
       const radios = frame.getByRole('group',{name:'思考强度'}).getByRole('radio');
       assert.deepEqual(await radios.evaluateAll(o=>o.map(n=>n.value)),['low','medium','high','xhigh','max']);
       assert(await frame.getByRole('radio',{name:'高 high',exact:true}).isChecked());
@@ -122,7 +126,7 @@ async function main() {
       await frame.locator('#rule-scope-single').check(); assert(await frame.locator('#rule-target-field').isVisible());
       await frame.locator('#rule-scope-all').check();
       await frame.locator('[data-add-model="gpt-6.1-sol"]').click();
-      assert.deepEqual(await frame.locator('#rule-model-selection code').allTextContents(),['gpt-6-astra','gpt-6.1-sol']);
+      assert.deepEqual(await frame.locator('#rule-model-selection code').allTextContents(),['gpt-6.2-sol','gpt-6.1-sol']);
       await frame.getByRole('radio',{name:'最高 max',exact:true}).check();
       assert(await frame.getByRole('radio',{name:'最高 max',exact:true}).isChecked());
       await frame.locator('#rule-preview-toggle').click();await frame.getByText('合成参考答案',{exact:true}).waitFor();

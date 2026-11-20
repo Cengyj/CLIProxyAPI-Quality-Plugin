@@ -57,6 +57,31 @@ func TestRuntimeShutdownCancelsAndDrainsLeasesBeforeClosing(t *testing.T) {
 	}
 }
 
+func TestProviderConfigReloadKeepsInFlightEngine(t *testing.T) {
+	var runtime engineRuntime
+	settings := runtimeConfig{settings: quality.DefaultConfig(), managementURL: "http://127.0.0.1:18379"}
+	first := &testRuntimeEngine{}
+	if err := runtime.configure(settings, false, func() (runtimeEngine, error) { return first, nil }); err != nil {
+		t.Fatal(err)
+	}
+	instance, release, err := runtime.acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runtime.configure(settings, true, func() (runtimeEngine, error) { return nil, errors.New("unexpected restart") })
+	release()
+	if err != nil || instance.ctx.Err() != nil || first.closed.Load() != 0 {
+		t.Fatal("provider config reload interrupted a running operation", err)
+	}
+	settings.settings.Workers++
+	if err := runtime.configure(settings, true, func() (runtimeEngine, error) { return &testRuntimeEngine{}, nil }); err != nil || first.closed.Load() != 1 {
+		t.Fatal("changed plugin settings were not applied", err)
+	}
+	if err := runtime.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeReplacementWaitsForOldCallbacksAndUsesNewContext(t *testing.T) {
 	var r engineRuntime
 	old := &testRuntimeEngine{}

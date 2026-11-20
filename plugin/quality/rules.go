@@ -63,6 +63,9 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 		return nil, unsupportedQuality()
 	}
 	old := en.rules[in.ID]
+	if err := selectRuleObjects(&in, old); err != nil {
+		return nil, err
+	}
 	if err := prepareUpstreamActions(&in, old); err != nil {
 		return nil, err
 	}
@@ -93,12 +96,16 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 			in.TargetScope = old.TargetScope
 		}
 	}
-	scoped := dynamicScope(in.TargetScope)
+	scoped := dynamicScope(in.TargetScope) || in.TargetGroup != ""
 	if in.TargetScope != "" && in.TargetScope != "single" && !scoped {
 		return nil, fmt.Errorf("invalid_request: unknown target scope")
 	}
 	if scoped && (in.AutomaticPause || (in.Action != "" && in.Action != "observe_only" && !credentialMutation(in.Action)) || en.Capabilities().QualityPause) {
 		return nil, fmt.Errorf("unsupported: dynamic scope is for official-host observation only")
+	}
+	modelDefault := in.Parameters.ReasoningEffort == "default"
+	if modelDefault {
+		in.Parameters.ReasoningEffort = ""
 	}
 	if update && old != nil {
 		if in.Parameters.MaxTokens == 0 {
@@ -107,17 +114,17 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 		if in.Parameters.Temperature == nil {
 			in.Parameters.Temperature = old.Parameters.Temperature
 		}
-		if in.Parameters.ReasoningEffort == "" {
+		if in.Parameters.ReasoningEffort == "" && !modelDefault {
 			in.Parameters.ReasoningEffort = old.Parameters.ReasoningEffort
 		}
-	} else if in.Parameters.ReasoningEffort == "" {
+	} else if in.Parameters.ReasoningEffort == "" && !modelDefault {
 		in.Parameters.ReasoningEffort = "high"
 	}
 	switch in.Parameters.ReasoningEffort {
 	case "low", "medium", "high", "xhigh", "max":
 	default:
 		// An edit may preserve a retired effort but cannot newly select it.
-		if !update || old == nil || old.Parameters.ReasoningEffort != in.Parameters.ReasoningEffort {
+		if !modelDefault && (!update || old == nil || old.Parameters.ReasoningEffort != in.Parameters.ReasoningEffort) {
 			return nil, fmt.Errorf("invalid_request: unsupported rule reasoning_effort")
 		}
 	}
@@ -212,10 +219,31 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 	}
 	var targets []Target
 	retired := !scoped && en.terminalDependencyLocked(in.RunConfig)
-	if !scoped && !retired {
+	newGroup := in.TargetGroup != "" && (old == nil || in.TargetGroup != old.TargetGroup)
+	for _, group := range in.AuthorizedGroups {
+		newGroup = newGroup || old == nil || !contains(old.AuthorizedGroups, group)
+	}
+	if !scoped && !retired || newGroup {
 		targets, err = en.host.Targets(en.inventoryContextLocked(ctx))
 		if err != nil {
 			return nil, err
+		}
+		if err = validateRuleGroups(&in, old, targets); err != nil {
+			return nil, err
+		}
+	}
+	if !scoped && !retired {
+		if problem := en.checkRuleProvidersLocked(&in, in.RunConfig, targets); problem != nil {
+			keepBindings := old != nil && in.AuthID == old.AuthID && in.ControlAuthID == old.ControlAuthID && in.Judge.AuthID == old.Judge.AuthID
+			startingTimer := activation == "start" || in.SchedulingEnabled && (old == nil || !old.SchedulingEnabled)
+			if problem.detail.Code != "provider_targets_excluded" || !keepBindings || startingTimer {
+				return nil, problem
+			}
+		}
+		for _, t := range targets {
+			if t.AuthID == in.AuthID && in.Provider == t.Provider && !t.identityConflict && objectType(t) != objectUnknown && in.TargetAuthIndex == "" && !in.LegacyScope {
+				in.TargetAuthIndex = t.AuthIndex
+			}
 		}
 		if managedRule(&in) {
 			validationRule := in
@@ -249,7 +277,7 @@ func (en *Engine) saveRuleLocked(ctx context.Context, in Rule, update bool, acti
 		if in.ActionID != "" {
 			return nil, fmt.Errorf("blocked: owned pause requires manual release")
 		}
-		if !retired {
+		if !retired && !scoped {
 			if err = en.checkTargetsForRunLocked(in.RunConfig, targets, !en.Capabilities().QualityPause); err != nil {
 				return nil, err
 			}
@@ -354,6 +382,9 @@ func (en *Engine) PauseRule(id string, rev uint64, paused bool) error {
 			if err != nil {
 				return err
 			}
+			if problem := en.checkRuleProvidersLocked(r, r.RunConfig, targets); problem != nil {
+				return problem
+			}
 			if err = en.checkTargetsForRunLocked(r.RunConfig, targets, !en.Capabilities().QualityPause); err != nil {
 				return err
 			}
@@ -376,15 +407,10 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 	}
 	r := en.rules[id]
 	if r == nil {
-		return fmt.Errorf("not_found: rule")
+		return fmt.Errorf("not_found: 此规则已不存在，请刷新规则列表。")
 	}
 	if r.Revision != rev {
-		return fmt.Errorf("conflict: stale rule revision")
-	}
-	for _, d := range en.managed {
-		if d.RuleID == id && activeDisposition(d) && d.State != "deleted" {
-			return fmt.Errorf("conflict: resolve the owned credential suspension in CPA before deleting this rule")
-		}
+		return fmt.Errorf("conflict: 规则已更新，请刷新后再删除。")
 	}
 	if en.Capabilities().QualityPause {
 		actions, e := en.host.Actions(ctx)
@@ -393,14 +419,44 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 		}
 		for _, a := range actions {
 			if a.RuleID == id {
-				return fmt.Errorf("conflict: release owned pause before deleting rule")
+				return fmt.Errorf("conflict: 此规则持有独立质量暂停，解除暂停后才能删除。")
 			}
 		}
 	} else if r.ActionID != "" || r.BlockedAuthID != "" {
 		return unsupportedQuality()
 	}
 	if r.ActionID != "" {
-		return fmt.Errorf("conflict: reconcile pending action before deleting rule")
+		return fmt.Errorf("conflict: 此规则的独立质量暂停尚待核对。")
+	}
+	retainedRuns, retainedActions := map[string]bool{}, map[string]bool{}
+	var clearHandling []string
+	var unresolved []*CredentialDisposition
+	for _, d := range en.managed {
+		if d.RuleID != id {
+			continue
+		}
+		if pendingCredentialAction(d.State) != "" {
+			return fmt.Errorf("conflict: CPA 凭证写入尚在处理中，请等待结果后再删除。")
+		}
+		switch d.State {
+		case "disabled", "deleted", "restored", "externally_enabled", "acknowledged", "precondition_failed":
+			clearHandling = append(clearHandling, d.AuthID)
+			continue
+		}
+		// Unknown write outcomes remain quarantined by credential identity.
+		// Dropping the owner must not make an uncertain write eligible again.
+		next := *d
+		next.RuleID, next.RuleRevision, next.State = "", 0, "attention"
+		unresolved = append(unresolved, &next)
+		if d.RunID != "" {
+			retainedRuns[d.RunID] = true
+		}
+		if d.TriggerRunID != "" {
+			retainedRuns[d.TriggerRunID] = true
+		}
+		if d.ActionID != "" {
+			retainedActions[d.ActionID] = true
+		}
 	}
 	drop := make(map[string]bool)
 	for _, run := range en.runs {
@@ -408,11 +464,13 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 			continue
 		}
 		if run.CompletedAt == nil || en.active[run.ID] != nil {
-			return fmt.Errorf("conflict: cancel active rule run first")
+			return fmt.Errorf("conflict: 规则还有未结束的检测，请等待或取消后再删除。")
 		}
-		drop[run.ID] = true
+		if !retainedRuns[run.ID] {
+			drop[run.ID] = true
+		}
 	}
-	audit := en.audit("rule_deleted", id, "", "", "rule removed without owned pause")
+	audit := en.audit("rule_deleted", id, "", "", fmt.Sprintf("Rule deleted; cleared %d credential records and kept %d uncertain writes quarantined", len(clearHandling), len(unresolved)))
 	timers := en.changedTimer(id, false)
 	if err := en.store.Write(func(tx *bolt.Tx) error {
 		if timers != nil {
@@ -423,7 +481,17 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 		if err := tx.Bucket([]byte("rules")).Delete([]byte(id)); err != nil {
 			return err
 		}
-		if err := deleteRuleRecords(tx, drop, id); err != nil {
+		for _, authID := range clearHandling {
+			if err := tx.Bucket([]byte("meta")).Delete([]byte(dispositionPrefix + authID)); err != nil {
+				return err
+			}
+		}
+		for _, d := range unresolved {
+			if err := put(tx, "meta", dispositionPrefix+d.AuthID, d); err != nil {
+				return err
+			}
+		}
+		if err := deleteRuleRecords(tx, drop, id, retainedRuns, retainedActions); err != nil {
 			return err
 		}
 		return put(tx, "audit", audit.ID, audit)
@@ -432,6 +500,13 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 		return err
 	}
 	delete(en.rules, id)
+	delete(en.finishedRules, id)
+	for _, authID := range clearHandling {
+		delete(en.managed, authID)
+	}
+	for _, d := range unresolved {
+		en.managed[d.AuthID] = d
+	}
 	for runID := range drop {
 		delete(en.runs, runID)
 	}
@@ -441,7 +516,25 @@ func (en *Engine) DeleteRule(ctx context.Context, id string, rev uint64) error {
 	return nil
 }
 func (en *Engine) RunRule(ctx context.Context, id string) (*Run, error) {
-	return en.submit(ctx, RunConfig{}, id, 0)
+	if en.Capabilities().QualityPause {
+		return en.submit(ctx, RunConfig{}, id, 0)
+	}
+	en.mu.Lock()
+	r := en.rules[id]
+	if r == nil {
+		en.mu.Unlock()
+		return nil, fmt.Errorf("not_found: rule")
+	}
+	revision := r.Revision
+	en.mu.Unlock()
+	receipt, err := en.dispatchRule(ctx, id, revision, false)
+	if err != nil {
+		return nil, err
+	}
+	if receipt.RunID == "" {
+		return nil, fmt.Errorf("blocked: scope has no single runnable subject")
+	}
+	return en.Run(receipt.RunID)
 }
 
 // RoundVerdict requires every planned sample and explicit verdicts for every model.
@@ -501,6 +594,13 @@ func (en *Engine) decideLocked(run *Run) {
 		return
 	}
 	r.LastRun = run.ID
+	if run.Config.ProviderObservation && (run.Config.ManagedProbe == nil || r.LegacyProviderObservation) {
+		r.FailCount, r.EvidenceSignature = 0, ""
+		out.ActionStatus = "observe_only"
+		c.rules[r.ID] = r
+		_ = en.commitLocked(c)
+		return
+	}
 	if managedRule(r) {
 		en.decideManagedLocked(run, r, c)
 		return

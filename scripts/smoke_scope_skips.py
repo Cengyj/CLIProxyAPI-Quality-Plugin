@@ -1,4 +1,4 @@
-"""Catalog preflight and skip histories from a mixed, no-upstream batch."""
+"""Compare offline probes, catalog checks and non-runnable disabled objects."""
 
 import hashlib
 import json
@@ -12,11 +12,12 @@ def verify_scope_skips(prefix, request, restart, root, targets, recorded_calls, 
     disabled = by_email['operator@example.test']
     codex = by_email['missing-model@example.test']
     native = by_email['native@example.test']
+    unprobeable = by_email['native-disabled@example.test']
     assert disabled['manual_disabled'] and codex['provider'] == 'codex' and native['provider'] == 'kimi'
     model = 'gpt-6.1-sol'
     assert codex['models'] and model not in codex['models']
     rule = request(prefix + '/rules', {
-        'name': 'Synthetic zero-match batch', 'target_scope': 'all_credentials',
+        'name': 'Synthetic mixed directory checks', 'object_types': ['oauth'], 'target_scope': 'all_credentials',
         'models': [model], 'samples': 1, 'question_id': 'logic-boxes',
         'judge': {'mode': 'deterministic'}, 'action': 'disable_credential',
         'auto_restore': False, 'enabled': True, 'activation': 'keep',
@@ -29,13 +30,15 @@ def verify_scope_skips(prefix, request, restart, root, targets, recorded_calls, 
         return {k: saved[k] for k in ('id', 'revision', 'enabled', 'last_manual_skips', 'last_scope_dispatch') if k in saved}
 
     hashes = credential_hashes()
-    # An unexpected probe completes locally and is counted as a test failure.
+    preview = request(prefix + '/rules/scope-preview', rule)
+    assert preview['verified'] and preview['candidates']=={'oauth':4,'provider':0}
+    assert len(recorded_calls())==0 and not mutation_log()
     (root / 'round.json').write_text(json.dumps({'start': 0, 'outcomes': ['4'] * 3}))
     receipt = request(prefix + '/rules/run', {'id': rule['id'], 'revision': rule['revision']})
     deadline = time.monotonic() + 20
     while True:
         members = request(prefix + '/runs?scope_batch_id=' + receipt['scope_batch_id'])['items']
-        if len(members) == 3 and all(row.get('completed_at') for row in members):
+        if len(members) == 4 and all(row.get('completed_at') for row in members):
             break
         if time.monotonic() >= deadline:
             raise AssertionError(('catalog observation did not complete', receipt))
@@ -60,21 +63,25 @@ def verify_scope_skips(prefix, request, restart, root, targets, recorded_calls, 
         'runs_after_restart': rows['total'], 'fake_model_calls': len(recorded_calls()), 'cpa_writes': mutation_log(),
         'credential_hashes_unchanged': hashes == credential_hashes(), 'live_account_calls': 0,
     }
-    assert (receipt['count'], receipt['skipped']) == (2, 1) and rows['total'] == 3, report
-    assert not report['fake_model_calls'] and not report['cpa_writes'] and report['credential_hashes_unchanged'], report
+    assert (receipt['count'], receipt['skipped']) == (3, 1) and rows['total'] == 4, report
+    assert all(receipt[k]==preview[k] for k in ('candidates','count','skipped','recovery_count'))
+    assert report['fake_model_calls']==1 and recorded_calls()[0]['disabled'] and not report['cpa_writes'] and report['credential_hashes_unchanged'], report
     details = receipt.get('skip_details', [])
     assert len(details) == 1, ('incorrect individual skip reasons', receipt)
-    expected = {disabled['auth_id']: 'manual_disabled'}
+    expected = {unprobeable['auth_id']: 'unsupported_provider'}
     assert {item['auth_id']: item['code'] for item in details} == expected, details
     assert {item['auth_id']: item.get('email') for item in details} == {t['auth_id']: t['email'] for t in targets if t['auth_id'] in expected}, details
     assert all(item['reason'].strip() for item in details), details
     stored = before['last_scope_dispatch']
-    assert (stored['matched'], stored['skipped'], stored['details']) == (2, 1, details), stored
+    assert (stored['matched'], stored['skipped'], stored['details']) == (3, 1, details), stored
     assert datetime.strptime(stored['at'][:19], '%Y-%m-%dT%H:%M:%S').year > 1970
     assert before == after and before['enabled'] and before['revision'] == rule['revision'], (before, after)
     assert {row['config']['scope_batch_id'] for row in rows['items']} == {receipt['scope_batch_id']}
-    assert len({row['id'] for row in rows['items']}) == 3
-    assert all(not row['samples'] for row in rows['items'])
+    assert len({row['id'] for row in rows['items']}) == 4
+    observed_disabled = next(row for row in rows['items'] if row['config']['auth_id']==disabled['auth_id'])
+    assert observed_disabled['config']['managed_probe']['disabled'] and observed_disabled['action_status']=='credential_kept_disabled'
+    assert [s['quality_verdict'] for s in observed_disabled['samples']]==['correct']
+    assert all(not row['samples'] for row in rows['items'] if row['id']!=observed_disabled['id'])
     skipped = [row for row in rows['items'] if row['status'] == 'skipped']
     assert {row['config']['auth_id']: row['skip_detail']['code'] for row in skipped} == expected
     observed = next(row for row in rows['items'] if row['config']['auth_id'] == codex['auth_id'])
@@ -124,7 +131,7 @@ def verify_scope_skips(prefix, request, restart, root, targets, recorded_calls, 
         else:
             assert writes == [('DELETE', '/v8/management/credentials?name=' + subject)]
             assert not (root / 'auths' / subject).exists()
-        assert not recorded_calls()
+        assert len(recorded_calls())==1 and recorded_calls()[0]['disabled']
         return {'action': action, 'run': row['id'], 'model': model, 'status': row['status'],
                 'condition_source': 'credential model catalog', 'action_status': row['action_status'],
                 'cpa_writes': writes, 'model_calls': 0, 'records': len(records),

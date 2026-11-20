@@ -8,12 +8,13 @@ import (
 )
 
 type ScopeSkipDetail struct {
-	RunID  string `json:"run_id,omitempty"`
-	AuthID string `json:"auth_id"`
-	Email  string `json:"email,omitempty"`
-	Code   string `json:"code"`
-	Model  string `json:"model,omitempty"`
-	Reason string `json:"reason"`
+	NotExecuted bool   `json:"not_executed,omitempty"`
+	RunID       string `json:"run_id,omitempty"`
+	AuthID      string `json:"auth_id"`
+	Email       string `json:"email,omitempty"`
+	Code        string `json:"code"`
+	Model       string `json:"model,omitempty"`
+	Reason      string `json:"reason"`
 }
 
 func newScopedRun(rule *Rule, t Target, config RunConfig, question Question, batch string, scheduled bool, now time.Time, snapshot *CredentialSnapshot) *Run {
@@ -25,13 +26,20 @@ func newScopedRun(rule *Rule, t Target, config RunConfig, question Question, bat
 	f := Frozen{RunConfig: config, Question: question, RuleID: rule.ID, RuleRevision: rule.Revision, ScopeBatchID: batch,
 		SubjectIndex: t.AuthIndex, Scheduled: scheduled, IdentityVersion: t.IdentityVersion, ComparisonIdentity: t.ComparisonIdentity,
 		PayloadConfigVersion: t.PayloadConfigVersion, ManagedProbe: snapshot, UpstreamErrorActions: maps.Clone(rule.UpstreamErrorActions)}
+	if isProviderTarget(t) {
+		f.ProviderObservation = true
+		f.ProviderName = t.ProviderName
+		if snapshot == nil || rule.LegacyProviderObservation {
+			f.UpstreamErrorActions = nil
+		}
+	}
 	f.Fingerprint = fingerprint(f)
 	return &Run{ID: ID(), CredentialEmail: t.Email, Status: "queued", Source: "scheduled_probe", CreatedAt: now, Config: f, Samples: []Sample{}, ActionStatus: "observe_only"}
 }
 
 func markDispatchSkip(run *Run, detail *ScopeSkipDetail, now time.Time) {
 	detail.AuthID, detail.Email, detail.RunID = run.Config.AuthID, run.CredentialEmail, run.ID
-	if status := preflightStatus(detail.Code); status != "" {
+	if status := preflightStatus(detail.Code); !detail.NotExecuted && status != "" {
 		run.PreflightDetail = cloneValue(detail)
 		run.Status, run.CompletedAt, run.Error = status, &now, detail.Reason
 		return
@@ -58,7 +66,22 @@ func queueCatalogRun(run *Run, model string) {
 }
 
 func ruleSubjectEnabled(t Target) bool {
+	if objectType(t) == objectUnknown || isProviderTarget(t) && (contains(t.Reasons, "provider_route_unverified") || contains(t.Reasons, "provider_runtime_unconfirmed")) {
+		return false
+	}
 	return !t.identityConflict && t.AuthID != "" && t.AuthIndex != "" && t.Provider != "" && !t.ManualDisabled && t.RuntimeStatus != "disabled" && !t.QualityPaused && !t.RetainedPause
+}
+
+func providerRouteProblem(t Target, models []string) *scopeRejection {
+	if !ruleSubjectEnabled(t) || !t.EffectiveAvailable || t.RuntimeStatus != "active" && t.RuntimeStatus != "registered" || len(t.Models) == 0 {
+		return rejectScope("blocked: provider target is unavailable", "provider_unavailable", "CPA 未能核实可用的供应商凭证与模型目录。")
+	}
+	for _, model := range models {
+		if !contains(t.Models, model) {
+			return &scopeRejection{"blocked: provider model is not registered", ScopeSkipDetail{Code: "provider_model_unavailable", Model: model, Reason: "供应商未注册所选模型。"}}
+		}
+	}
+	return nil
 }
 
 func firstMissingModel(t Target, models []string) string {
@@ -113,10 +136,14 @@ func missingCredentialSkip() ScopeSkipDetail {
 }
 
 type ScopeDispatchSummary struct {
-	At      time.Time         `json:"at"`
-	Matched int               `json:"matched"`
-	Skipped int               `json:"skipped"`
-	Details []ScopeSkipDetail `json:"details,omitempty"`
+	DirectoryUnavailable bool              `json:"directory_unavailable,omitempty"`
+	Reason               string            `json:"reason,omitempty"`
+	RecoveryCount        int               `json:"recovery_count,omitempty"`
+	Candidates           map[string]int    `json:"candidates,omitempty"`
+	At                   time.Time         `json:"at"`
+	Matched              int               `json:"matched"`
+	Skipped              int               `json:"skipped"`
+	Details              []ScopeSkipDetail `json:"details,omitempty"`
 }
 
 // Keep the established management error and attach a display-safe explanation

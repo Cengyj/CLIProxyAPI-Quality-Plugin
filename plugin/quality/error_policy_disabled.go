@@ -1,17 +1,103 @@
 package quality
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
 
 type excludedCredentialIDs struct{}
 
 func (en *Engine) inventoryContextLocked(ctx context.Context) context.Context {
+	return en.runInventoryContextLocked(ctx, nil)
+}
+
+func (en *Engine) runInventoryContextLocked(ctx context.Context, manualSubject *CredentialDisposition) context.Context {
 	ids := make(map[string]bool)
 	for id, d := range en.managed {
-		if errorPolicyDisabled(d).Code != "" {
+		if d != manualSubject && errorPolicyDisabled(d).Code != "" {
 			ids[id] = true
 		}
 	}
 	return context.WithValue(ctx, excludedCredentialIDs{}, ids)
+}
+
+// Only an explicitly selected manual subject may be verified against its old
+// error suspension. Scheduled work and dependent credentials stay excluded.
+func (en *Engine) runDispositionLocked(c RunConfig, manual bool) (*CredentialDisposition, error) {
+	var subject *CredentialDisposition
+	for _, id := range dependencies(c) {
+		d := en.managed[id]
+		if !activeDisposition(d) {
+			continue
+		}
+		if cause := errorPolicyCause(d); cause != "" {
+			if manual && id == c.AuthID && d.ActionID != "" && d.Snapshot.Disabled && (d.Operation == "" || d.Operation == disableCredential) {
+				subject = d
+				continue
+			}
+			return nil, fmt.Errorf("blocked: %s，凭证已按错误策略停用。", cause)
+		}
+		if manual && d.State != "disabled" {
+			return nil, errors.New("blocked: 凭证存在未解除的处置记录，请在质量运维中核对。")
+		}
+	}
+	return subject, nil
+}
+
+func (en *Engine) frozenDispositionLocked(f Frozen) (*CredentialDisposition, error) {
+	d, err := en.runDispositionLocked(f.RunConfig, f.RuleID == "")
+	if err != nil {
+		return nil, err
+	}
+	if d == nil && f.ManualPolicyActionID != "" || d != nil && d.ActionID != f.ManualPolicyActionID {
+		return nil, errors.New("blocked: 凭证的处置记录在测试提交后发生了变化，请重新核对。")
+	}
+	return d, nil
+}
+
+func (en *Engine) verifyManualSubjectLocked(ctx context.Context, c RunConfig, targets []Target, d *CredentialDisposition) (string, error) {
+	if d == nil {
+		return "", nil
+	}
+	if en.localPause(c) != "" {
+		return "", errors.New("blocked: 凭证仍受质量暂停保护，禁止检测。")
+	}
+	for _, t := range targets {
+		if t.AuthID != c.AuthID {
+			continue
+		}
+		if t.ManualDisabled || t.RuntimeStatus == "disabled" {
+			return "", fmt.Errorf("blocked: %s，CPA 当前仍停用此凭证。", errorPolicyCause(d))
+		}
+		if !t.identityVerified || !t.catalogVerified || !ruleSubjectEnabled(t) || !t.EffectiveAvailable || t.RuntimeStatus != "active" && !(t.IsProvider && t.RuntimeStatus == "registered") ||
+			t.Provider != c.Provider || t.AuthID != d.Snapshot.AuthID || t.AuthIndex != d.Snapshot.AuthIndex || t.Provider != d.Snapshot.Provider {
+			break
+		}
+		for _, model := range c.Models {
+			if !contains(t.Models, model) {
+				return "", errors.New("blocked: CPA 当前凭证没有注册所选模型，请刷新模型目录。")
+			}
+		}
+		if t.IsProvider && d.Snapshot.ProviderMechanism != "" {
+			h, ok := en.host.(managedHost)
+			if !ok {
+				break
+			}
+			now, err := h.CredentialSnapshot(ctx, t.AuthID, t.AuthIndex)
+			if err == nil && !now.Disabled && sameCredential(now, d.Snapshot) && now.ProviderGroupID == d.Snapshot.ProviderGroupID {
+				return now.Fingerprint, nil
+			}
+			break
+		}
+		if h, ok := en.host.(interface {
+			verifyEnabledManualFile(context.Context, Target, *CredentialDisposition) (string, error)
+		}); ok {
+			return h.verifyEnabledManualFile(ctx, t, d)
+		}
+		break
+	}
+	return "", errors.New("blocked: 无法核实 CPA 当前已启用同一凭证及其模型目录，请检查凭证状态。")
 }
 
 func (en *Engine) terminalDependencyLocked(c RunConfig) bool {
@@ -23,27 +109,33 @@ func (en *Engine) terminalDependencyLocked(c RunConfig) bool {
 	return false
 }
 
-// A confirmed error suspension remains terminal until explicitly acknowledged.
-func errorPolicyDisabled(d *CredentialDisposition) ScopeSkipDetail {
+// The confirmed cause describes the original suspension, independently of CPA's current state.
+func errorPolicyCause(d *CredentialDisposition) string {
 	if d == nil || d.State != "disabled" {
-		return ScopeSkipDetail{}
+		return ""
 	}
-	var cause string
 	if d.CatalogMissingModel != "" {
-		cause = "CPA 注册目录缺少所选模型"
-	} else {
-		switch d.UpstreamCondition {
-		case "unauthorized":
-			cause = "上游返回 HTTP 401 未授权"
-		case "payment_required":
-			cause = "上游返回 HTTP 402 需要付款"
-		case "quota_exhausted":
-			cause = "上游返回 HTTP 429，确认账户额度耗尽"
-		case "model_unsupported":
-			cause = "上游明确不支持所选模型（HTTP 400 或 404）"
-		default:
-			return ScopeSkipDetail{}
-		}
+		return "CPA 注册目录缺少所选模型"
+	}
+	switch d.UpstreamCondition {
+	case "unauthorized":
+		return "上游返回 HTTP 401 未授权"
+	case "payment_required":
+		return "上游返回 HTTP 402 需要付款"
+	case "quota_exhausted":
+		return "上游返回 HTTP 429，确认账户额度耗尽"
+	case "model_unsupported":
+		return "上游明确不支持所选模型（HTTP 400 或 404）"
+	default:
+		return ""
+	}
+}
+
+// A confirmed error suspension remains terminal for rules until explicitly acknowledged.
+func errorPolicyDisabled(d *CredentialDisposition) ScopeSkipDetail {
+	cause := errorPolicyCause(d)
+	if cause == "" {
+		return ScopeSkipDetail{}
 	}
 	return ScopeSkipDetail{Code: "error_policy_disabled", Model: d.CatalogMissingModel,
 		Reason: cause + "，凭证已按错误策略停用，后续检测已停止。"}

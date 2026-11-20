@@ -1,6 +1,6 @@
 # Credential Ops
 
-A native plugin for official [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) that combines account login, credential management, model evaluation, and scheduled quality operations.
+Credential Ops is an independent native plugin project for the official CLIProxyAPI server. It adds account login, credential management, model evaluation, and scheduled quality operations through CPA's public plugin interface. [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 
 [中文说明](README_CN.md) · [Releases](https://github.com/Cengyj/cpa-credential-ops/releases) · [Credential policies](docs/QUALITY_CREDENTIAL_ACTIONS_CN.md) · [Error policies](docs/QUALITY_UPSTREAM_ERRORS_CN.md)
 

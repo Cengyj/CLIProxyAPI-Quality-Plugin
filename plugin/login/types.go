@@ -243,7 +243,7 @@ func SafeCode(err error) string {
 		return ""
 	}
 	s := err.Error()
-	if strings.HasPrefix(s, "conversion_") && runtimeDiagnostic(s, []string{"conversion_invalid_json", "conversion_unsupported_version", "conversion_unsupported_format", "conversion_account_limit", "conversion_unsupported_provider", "conversion_unsupported_type", "conversion_missing_access_token", "conversion_missing_account_id", "conversion_invalid_token", "conversion_invalid_expiry", "conversion_expired_without_refresh"}) {
+	if strings.HasPrefix(s, "conversion_") && runtimeDiagnostic(s, []string{"conversion_invalid_json", "conversion_unsupported_version", "conversion_unsupported_format", "conversion_account_limit", "conversion_unsupported_provider", "conversion_unsupported_type", "conversion_missing_access_token", "conversion_missing_account_id", "conversion_invalid_token", "conversion_invalid_expiry", "conversion_expired_without_refresh", "conversion_previous_upload_changed"}) {
 		return s
 	}
 	switch s {

@@ -69,9 +69,11 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 			models[item.AuthIndex] = item
 		}
 	}
-	// Some config-backed keys appear only in the model catalog. Report them as unknown
-	// if the official runtime callback cannot verify them, rather than hiding or testing them.
+	// Configured upstreams may exist only in the model catalog. Join those
+	// identities against the configured route indices, never a filename.
 	listedIDs := make(map[string]bool, len(listed.Files))
+	catalogOnly := make(map[string]bool)
+
 	for _, item := range listed.Files {
 		listedIDs[item.ID] = item.AuthIndex != "" || listedIDs[item.ID]
 	}
@@ -79,8 +81,18 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 		if !listedIDs[item.ID] && item.ID != "" && item.AuthIndex != "" {
 			listed.Files = append(listed.Files, pluginapi.HostAuthFileEntry{ID: item.ID, AuthIndex: item.AuthIndex, Provider: item.Provider})
 			listedIDs[item.ID] = true
+			catalogOnly[item.ID] = true
 		}
 	}
+	// Disabled compatible groups are absent from both host inventories.
+	configRoutes, configErr := h.providerDirectory(ctx)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if status, ok := ctx.Value(providerInventoryStatusKey{}).(*providerInventoryStatus); ok {
+		status.Verified = configErr == nil
+	}
+	routes := routesByIndex(configRoutes)
 	out := make([]Target, 0, len(listed.Files))
 	seen := make(map[string]bool)
 	excluded, _ := ctx.Value(excludedCredentialIDs{}).(map[string]bool)
@@ -91,19 +103,51 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 		inventoryIndices[item.AuthIndex]++
 	}
 	for _, item := range listed.Files {
-		if item.ID == "" || item.AuthIndex == "" || seen[item.ID] || excluded[item.ID] {
+		if item.ID == "" || item.AuthIndex == "" {
+			if item.ID != "" && (excluded[item.ID] || listedIDs[item.ID]) {
+				continue
+			}
+			id := item.ID
+			if id == "" {
+				// Disk-only records have no routable ID. Use a display-only
+				// reference so a receipt can explain why no call was made.
+				id = "unverified-" + fingerprint([3]string{item.Name, item.Provider, item.AuthIndex})[:20]
+			}
+			if !seen[id] {
+				out = append(out, Target{AuthID: id, AuthIndex: item.AuthIndex, Provider: item.Provider, ObjectType: objectUnknown,
+					RuntimeStatus: "unknown", Reasons: []string{"unverified_inventory_entry", "identity_missing"}})
+				seen[id] = true
+			}
+			continue
+		}
+		if seen[item.ID] || excluded[item.ID] {
 			continue
 		}
 		seen[item.ID] = true
 		entry, hasEntry := models[item.AuthIndex]
 		conflict := inventoryIDs[item.ID] != 1 || inventoryIndices[item.AuthIndex] != 1 || catalogIDs[item.ID] > 1 ||
-			hasEntry && (entry.ID != item.ID || entry.AuthIndex != item.AuthIndex) || !hasEntry && catalogIDs[item.ID] > 0
+			hasEntry && (entry.ID != item.ID || entry.AuthIndex != item.AuthIndex) || !hasEntry && catalogIDs[item.ID] > 0 ||
+			item.Source == "file" && routes[item.AuthIndex].family != ""
+		if item.Source != "file" && providerFamily(item.ID, item.Provider) != "" {
+			t := configuredTarget(pluginapi.HostAuthModels{ID: item.ID, AuthIndex: item.AuthIndex, Provider: item.Provider, Models: entry.Models}, routes[item.AuthIndex])
+			applyProviderRuntime(&t, item)
+			if conflict {
+				t.identityConflict, t.identityVerified, t.catalogVerified, t.EffectiveAvailable = true, false, false, false
+				t.Reasons = []string{"identity_conflict"}
+			}
+			out = append(out, t)
+			continue
+		}
 		// CPA's file inventory already contains the same runtime projection as
 		// get_runtime. Disk-only fallback entries have no runtime ID or index.
 		if item.Status != "" && item.Source == "file" && item.Provider != "" {
 			t := runtimeTarget(item, models[item.AuthIndex], true)
 			t.identityConflict = t.identityConflict || conflict
 			t.catalogVerified = t.catalogVerified && !t.identityConflict
+			if t.identityConflict {
+				t.EffectiveAvailable = false
+				t.Reasons = append(t.Reasons, "identity_conflict")
+			}
 			out = append(out, t)
 			continue
 		}
@@ -117,8 +161,30 @@ func (h *NativeHost) Targets(ctx context.Context) ([]Target, error) {
 			item = current.Auth
 		}
 		t := runtimeTarget(item, models[item.AuthIndex], verified)
+		if err != nil && catalogOnly[item.ID] && !conflict {
+			t.Reasons = append(t.Reasons, "unverified_inventory_entry")
+		}
 		t.identityConflict = t.identityConflict || conflict || err == nil && !verified
 		t.catalogVerified = t.catalogVerified && !t.identityConflict
+		out = append(out, t)
+	}
+	for _, r := range configRoutes {
+		if seen[r.id] || excluded[r.id] || inventoryIndices[r.index] > 0 {
+			continue
+		}
+		if r.missingIndex && !r.disabled {
+			r.conflict = true
+		}
+		t := configuredTarget(pluginapi.HostAuthModels{ID: r.id, AuthIndex: r.index, Provider: r.executor}, r)
+		// A successful runtime catalog must corroborate a configuration-only
+		// disabled route. An enabled row is never admitted by config alone.
+		if !r.disabled || catalog.Credentials == nil {
+			t.EffectiveAvailable = false
+			t.identityVerified = false
+			t.Reasons = append(t.Reasons, "provider_runtime_unconfirmed")
+			t.ProviderProbeReason = "CPA 运行时尚未确认此配置路由。"
+		}
+		seen[r.id] = true
 		out = append(out, t)
 	}
 	return out, nil
@@ -135,6 +201,18 @@ func (h *NativeHost) pinnedTarget(ctx context.Context, id, index string) (Target
 	}
 	var current pluginapi.HostAuthGetRuntimeResponse
 	if err := h.call(ctx, "host.auth.get_runtime", pluginapi.HostAuthGetRequest{AuthIndex: index}, &current); err != nil {
+		if ctx.Err() == nil && familyOfProviderID(id) != "" {
+			if len(catalog.Credentials) == 1 {
+				entry := catalog.Credentials[0]
+				if entry.ID == id && entry.AuthIndex == index && providerFamily(id, entry.Provider) != "" {
+					return configuredTarget(entry, h.configuredRoutes(ctx)[index]), nil
+				}
+			}
+			r, readErr := h.pinnedConfiguredRoute(ctx, id, index)
+			if readErr == nil && r.disabled {
+				return configuredTarget(pluginapi.HostAuthModels{ID: id, AuthIndex: index, Provider: r.executor}, r), nil
+			}
+		}
 		return Target{}, err
 	}
 	var entry pluginapi.HostAuthModels
@@ -142,6 +220,11 @@ func (h *NativeHost) pinnedTarget(ctx context.Context, id, index string) (Target
 		entry = catalog.Credentials[0]
 	}
 	verified := current.Auth.ID == id && current.Auth.AuthIndex == index
+	if verified && entry.ID == id && entry.AuthIndex == index && current.Auth.Source != "file" && current.Auth.Provider == entry.Provider && providerFamily(id, entry.Provider) != "" {
+		t := configuredTarget(entry, h.configuredRoutes(ctx)[index])
+		applyProviderRuntime(&t, current.Auth)
+		return t, nil
+	}
 	t := runtimeTarget(current.Auth, entry, verified)
 	t.identityConflict = t.identityConflict || !verified || len(catalog.Credentials) > 1
 	return t, nil
@@ -154,6 +237,12 @@ func runtimeTarget(item pluginapi.HostAuthFileEntry, catalog pluginapi.HostAuthM
 	}
 	t := Target{identityVerified: verified, AuthID: item.ID, AuthIndex: item.AuthIndex, Email: item.Email, Provider: provider, Type: item.Type, RuntimeStatus: item.Status,
 		ManualDisabled: item.Disabled || item.Status == "disabled", Models: []string{}, Reasoning: map[string]any{}, Reasons: []string{}, UnsupportedReason: "official_host_quality_pause_unavailable"}
+	if item.Source == "file" && !item.RuntimeOnly {
+		t.ObjectType = "oauth"
+	} else {
+		t.ObjectType = "unknown"
+		t.Reasons = append(t.Reasons, "unverified_inventory_entry")
+	}
 	if t.ManualDisabled {
 		t.Reasons = append(t.Reasons, "operator_disabled")
 	}
@@ -195,10 +284,37 @@ func (h *NativeHost) Release(ctx context.Context, _ Action) error {
 }
 func (h *NativeHost) Execute(ctx context.Context, e Execution) (s Sample) {
 	if e.ManagedProbe != nil {
+		if e.ManagedProbe.ProviderMechanism != "" {
+			return h.executeProvider(ctx, e)
+		}
 		return h.executeManaged(ctx, e)
 	}
 	start := time.Now()
 	s = Sample{Model: e.Model, ExecutionStatus: "failed", QualityVerdict: "unknown", Evidence: Evidence{Reason: "official_host_evidence_unavailable"}}
+	if providerFamily(e.AuthID, e.Provider) != "" {
+		s.Evidence.Path = "provider_native_probe"
+		// The host owns native routing. Ensure arbitrary error strings and
+		// answers cannot echo this configured credential into history.
+		routes, err := h.providerDirectory(ctx)
+		var selected *providerRoute
+		for i := range routes {
+			if routes[i].id == e.AuthID && routes[i].executor == e.Provider && !routes[i].conflict {
+				selected = &routes[i]
+				break
+			}
+		}
+		if err != nil || selected == nil {
+			s.ExecutionStatus = "skipped"
+			s.Error = "无法核实供应商身份。"
+			return s
+		}
+		defer func() {
+			if selected.sensitiveText(s.Output) || selected.sensitiveText(s.ResponseModel) || selected.sensitiveText(s.Error) {
+				s.Output, s.ResponseModel, s.Error = "", "", "响应包含敏感配置内容，已隐藏。"
+				s.ExecutionStatus = "incomplete"
+			}
+		}()
+	}
 	defer func() {
 		s.TotalMS = time.Since(start).Milliseconds()
 		if ctx.Err() != nil {

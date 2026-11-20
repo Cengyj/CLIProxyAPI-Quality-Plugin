@@ -12,14 +12,41 @@ import (
 const defaultMaxResults = 100
 
 type historyClearResult struct {
-	Deleted int `json:"deleted"`
-	Kept    int `json:"kept"`
+	Deleted         int `json:"deleted"`
+	Kept            int `json:"kept"`
+	Archived        int `json:"archived,omitempty"`
+	KeptForHandling int `json:"kept_for_handling,omitempty"`
+}
+
+func (en *Engine) ruleHistoryEvidenceLocked() (confirmed, unresolved map[string]bool) {
+	confirmed, unresolved = make(map[string]bool), make(map[string]bool)
+	for _, d := range en.managed {
+		var runs map[string]bool
+		switch {
+		case errorPolicyDisabled(d).Code != "":
+			runs = confirmed
+		case activeDisposition(d) && d.State != "disabled" && d.State != "deleted":
+			runs = unresolved
+		default:
+			continue
+		}
+		for _, id := range []string{d.RunID, d.TriggerRunID} {
+			if id != "" {
+				runs[id] = true
+			}
+		}
+	}
+	return confirmed, unresolved
 }
 
 // Confirmed actions keep their recovery snapshot independently of run history.
 // An outstanding write still needs its complete run and audit for reconciliation.
 func (en *Engine) handlingEvidenceLocked(run *Run) bool {
 	d := en.managed[run.Config.AuthID]
+	if (errorPolicyDisabled(d).Code != "" || activeDisposition(d) && d.State == "attention") &&
+		(d.RunID == run.ID || d.TriggerRunID == run.ID) {
+		return true
+	}
 	return en.active[run.ID] != nil || (activeDisposition(d) && d.State != "disabled" && d.State != "deleted" && d.RunID == run.ID)
 }
 
@@ -30,28 +57,49 @@ func (en *Engine) clearRuleHistory() (historyClearResult, error) {
 	if err := en.mutableLocked(); err != nil {
 		return result, err
 	}
-	drop, liveBatches := map[string]bool{}, map[string]bool{}
+	drop, cleared, liveBatches := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	archive := map[string]*Run{}
+	confirmed, unresolved := en.ruleHistoryEvidenceLocked()
 	for id, run := range en.runs {
 		if run.Source != "scheduled_probe" {
 			continue
 		}
 		r := en.rules[run.Config.RuleID]
-		if run.CompletedAt == nil || en.handlingEvidenceLocked(run) || (r != nil && (r.ActionID != "" || r.BlockedAuthID != "")) {
+		active := run.CompletedAt == nil || en.active[id] != nil
+		handling := unresolved[id] || (r != nil && (r.ActionID != "" || r.BlockedAuthID != ""))
+		if run.HistoryCleared {
+			cleared[id] = true
+			if !active && !handling && !confirmed[id] {
+				drop[id] = true
+			}
+		} else if active || handling {
 			liveBatches[run.Config.ScopeBatchID] = true
 			result.Kept++
-			continue
+			if !active {
+				result.KeptForHandling++
+			}
+		} else {
+			cleared[id] = true
+			if confirmed[id] {
+				next := cloneRun(run)
+				next.HistoryCleared = true
+				archive[id] = next
+				result.Archived++
+			} else {
+				drop[id] = true
+				result.Deleted++
+			}
 		}
-		drop[id] = true
 	}
 	updates := map[string]*Rule{}
 	for id, r := range en.rules {
 		clearBatch := r.LastScopeBatch != "" && !liveBatches[r.LastScopeBatch]
-		clearLinks := r.LastScopeDispatch != nil && slices.ContainsFunc(r.LastScopeDispatch.Details, func(d ScopeSkipDetail) bool { return drop[d.RunID] })
-		if !drop[r.LastRun] && !clearBatch && !clearLinks {
+		clearLinks := r.LastScopeDispatch != nil && slices.ContainsFunc(r.LastScopeDispatch.Details, func(d ScopeSkipDetail) bool { return cleared[d.RunID] })
+		if !cleared[r.LastRun] && !clearBatch && !clearLinks {
 			continue
 		}
 		n := cloneRule(r)
-		if drop[r.LastRun] {
+		if cleared[r.LastRun] {
 			n.LastRun = ""
 		}
 		if clearBatch {
@@ -59,23 +107,28 @@ func (en *Engine) clearRuleHistory() (historyClearResult, error) {
 		}
 		if clearLinks {
 			for i, detail := range n.LastScopeDispatch.Details {
-				if drop[detail.RunID] {
+				if cleared[detail.RunID] {
 					n.LastScopeDispatch.Details[i].RunID = ""
 				}
 			}
 		}
 		updates[id] = n
 	}
-	if len(drop) == 0 && len(updates) == 0 {
+	if len(drop) == 0 && len(archive) == 0 && len(updates) == 0 {
 		return result, nil
 	}
 	err := en.store.Write(func(tx *bolt.Tx) error {
+		for id, run := range archive {
+			if err := put(tx, "runs", id, run); err != nil {
+				return err
+			}
+		}
 		for id, r := range updates {
 			if err := put(tx, "rules", id, r); err != nil {
 				return err
 			}
 		}
-		return deleteRuleRecords(tx, drop, "")
+		return deleteRuleRecords(tx, drop, "", nil, nil)
 	})
 	if err != nil {
 		return historyClearResult{}, err
@@ -83,14 +136,16 @@ func (en *Engine) clearRuleHistory() (historyClearResult, error) {
 	for id := range drop {
 		delete(en.runs, id)
 	}
+	for id, run := range archive {
+		en.runs[id] = run
+	}
 	for id, r := range updates {
 		*en.rules[id] = *r
 	}
-	result.Deleted = len(drop)
 	return result, nil
 }
 
-func deleteRuleRecords(tx *bolt.Tx, drop map[string]bool, deletedRule string) error {
+func deleteRuleRecords(tx *bolt.Tx, drop map[string]bool, deletedRule string, keepRuns, keepActions map[string]bool) error {
 	for id := range drop {
 		if err := tx.Bucket([]byte("runs")).Delete([]byte(id)); err != nil {
 			return err
@@ -103,7 +158,7 @@ func deleteRuleRecords(tx *bolt.Tx, drop map[string]bool, deletedRule string) er
 		if err := json.Unmarshal(v, &a); err != nil {
 			return err
 		}
-		if drop[a.RunID] || (deletedRule != "" && a.RuleID == deletedRule) {
+		if !keepRuns[a.RunID] && !keepActions[a.ActionID] && (drop[a.RunID] || deletedRule != "" && a.RuleID == deletedRule) {
 			keys = append(keys, string(k))
 		}
 		return nil
@@ -160,7 +215,7 @@ func (en *Engine) pruneResultCountsLocked(ruleID, authID string) error {
 	type key struct{ rule, auth string }
 	groups := make(map[key][]*Run)
 	for _, r := range en.runs {
-		if r.Source != "scheduled_probe" || r.CompletedAt == nil || r.Status == "running" || r.Status == "queued" || (ruleID != "" && r.Config.RuleID != ruleID) || (authID != "" && r.Config.AuthID != authID) {
+		if r.Source != "scheduled_probe" || r.HistoryCleared || r.CompletedAt == nil || r.Status == "running" || r.Status == "queued" || (ruleID != "" && r.Config.RuleID != ruleID) || (authID != "" && r.Config.AuthID != authID) {
 			continue
 		}
 		rule := en.rules[r.Config.RuleID]

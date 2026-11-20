@@ -56,6 +56,7 @@ func TestConversionRefusesExistingFilesAndChangedPolicy(t *testing.T) {
 				if mode == "identity" {
 					name = "existing.json"
 				}
+				item.Credential["refresh_token"] = "different-existing-grant"
 				h.files[name] = item.Credential
 				h.entries[name] = account.Entry{ID: name, Index: name, Name: name, Provider: "codex", Status: "active"}
 			case "prepare":
@@ -118,11 +119,14 @@ func TestConversionBlocksPendingIdentityWithoutEmail(t *testing.T) {
 	}
 }
 
-func conversionRequest(t *testing.T, s *Service, path, key, source string) pluginapi.ManagementResponse {
+func conversionRequest(t *testing.T, s *Service, path, key, source string, indexes ...int) pluginapi.ManagementResponse {
 	t.Helper()
 	body := map[string]any{"source": source}
 	if path == "upload" {
-		body["indexes"] = []int{0}
+		if indexes == nil {
+			indexes = []int{0}
+		}
+		body["indexes"] = indexes
 	}
 	raw, err := Encode(body)
 	if err != nil {
@@ -148,9 +152,13 @@ func TestConversionPreviewAndUploadAreOfflineAndIdempotent(t *testing.T) {
 	if ojson.GetBytes(preview.Body, "items.0.credential.id_token").Exists() {
 		t.Fatal("fabricated ID token")
 	}
-	for _, key := range []string{"conversion-one", "conversion-one", "conversion-new-key"} {
-		r := conversionRequest(t, s, "upload", key, source)
-		if r.StatusCode != 200 || ojson.GetBytes(r.Body, "items.0.status").String() != "uploaded" {
+	for _, check := range []struct{ key, status, code string }{
+		{"conversion-one", "uploaded", ""},
+		{"conversion-one", "uploaded", ""},
+		{"conversion-new-key", "existing", "conversion_previously_uploaded"},
+	} {
+		r := conversionRequest(t, s, "upload", check.key, source)
+		if r.StatusCode != 200 || ojson.GetBytes(r.Body, "items.0.status").String() != check.status || ojson.GetBytes(r.Body, "items.0.code").String() != check.code {
 			t.Fatalf("upload failed: %d %s", r.StatusCode, r.Body)
 		}
 	}
@@ -175,7 +183,7 @@ func TestConversionPreviewAndUploadAreOfflineAndIdempotent(t *testing.T) {
 	}
 	s = offlineService(t, opts)
 	r := conversionRequest(t, s, "upload", "conversion-reopened", source)
-	if r.StatusCode != 200 || h.saves != 1 || ojson.GetBytes(r.Body, "items.0.status").String() != "uploaded" {
+	if r.StatusCode != 200 || h.saves != 1 || ojson.GetBytes(r.Body, "items.0.status").String() != "existing" || ojson.GetBytes(r.Body, "items.0.code").String() != "conversion_previously_uploaded" {
 		t.Fatal("restart repeated the import")
 	}
 	changed := ojson.NewDocString(source)
@@ -183,6 +191,134 @@ func TestConversionPreviewAndUploadAreOfflineAndIdempotent(t *testing.T) {
 	r = conversionRequest(t, s, "upload", "conversion-new-token", changed.String())
 	if ojson.GetBytes(r.Body, "items.0.code").String() != "duplicate_identity" || h.saves != 1 {
 		t.Fatal("changed credential was reported as uploaded or overwrote existing file")
+	}
+}
+
+func conversionBatchFixture(t *testing.T) string {
+	t.Helper()
+	token := func(claims map[string]any) string {
+		raw, err := Encode(claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "e30." + base64.RawURLEncoding.EncodeToString(raw) + ".offline"
+	}
+	var accounts []map[string]any
+	for _, name := range []string{"first", "second"} {
+		email, accountID, userID := name+"@example.test", "account-"+name, "user-"+name
+		authClaims := map[string]string{"chatgpt_account_id": accountID, "chatgpt_user_id": userID, "user_id": userID, "chatgpt_plan_type": "plus"}
+		access := token(map[string]any{"exp": int64(4102444800), "sub": "sub-" + name, "https://api.openai.com/auth": authClaims, "https://api.openai.com/profile": map[string]string{"email": email}})
+		id := token(map[string]any{"sub": "sub-" + name, "email": email, "https://api.openai.com/auth": authClaims})
+		accounts = append(accounts, map[string]any{
+			"name": name, "platform": "openai", "type": "oauth", "concurrency": 1, "priority": 1, "rate_multiplier": 1,
+			"credentials": map[string]any{
+				"type": "codex", "email": email, "account_id": accountID, "chatgpt_account_id": accountID, "chatgpt_user_id": userID,
+				"access_token": access, "id_token": id, "refresh_token": "offline-refresh-" + name, "plan_type": "plus",
+				"organization_id": "offline-org", "last_refresh": "2026-11-20T00:00:00Z", "max_concurrency": 1, "proxy_url": "",
+			},
+			"extra": map[string]string{"email": email, "source_type": "fixture"},
+		})
+	}
+	raw, err := Encode(map[string]any{"type": "sub2api-data", "version": 1, "exported_at": "2026-11-20T00:00:00Z", "proxies": []any{}, "accounts": accounts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestConversionBatchUploadsSelectedRowsIndependently(t *testing.T) {
+	source := conversionBatchFixture(t)
+	for _, test := range []struct {
+		name, status, code string
+		saves              int
+	}{
+		{"both new", "uploaded", "", 2},
+		{"already present", "existing", "conversion_already_present", 1},
+		{"existing grant differs", "failed", "duplicate_identity", 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newFakeHost()
+			opts := offlineOptions(t)
+			opts.Call = h.call
+			s := offlineService(t, opts)
+			preview := conversionRequest(t, s, "preview", "", source)
+			rows := ojson.GetBytes(preview.Body, "items").Array()
+			if preview.StatusCode != 200 || ojson.GetBytes(preview.Body, "ready").Int() != 2 || len(rows) != 2 || h.saves != 0 {
+				t.Fatal("two-account export did not preview both credentials")
+			}
+			first, second := rows[0], rows[1]
+			if first.Get("filename").String() == second.Get("filename").String() {
+				t.Fatal("different principals generated the same filename")
+			}
+			if test.name != "both new" {
+				current := second.Get("credential").Value().(map[string]any)
+				delete(current, "user_id") // Existing CPA files may keep this in claims only.
+				if test.name == "existing grant differs" {
+					current["refresh_token"] = "different-existing-grant"
+				}
+				h.files["existing.json"] = current
+				h.entries["existing.json"] = account.Entry{ID: "existing.json", Index: "existing.json", Name: "existing.json", Provider: "codex", Status: "active"}
+			}
+			r := conversionRequest(t, s, "upload", "batch-first-request", source, 1, 0)
+			out := ojson.GetBytes(r.Body, "items").Array()
+			if r.StatusCode != 200 || len(out) != 2 || h.saves != test.saves {
+				t.Fatalf("batch response %d, %d rows, %d writes", r.StatusCode, len(out), h.saves)
+			}
+			if out[0].Get("index").Int() != 1 || out[0].Get("status").String() != test.status || out[0].Get("code").String() != test.code ||
+				out[1].Get("index").Int() != 0 || out[1].Get("status").String() != "uploaded" || h.files[first.Get("filename").String()]["email"] != first.Get("email").String() {
+				t.Fatal("batch statuses or credential indexes did not match the selection")
+			}
+			if test.name == "both new" {
+				if h.files[second.Get("filename").String()]["email"] != second.Get("email").String() {
+					t.Fatal("the second credential was not saved under its own identity")
+				}
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				s = offlineService(t, opts)
+				retry := conversionRequest(t, s, "upload", "batch-after-restart", source, 0, 1)
+				repeated := ojson.GetBytes(retry.Body, "items").Array()
+				if h.saves != 2 || len(repeated) != 2 {
+					t.Fatal("reopening the batch repeated a write")
+				}
+				for i, row := range repeated {
+					if int(row.Get("index").Int()) != i || row.Get("status").String() != "existing" || row.Get("code").String() != "conversion_previously_uploaded" {
+						t.Fatal("reopening the batch did not identify the confirmed receipts")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestConversionReceiptCannotConfirmChangedOrMissingCredential(t *testing.T) {
+	for _, change := range []string{"removed", "rotated", "disabled"} {
+		t.Run(change, func(t *testing.T) {
+			h := newFakeHost()
+			opts := offlineOptions(t)
+			opts.Call = h.call
+			s := offlineService(t, opts)
+			source := conversionFixture(t)
+			first := conversionRequest(t, s, "upload", "conversion-initial", source)
+			name := ojson.GetBytes(first.Body, "items.0.auth_id").String()
+			if h.saves != 1 || name == "" {
+				t.Fatal("initial conversion was not saved")
+			}
+			switch change {
+			case "removed":
+				delete(h.files, name)
+				delete(h.entries, name)
+			case "rotated":
+				h.files[name]["refresh_token"] = "newer-host-grant"
+			case "disabled":
+				h.files[name]["disabled"] = true
+			}
+			r := conversionRequest(t, s, "upload", "conversion-fresh-request", source)
+			row := ojson.GetBytes(r.Body, "items.0")
+			if h.saves != 1 || row.Get("status").String() != "failed" || row.Get("code").String() != "conversion_previous_upload_changed" {
+				t.Fatal("a stale receipt confirmed or overwrote changed credential state")
+			}
+		})
 	}
 }
 

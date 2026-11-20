@@ -12,6 +12,13 @@ import (
 	"github.com/cliproxyapi-plugins/model-quality/login/conversion"
 )
 
+const (
+	ConversionAlreadyPresent     = "conversion_already_present"
+	ConversionPreviouslyUploaded = "conversion_previously_uploaded"
+)
+
+var errConversionIdentity = errors.New("duplicate_identity")
+
 // ImportConverted only creates new files. Receipts consume an identity before
 // the host write, so a lost response or restart cannot silently repeat a save.
 func (m *Manager) ImportConverted(ctx context.Context, item conversion.Item, guard func() error, prepare func(context.Context, string, string) error) (LoginCommitResult, error) {
@@ -40,14 +47,16 @@ func (m *Manager) ImportConverted(ctx context.Context, item conversion.Item, gua
 	}
 	digest := sha256.Sum256([]byte(canonical))
 	result.Principal = hex.EncodeToString(digest[:])
-	if old, err := m.LoginCommitStatus(result.CommitID); err == nil {
-		if old.State == "committed" && old.Principal == result.Principal {
-			return old, nil
-		}
-		if old.State == "committed" {
-			return result, errors.New("duplicate_identity")
-		}
-		if old.State != "aborted" {
+	old, err := m.LoginCommitStatus(result.CommitID)
+	if err == nil {
+		switch old.State {
+		case "committed":
+			if old.Principal != result.Principal {
+				return result, errConversionIdentity
+			}
+		case "aborted":
+			// The previous attempt ended before the save.
+		default:
 			return old, errors.New("commit_unknown")
 		}
 	} else if err.Error() != "not_found" {
@@ -65,45 +74,30 @@ func (m *Manager) ImportConverted(ctx context.Context, item conversion.Item, gua
 		}
 		return nil
 	}
-	checkExisting := func() error {
-		entries, err := m.entries()
+	checkExisting := func() (bool, error) {
+		current, err := m.existingConversion(item)
 		if err != nil {
-			return err
+			if old.State == "committed" && errors.Is(err, errConversionIdentity) {
+				return false, errors.New("conversion_previous_upload_changed")
+			}
+			return false, err
 		}
-		for _, entry := range entries {
-			if entry.Name == item.Filename || entry.ID == item.Filename {
-				return errors.New("duplicate_identity")
-			}
-			if entry.Provider != "codex" && entry.Type != "codex" {
-				continue
-			}
-			if item.Email != "" && strings.EqualFold(entry.Email, item.Email) {
-				return errors.New("duplicate_identity")
-			}
-			if entry.RuntimeOnly {
-				continue
-			}
-			current, err := m.read(entry)
-			if err != nil {
-				return err
-			}
-			if item.Email != "" && strings.EqualFold(authMetadataString(current, "email"), item.Email) {
-				return errors.New("duplicate_identity")
-			}
-			principal, principalErr := LoginPrincipalFromAuth(current)
-			if principalErr == nil && (item.Email != "" && principal.Email == item.Email || principal.AccountID == item.AccountID && (item.UserID == "" || principal.UserID == item.UserID)) {
-				return errors.New("duplicate_identity")
-			}
-			if authMetadataString(current, "account_id") == item.AccountID && (item.UserID == "" || authMetadataString(current, "user_id") == item.UserID || principalErr != nil) {
-				return errors.New("duplicate_identity")
-			}
+		if old.State == "committed" && (current == nil || current.ID != old.AuthID || !convertedFieldsMatch(current, item)) {
+			return false, errors.New("conversion_previous_upload_changed")
 		}
-		return nil
+		if current == nil {
+			return false, nil
+		}
+		result.AuthID, result.State = current.ID, ConversionAlreadyPresent
+		if old.State == "committed" {
+			result.State = ConversionPreviouslyUploaded
+		}
+		return true, nil
 	}
 	if err := check(); err != nil {
 		return result, err
 	}
-	if err := checkExisting(); err != nil {
+	if exists, err := checkExisting(); exists || err != nil {
 		return result, err
 	}
 	if prepare != nil {
@@ -114,7 +108,7 @@ func (m *Manager) ImportConverted(ctx context.Context, item conversion.Item, gua
 	if err := check(); err != nil {
 		return result, err
 	}
-	if err := checkExisting(); err != nil {
+	if exists, err := checkExisting(); exists || err != nil {
 		return result, err
 	}
 	result.State = "commit_unknown"
@@ -147,13 +141,8 @@ func (m *Manager) ImportConverted(ctx context.Context, item conversion.Item, gua
 			continue
 		}
 		actual, err := m.read(entry)
-		if err != nil || actual.Provider != "codex" {
+		if err != nil || actual.Provider != "codex" || !convertedFieldsMatch(actual, item) {
 			return result, errors.New("commit_unknown")
-		}
-		for key, value := range item.Credential {
-			if actual.Metadata[key] != value {
-				return result, errors.New("commit_unknown")
-			}
 		}
 		var live struct {
 			Auth Entry `json:"auth"`
@@ -177,4 +166,64 @@ func (m *Manager) ImportConverted(ctx context.Context, item conversion.Item, gua
 		return result, nil
 	}
 	return result, errors.New("saved_not_adopted")
+}
+
+func convertedFieldsMatch(current *Auth, item conversion.Item) bool {
+	for key, value := range item.Credential {
+		if current.Metadata[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+// Only an unambiguous matching principal and grant can be shown as already
+// present. A colliding filename, email, or stale grant never permits a save.
+func (m *Manager) existingConversion(item conversion.Item) (*Auth, error) {
+	entries, err := m.entries()
+	if err != nil {
+		return nil, err
+	}
+	var matched *Auth
+	for _, entry := range entries {
+		sameName := entry.Name == item.Filename || entry.ID == item.Filename
+		sameEmail := item.Email != "" && strings.EqualFold(entry.Email, item.Email)
+		codex := entry.Provider == "codex" || entry.Type == "codex"
+		if !codex || entry.RuntimeOnly {
+			if sameName || codex && sameEmail {
+				return nil, errConversionIdentity
+			}
+			continue
+		}
+		current, err := m.read(entry)
+		if err != nil {
+			return nil, err
+		}
+		principal, principalErr := LoginPrincipalFromAuth(current)
+		samePrincipal := principalErr == nil && principal.AccountID == item.AccountID && principal.UserID == item.UserID
+		metadataEmail := authMetadataString(current, "email")
+		metadataUser := authMetadataString(current, "user_id")
+		sameEmail = sameEmail || item.Email != "" && (strings.EqualFold(metadataEmail, item.Email) || principal.Email == item.Email)
+		legacyMatch := authMetadataString(current, "account_id") == item.AccountID && (principalErr != nil || metadataUser == item.UserID)
+		if !sameName && !sameEmail && !samePrincipal && !legacyMatch {
+			continue
+		}
+		if !samePrincipal || matched != nil || metadataUser != "" && metadataUser != item.UserID {
+			return nil, errConversionIdentity
+		}
+		for _, email := range []string{entry.Email, metadataEmail, principal.Email} {
+			if item.Email != "" && email != "" && !strings.EqualFold(email, item.Email) {
+				return nil, errConversionIdentity
+			}
+		}
+		for _, field := range []string{"access_token", "refresh_token", "id_token"} {
+			want, _ := item.Credential[field].(string)
+			got, present := current.Metadata[field]
+			if (present || want != "") && got != want {
+				return nil, errConversionIdentity
+			}
+		}
+		matched = current
+	}
+	return matched, nil
 }

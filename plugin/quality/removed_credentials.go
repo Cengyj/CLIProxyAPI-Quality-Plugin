@@ -152,7 +152,7 @@ func (en *Engine) checkFinishedRounds(ctx context.Context) error {
 	}
 	var candidates []*CredentialDisposition
 	for _, d := range en.managed {
-		if !ready[d.RuleID] || errorPolicyDisabled(d).Code != "" {
+		if !ready[d.RuleID] || d.Snapshot.ProviderMechanism != "" || errorPolicyDisabled(d).Code != "" {
 			continue
 		}
 		switch d.State {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { auditLabel, questionTestSelection, reasonLabel, renderManualVerdict, renderRunEvidence, statusTag, verdictTag } from '../plugin/ui/view.js';
+import { auditLabel, credentialBlock, questionTestSelection, reasonLabel, renderHistoryResult, renderRunEvidence, statusTag, verdictTag } from '../plugin/ui/view.js';
 
-const question = { id: 'logic-candy', prompt: 'Only this exact prompt owns the reference answer.', version: 'v1' };
+const question = { id: 'logic-candy', title: '糖果逻辑测试', kind: 'logic', answer: '21', prompt: 'Only this exact prompt owns the reference answer.', version: 'v1' };
 assert.deepEqual(questionTestSelection(question, question.prompt), { question_id: 'logic-candy' });
 for (const prompt of [`${question.prompt} `, question.prompt.replace('exact', 'changed'), 'A different question']) {
   assert.deepEqual(questionTestSelection(question, prompt), { question_id: 'custom', prompt });
@@ -9,19 +9,51 @@ for (const prompt of [`${question.prompt} `, question.prompt.replace('exact', 'c
 assert.deepEqual(questionTestSelection(undefined, 'My question'), { question_id: 'custom', prompt: 'My question' });
 
 const run = {
-  source: 'manual_test', status: 'completed', action_status: 'not_applicable',
+  source: 'manual_test', status: 'completed', action_status: 'not_applicable', created_at: '2026-11-20T13:00:00Z',
   config: { models: ['example-model'], samples: 1, question, judge: { mode: 'manual' } },
   samples: [{ model: 'example-model', index: 0, execution_status: 'completed', quality_verdict: 'unknown', reason: 'manual assessment required', output: '<svg onload="alert(1)"></svg>', usage_known: false }],
 };
 const simple = renderRunEvidence(run);
-for (const [answer_match, text] of [['correct', '<span class="tag good">正确</span>'], ['incorrect', '<span class="tag warn">错误</span>'], ['unknown', '<span class="tag neutral">未判定</span>']]) {
-  const one = { ...run, samples: [{ ...run.samples[0], answer_match }] };
-  assert.equal(renderManualVerdict(one), text);
-  assert(renderRunEvidence(one).metaHTML.includes(text));
+const recordedPolicy = { code: 'error_policy_disabled', reason: 'CPA 注册目录缺少所选模型', model: 'old-model' };
+const external = { auth_id: 'fake-active', credential_handling: 'disabled', error_policy_block: recordedPolicy, runtime_status: 'active', effective_available: true, models: ['example-model'] };
+const manual = { manual: true };
+const config = { auth_id: external.auth_id, models: ['example-model'] };
+assert.equal(credentialBlock(config, [external], manual), '');
+assert.match(credentialBlock({ ...config, models: ['old-model'] }, [external], manual), /当前目录没有所选模型 old-model/);
+assert.match(credentialBlock(config, [{ ...external, retained_pause: true }], manual), /质量暂停/);
+assert.match(credentialBlock(config, [{ ...external, runtime_status: 'disabled' }], manual), /仍停用/);
+assert.match(credentialBlock(config, [{ ...external, effective_available: false }], manual), /未确认/);
+assert.equal(credentialBlock(config, [{ ...external, error_policy_block: null }], manual), '');
+assert.match(credentialBlock({ control_auth_id: external.auth_id }, [external], manual), /对照凭证已有错误策略/);
+assert.match(credentialBlock({ judge: { mode: 'llm', auth_id: external.auth_id } }, [external], manual), /判题凭证已有错误策略/);
+assert.match(credentialBlock(config, [external]), /规则、对照和判题/);
+const blockedHistory = { ...run, status: 'blocked', samples: [], error: 'blocked: credential already disabled by error policy' };
+const blockedSummary = renderRunEvidence(blockedHistory).metaHTML;
+assert.match(blockedSummary, /当前凭证状态尚未确认，无法开始智商测试。请刷新后重试。/);
+assert.doesNotMatch(blockedSummary, /blocked|credential already disabled|错误策略|质量运维|处置/);
+assert.equal(blockedHistory.error, 'blocked: credential already disabled by error policy');
+for (const [answer_match, individual, overall] of [['correct', '答案正确', '正确'], ['incorrect', '答案错误', '错误'], ['unknown', '未判定', '未判定']]) {
+  const one = renderRunEvidence({ ...run, samples: [{ ...run.samples[0], output: '29', answer_match }] });
+  assert(one.samplesHTML.includes(`data-verdict="${answer_match}"`));
+  assert(one.samplesHTML.includes('>' + individual + '<'));
+  assert(one.conditionsHTML.includes('>' + overall + '<'));
+  assert.doesNotMatch(one.metaHTML, />已完成<|>正确<|>错误<|>未判定</);
+  assert.equal(one.samplesHTML.includes('<dt>标准答案</dt><dd>21</dd>'), answer_match === 'incorrect');
 }
+const wrongSample = { ...run.samples[0], output: '29', answer_match: 'incorrect' };
+for (const sample of [{ ...wrongSample, review: 'unknown' }, { ...wrongSample, execution_status: 'failed' }]) {
+  assert.doesNotMatch(renderRunEvidence({ ...run, samples: [sample] }).samplesHTML, /class="answer-reference"/);
+}
+const customConfig = { ...run.config, question: { ...question, kind: 'custom' } };
+assert.doesNotMatch(renderRunEvidence({ ...run, config: customConfig, samples: [wrongSample] }).samplesHTML, /class="answer-reference"/);
 assert.equal(simple.completed, 1);
 assert.equal(simple.planned, 1);
-assert.match(simple.metaHTML, />未判定</);
+assert.match(simple.metaHTML, /<h3[^>]*>糖果逻辑测试<\/h3>/);
+assert.match(simple.metaHTML, />example-model</);
+assert.match(simple.metaHTML, /<time datetime="2026-11-20T13:00:00Z">/);
+assert.match(simple.samplesHTML, />模型回答</);
+assert.doesNotMatch(simple.samplesHTML, /class="sample-number"/);
+assert.doesNotMatch(renderRunEvidence({ ...run, created_at: undefined }).metaHTML, /<time/);
 assert.doesNotMatch(simple.metaHTML, /无法判断|动作：/);
 assert.doesNotMatch(simple.samplesHTML, /sample-state-label|需要人工评审|data-review-sample/);
 assert.match(simple.samplesHTML, /&lt;svg onload=&quot;alert\(1\)&quot;&gt;/);
@@ -44,7 +76,12 @@ const duplicate = { ...run, config: { ...run.config, samples: 2 }, samples: [
   { ...run.samples[0], output: 'duplicate A', answer_match: 'correct' },
   { ...run.samples[0], output: 'duplicate B', answer_match: 'correct' },
 ] };
-assert.match(renderManualVerdict(duplicate), /部分已判定/);
+assert.match(renderRunEvidence(duplicate).conditionsHTML, /部分已判定/);
+assert.doesNotMatch(renderHistoryResult(duplicate), /class="history-score"/, 'Repeated model/sample positions cannot complete the history score');
+const endedSample = { ...run.samples[0], answer_match: 'correct' };
+for (const status of ['running', 'cancelled', 'failed']) {
+  assert.doesNotMatch(renderHistoryResult({ ...run, status, samples: [endedSample] }), /class="history-score"/, status);
+}
 const anomalous = renderRunEvidence({ ...duplicate, samples: [...duplicate.samples,
   { ...run.samples[0], model: 'other-model', output: 'unplanned model' },
   { ...run.samples[0], index: -1, output: 'negative index' },
@@ -81,10 +118,12 @@ const mixed = renderRunEvidence({ ...run, samples: [
   { ...run.samples[0], index: 3, quality_verdict: 'incorrect', answer_match: 'correct' },
   { ...run.samples[0], index: 4, review: 'correct', quality_verdict: 'incorrect' },
 ] });
-assert.match(mixed.metaHTML, /tag warn">部分正确</);
+assert.match(mixed.conditionsHTML, />部分正确</);
+assert.doesNotMatch(mixed.metaHTML, /部分正确/);
 assert.doesNotMatch(mixed.metaHTML, /(正确|错误|未判定)\s*\d/);
-assert.match(mixed.samplesHTML, /tag good">答案正确/);
-assert.match(mixed.samplesHTML, /tag warn">答案错误/);
+assert.match(mixed.samplesHTML, />答案正确</);
+assert.match(mixed.samplesHTML, />答案错误</);
+assert.match(mixed.samplesHTML, />回答 2</);
 for (const reason of ['cancelled', 'context canceled']) assert.equal(reasonLabel(reason), '测试已取消');
 assert.equal(reasonLabel('unmapped upstream error'), 'unmapped upstream error');
 assert.equal(auditLabel('credential_external_enable'), '已识别 CPA 人工启用');

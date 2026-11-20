@@ -647,7 +647,7 @@ const server = http.createServer(async (req, res) => {
       const emptyResponse = page.waitForResponse(response => response.url().includes('/runs?source=manual_test&'));
       await history();
       await emptyResponse;
-      await page.waitForFunction(() => document.getElementById('history-total').textContent === '0 个任务' && !document.querySelector('#history-list [data-run]'));
+      await page.waitForFunction(() => document.getElementById('history-total').textContent === '共 0 条记录' && !document.querySelector('#history-list [data-run]'));
       const geometry = await historySnapshot();
       assertEmptyHistory(geometry, 'history after scrolled results');
       assert(Math.abs(geometry.toolbar.top - toolbarBefore.y) <= 1, 'Switching from scrolled results cannot move the toolbar');
@@ -1699,7 +1699,8 @@ const server = http.createServer(async (req, res) => {
     await page.waitForFunction(() => document.getElementById('run-feedback').textContent.includes('自动重试查询'));
     polling.status = 'completed';
     await page.clock.runFor(2400);
-    await page.waitForFunction(() => document.getElementById('run-meta').textContent.includes('已完成'));
+    await page.waitForFunction(() => document.getElementById('run-progress').parentElement.hidden &&
+      document.getElementById('run-cancel').classList.contains('hidden'));
     assert.equal(pollReads, 3);
     assert.equal(await page.locator('#run-feedback').isVisible(), false, 'Recovered progress clears the stale query error');
     assert.equal(

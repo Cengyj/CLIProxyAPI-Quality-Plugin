@@ -178,7 +178,7 @@ func TestCatalogActionUncertainWriteSurvivesRestart(t *testing.T) {
 	}
 	for range 2 {
 		next, err := f.engine.dispatchRule(ctx, rule.ID, rule.Revision, false)
-		if err != nil || next.Count != 1 || next.Skipped != 0 {
+		if err != nil || next.Count != 0 || next.RecoveryCount != 0 {
 			t.Fatal(next, err)
 		}
 	}

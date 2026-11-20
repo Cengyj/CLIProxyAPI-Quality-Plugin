@@ -24,6 +24,7 @@ func cloneFrozen(frozen Frozen) Frozen {
 	frozen.RunConfig = cloneConfig(frozen.RunConfig)
 	frozen.UpstreamErrorActions = maps.Clone(frozen.UpstreamErrorActions)
 	frozen.ManagedProbe = cloneValue(frozen.ManagedProbe)
+	frozen.ProviderDependencies = slices.Clone(frozen.ProviderDependencies)
 	return frozen
 }
 
@@ -42,6 +43,7 @@ func cloneRun(run *Run) *Run {
 		return nil
 	}
 	out := *run
+	out.AnswerPreview = cloneValue(run.AnswerPreview)
 	out.SkipDetail = cloneValue(run.SkipDetail)
 	out.PreflightDetail = cloneValue(run.PreflightDetail)
 	out.Config = cloneFrozen(run.Config)
@@ -57,6 +59,8 @@ func cloneRule(rule *Rule) *Rule {
 		return nil
 	}
 	out := *rule
+	out.ObjectTypes = slices.Clone(rule.ObjectTypes)
+	out.AuthorizedGroups = slices.Clone(rule.AuthorizedGroups)
 	out.RunConfig = cloneConfig(rule.RunConfig)
 	out.UpstreamErrorActions = maps.Clone(rule.UpstreamErrorActions)
 	out.LastManualSkips = slices.Clone(rule.LastManualSkips)
@@ -68,6 +72,7 @@ func cloneScopeDispatch(summary *ScopeDispatchSummary) *ScopeDispatchSummary {
 	copy := cloneValue(summary)
 	if copy != nil {
 		copy.Details = slices.Clone(summary.Details)
+		copy.Candidates = maps.Clone(summary.Candidates)
 	}
 	return copy
 }

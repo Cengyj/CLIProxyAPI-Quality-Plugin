@@ -97,9 +97,9 @@ export class ManagementClient {
       if (!response.ok) {
         const message = data.error?.message || data.error || data.message || `接口返回 ${response.status}`;
         const code = data.code || data.error?.code;
-        const error = new Error(
-          `${typeof message === 'string' ? message : '操作失败'}${code ? ` (${code})` : ''}`,
-        );
+        const detail = typeof message === 'string' ? message : '操作失败';
+        const error = new Error(`${detail}${code ? ` (${code})` : ''}`);
+        error.detail = detail;
         error.status = response.status;
         error.code = code;
         throw error;

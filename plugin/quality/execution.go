@@ -22,18 +22,66 @@ func (en *Engine) DeleteManualRun(id string) error {
 	if r == nil {
 		return nil
 	}
+	if err := en.manualRunRemovalErrorLocked(r); err != nil {
+		return err
+	}
+	return en.deleteManualRunsLocked([]string{id})
+}
+
+func (en *Engine) manualRunRemovalErrorLocked(r *Run) error {
 	if r.Source != "manual_test" || r.Config.RuleID != "" {
 		return fmt.Errorf("conflict: only manual tests can be removed here")
 	}
-	if r.CompletedAt == nil || en.active[id] != nil || r.Status == "queued" || r.Status == "running" || r.Status == "cancelling" {
-		return fmt.Errorf("conflict: test has not finished")
+	if r.CompletedAt == nil || en.handlingEvidenceLocked(r) || r.Status == "queued" || r.Status == "running" || r.Status == "cancelling" {
+		return fmt.Errorf("conflict: test is unfinished or retained for handling")
+	}
+	return nil
+}
+
+func (en *Engine) clearManualHistory() (historyClearResult, error) {
+	en.mu.Lock()
+	defer en.mu.Unlock()
+	var result historyClearResult
+	if err := en.mutableLocked(); err != nil {
+		return result, err
+	}
+	var ids []string
+	for id, run := range en.runs {
+		if run.Source != "manual_test" {
+			continue
+		}
+		if en.manualRunRemovalErrorLocked(run) != nil {
+			result.Kept++
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if err := en.deleteManualRunsLocked(ids); err != nil {
+		return historyClearResult{}, err
+	}
+	result.Deleted = len(ids)
+	return result, nil
+}
+
+// Keep submission receipts so clearing history cannot replay a deleted test.
+func (en *Engine) deleteManualRunsLocked(ids []string) error {
+	if len(ids) == 0 {
+		return nil
 	}
 	if err := en.store.Write(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte("runs")).Delete([]byte(id))
+		b := tx.Bucket([]byte("runs"))
+		for _, id := range ids {
+			if err := b.Delete([]byte(id)); err != nil {
+				return err
+			}
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
-	delete(en.runs, id)
+	for _, id := range ids {
+		delete(en.runs, id)
+	}
 	return nil
 }
 
@@ -67,7 +115,7 @@ func (en *Engine) Review(id string, index int, verdict, note string) error {
 		return err
 	}
 	r := en.runs[id]
-	if r == nil || index < r.PrunedSamples || index-r.PrunedSamples >= len(r.Samples) {
+	if r == nil || r.HistoryCleared || index < r.PrunedSamples || index-r.PrunedSamples >= len(r.Samples) {
 		return fmt.Errorf("not_found: sample")
 	}
 	index -= r.PrunedSamples
@@ -114,6 +162,12 @@ func (en *Engine) executeTask(task *executionTask) {
 				}
 				sample, err := en.evaluate(ctx, id, f, authID, provider, model, source)
 				sample.Index = i
+				if sample.ExecutionStatus == "skipped" && f.RuleID != "" {
+					en.finish(id, &scopeRejection{"blocked: " + sample.Error, ScopeSkipDetail{
+						AuthID: authID, Model: model, Code: "provider_probe_unavailable", Reason: sample.Error, NotExecuted: true,
+					}})
+					return
+				}
 				if sample.ExecutionStatus != "" {
 					en.mu.Lock()
 					current := cloneRun(en.runs[id])
@@ -155,10 +209,14 @@ func (en *Engine) evaluate(ctx context.Context, runID string, f Frozen, authID, 
 	en.mu.Lock()
 	responseLimit := en.cfg.MaxResponseBytes
 	en.mu.Unlock()
-	s := en.host.Execute(ctx, Execution{ManagedProbe: f.ManagedProbe, ResponseLimit: responseLimit, AuthID: authID, Provider: provider, Model: model, Prompt: f.Question.Prompt, Source: source, Parameters: f.Parameters})
+	probe := f.ManagedProbe
+	if authID != f.AuthID {
+		probe = nil
+	}
+	s := en.host.Execute(ctx, Execution{ManagedProbe: probe, ResponseLimit: responseLimit, AuthID: authID, Provider: provider, Model: model, Prompt: f.Question.Prompt, Source: source, Parameters: f.Parameters})
 	s.Model = model
 	s.QualityVerdict = "unknown"
-	if !en.Capabilities().VerifiedEvidence && f.ManagedProbe == nil {
+	if !en.Capabilities().VerifiedEvidence && probe == nil {
 		s.Evidence.Verified = false
 		s.Evidence.Reason = "official_host_evidence_unavailable"
 	}
@@ -215,6 +273,11 @@ func (en *Engine) finish(id string, err error) {
 		}
 		if strings.Contains(err.Error(), "blocked:") {
 			r.Status = "blocked"
+		}
+		var rejection *scopeRejection
+		if errors.As(err, &rejection) && rejection.detail.NotExecuted && len(r.Samples) == 0 && len(r.Controls) == 0 {
+			detail := rejection.detail
+			markDispatchSkip(r, &detail, now)
 		}
 	}
 	if r.CancelRequested {

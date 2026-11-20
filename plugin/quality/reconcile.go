@@ -228,6 +228,9 @@ func (en *Engine) Prune(now time.Time) error {
 			if d.RunID != "" {
 				policy.cutoffs[d.RunID] = time.Time{}
 			}
+			if d.TriggerRunID != "" {
+				policy.cutoffs[d.TriggerRunID] = time.Time{}
+			}
 			if d.ActionID != "" {
 				policy.keepActions[d.ActionID] = true
 			}
@@ -236,8 +239,17 @@ func (en *Engine) Prune(now time.Time) error {
 	if err := en.pruneResultCountsLocked("", ""); err != nil {
 		return err
 	}
+	confirmed, unresolved := en.ruleHistoryEvidenceLocked()
 	for id, r := range en.runs {
 		if _, protected := policy.cutoffs[id]; protected {
+			continue
+		}
+		if r.HistoryCleared {
+			if confirmed[id] || unresolved[id] {
+				policy.cutoffs[id] = time.Time{}
+			} else {
+				policy.cutoffs[id] = policy.before
+			}
 			continue
 		}
 		if en.handlingEvidenceLocked(r) {

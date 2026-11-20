@@ -65,7 +65,7 @@ func upstreamAction(f *Frozen, s *Sample) string {
 		return ""
 	}
 	e := s.Evidence
-	if e.Path != "cpa_management_probe" || e.ConditionsChanged || e.AuthID != f.AuthID || e.RequestedModel != s.Model || e.PayloadFingerprint == "" ||
+	if !managedEvidencePath(f.ManagedProbe, e.Path) || e.ConditionsChanged || e.AuthID != f.AuthID || e.RequestedModel != s.Model || e.PayloadFingerprint == "" ||
 		s.Index < 0 || s.Index >= f.Samples || !contains(f.Models, s.Model) {
 		return ""
 	}
@@ -76,6 +76,8 @@ func upstreamAction(f *Frozen, s *Sample) string {
 }
 
 type CredentialDisposition struct {
+	TriggerAuthID       string             `json:"trigger_auth_id,omitempty"`
+	TriggerRunID        string             `json:"trigger_run_id,omitempty"`
 	CatalogMissingModel string             `json:"catalog_missing_model,omitempty"`
 	UpstreamCondition   string             `json:"upstream_condition,omitempty"`
 	Email               string             `json:"email,omitempty"`
@@ -111,7 +113,7 @@ func (en *Engine) loadDispositions() error {
 }
 
 func activeDisposition(d *CredentialDisposition) bool {
-	return d != nil && d.State != "restored" && d.State != "externally_enabled" && d.State != "acknowledged"
+	return d != nil && d.State != "restored" && d.State != "externally_enabled" && d.State != "acknowledged" && d.State != "precondition_failed"
 }
 
 func pendingCredentialAction(state string) string {
@@ -188,14 +190,24 @@ func (en *Engine) acknowledgeHandling(ctx context.Context, ruleID, authID, actio
 	if _, busy := en.busyAuth[authID]; busy {
 		return fmt.Errorf("conflict: wait for the active credential task to finish")
 	}
+	directory := &providerInventoryStatus{Verified: true}
+	if d.Snapshot.ProviderMechanism != "" {
+		ctx = context.WithValue(ctx, providerInventoryStatusKey{}, directory)
+	}
 	targets, err := en.host.Targets(ctx)
 	if err != nil {
 		return err
 	}
+	if !directory.Verified {
+		return fmt.Errorf("blocked: the current provider configuration could not be verified")
+	}
 	for _, t := range targets {
-		if t.AuthID == authID && (t.ManualDisabled || t.QualityPaused || t.RuntimeStatus != "active") {
+		if t.AuthID == authID && (t.ManualDisabled || t.QualityPaused || t.RetainedPause || t.RuntimeStatus != "active" && t.RuntimeStatus != "registered") {
 			return fmt.Errorf("blocked: first resolve this credential's disabled state in CPA")
 		}
+	}
+	if d.Snapshot.ProviderMechanism == "group_disabled" {
+		return en.acknowledgeProviderGroupLocked(r, d, targets)
 	}
 	next := *d
 	next.State = "acknowledged"
@@ -306,7 +318,7 @@ func (en *Engine) admitSnapshotLocked(r *Rule, t Target, snapshot CredentialSnap
 			return projectOwnedTarget(r, t, snapshot, d)
 		}
 	}
-	if snapshot.Disabled {
+	if snapshot.Disabled && !canInspectManualDisabled(r, d) {
 		if detail := recoveryDenied(r, d); detail.Code != "" {
 			return t, nil, &scopeRejection{"blocked: disabled credential is outside recovery scope", detail}
 		}
@@ -326,7 +338,7 @@ func (en *Engine) observeEnabledTargetLocked(t Target, s CredentialSnapshot, d *
 		}
 		return &scopeRejection{"blocked: credential unavailable", runtimeSkip(t)}
 	}
-	if s.AuthID != t.AuthID || s.AuthIndex != t.AuthIndex || s.Provider != t.Provider || s.Name == "" || s.Fingerprint == "" || s.UpdatedAt.IsZero() {
+	if s.AuthID != t.AuthID || s.AuthIndex != t.AuthIndex || s.Provider != t.Provider || s.Name == "" || s.Fingerprint == "" || (s.ProviderMechanism == "" && s.UpdatedAt.IsZero()) {
 		return rejectScope("blocked: current credential identity cannot be verified", "identity_conflict", "CPA 当前文件快照与本轮目录凭证标识不一致，无法核实当前凭证。")
 	}
 	changed := !sameCredential(s, d.Snapshot)
@@ -400,6 +412,9 @@ func (en *Engine) managedTargetsLocked(ctx context.Context, r *Rule, targets []T
 	out := append([]Target(nil), targets...)
 	for i, t := range out {
 		if t.AuthID == r.AuthID {
+			if isProviderTarget(t) {
+				return targets, nil, nil
+			}
 			adjusted, snapshot, err := en.admitManagedLocked(ctx, r, t, validateOnly)
 			out[i] = adjusted
 			return out, snapshot, err
@@ -413,7 +428,7 @@ func (en *Engine) checkManagedRunLocked(run *Run, targets []Target) ([]Target, e
 		return targets, nil
 	}
 	r := en.rules[run.Config.RuleID]
-	if !managedRule(r) {
+	if r == nil || !managedRule(r) && !(run.Config.ManagedProbe.Disabled && canInspectManualDisabled(r, en.managed[run.Config.AuthID])) {
 		return targets, fmt.Errorf("blocked: credential handling rule changed")
 	}
 	out := append([]Target(nil), targets...)
@@ -440,7 +455,7 @@ func managedRoundVerdict(run *Run) string {
 	}
 	verdict := roundVerdict(run, func(s *Sample) bool {
 		e := &s.Evidence
-		return e.Path == "cpa_management_probe" && !e.ConditionsChanged && e.AuthID == run.Config.AuthID && e.RequestedModel == s.Model && e.PayloadFingerprint != "" && e.ResolvedModel != ""
+		return managedEvidencePath(run.Config.ManagedProbe, e.Path) && !e.ConditionsChanged && e.AuthID == run.Config.AuthID && e.RequestedModel == s.Model && e.PayloadFingerprint != "" && e.ResolvedModel != ""
 	})
 	if verdict == "mixed" {
 		return "incorrect"
@@ -509,6 +524,10 @@ func (en *Engine) decideManagedLocked(run *Run, r *Rule, c *changeSet) {
 			out.UpstreamCondition = condition
 		}
 	}
+	if snap := run.Config.ManagedProbe; snap != nil && snap.ProviderMechanism != "" {
+		en.decideProviderLocked(run, r, c, verdict, operation, condition)
+		return
+	}
 	if verdict == "unknown" && condition == "" {
 		out.ActionStatus = "insufficient_evidence"
 		_ = en.commitLocked(c)
@@ -543,6 +562,7 @@ func (en *Engine) decideManagedLocked(run *Run, r *Rule, c *changeSet) {
 			if canRecoverDisabled(r, prior) {
 				next := *prior
 				next.UpstreamCondition = condition
+				next.TriggerAuthID, next.TriggerRunID = run.Config.AuthID, run.ID
 				next.UpdatedAt = en.now()
 				c.disposition = &next
 				c.audits = append(c.audits, en.audit("error_policy_disabled", r.ID, run.ID, prior.ActionID, "Confirmed upstream condition during an owned recovery probe; credential kept disabled; no CPA write"))
@@ -558,7 +578,7 @@ func (en *Engine) decideManagedLocked(run *Run, r *Rule, c *changeSet) {
 		}
 		restore = true
 	} else if current.Disabled {
-		if !canRecoverDisabled(r, prior) || verdict != "correct" {
+		if condition != "" || !canRecoverDisabled(r, prior) || verdict != "correct" {
 			out.ActionStatus = "credential_kept_disabled"
 			_ = en.commitLocked(c)
 			return
@@ -663,4 +683,18 @@ func applyCredentialIntent(ctx context.Context, h managedHost, d CredentialDispo
 		d.State = "disabled"
 	}
 	return d, err
+}
+
+func canInspectManualDisabled(rule *Rule, d *CredentialDisposition) bool {
+	return rule != nil && !rule.LegacyScope && rule.TargetScope == scopeAllCredentials && !activeDisposition(d)
+}
+
+func managedEvidencePath(snapshot *CredentialSnapshot, path string) bool {
+	if snapshot == nil {
+		return false
+	}
+	if snapshot.ProviderMechanism != "" {
+		return path == "provider_config_probe"
+	}
+	return path == "cpa_management_probe"
 }

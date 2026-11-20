@@ -50,7 +50,7 @@ func TestDisplayReasoningMatchesCredentialModelsAndChannel(t *testing.T) {
 
 func TestOfficialTargetsUseRuntimeStateAndRegisteredModels(t *testing.T) {
 	states := map[string]pluginapi.HostAuthFileEntry{
-		"active-index":   {ID: "active", AuthIndex: "active-index", Provider: "codex", Type: "codex", Status: "active"},
+		"active-index":   {ID: "active", AuthIndex: "active-index", Provider: "codex", Type: "codex", Status: "active", Source: "file"},
 		"disabled-index": {ID: "disabled", AuthIndex: "disabled-index", Provider: "codex", Status: "disabled", Disabled: true},
 		"cooling-index":  {ID: "cooling", AuthIndex: "cooling-index", Provider: "codex", Unavailable: true},
 		"replaced-index": {ID: "another-credential", AuthIndex: "replaced-index", Provider: "codex"},
@@ -215,7 +215,7 @@ func TestOfficialManualEvaluationCompletesWithoutPrivateHostExtensions(t *testin
 		case "host.auth.models":
 			return decode([]byte(`{"credentials":[{"id":"auth-a","auth_index":"index-a","provider":"offline","models":["a"]}]}`), response)
 		case "host.auth.get_runtime":
-			return decode([]byte(`{"auth":{"id":"auth-a","auth_index":"index-a","provider":"offline","status":"active"}}`), response)
+			return decode([]byte(`{"auth":{"id":"auth-a","auth_index":"index-a","provider":"offline","status":"active","source":"file"}}`), response)
 		case "host.model.execute":
 			modelCalls++
 			req := request.(pluginapi.HostModelExecutionRequest)

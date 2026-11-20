@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -108,6 +109,10 @@ func (m *ManagementClient) addModelReasoning(ctx context.Context, targets []Targ
 }
 
 func (m *ManagementClient) response(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	return m.conditionalResponse(ctx, method, path, body, "")
+}
+
+func (m *ManagementClient) conditionalResponse(ctx context.Context, method, path string, body any, ifMatch string) (*http.Response, error) {
 	if m == nil {
 		return nil, fmt.Errorf("unavailable: CPA management connection is not configured")
 	}
@@ -131,6 +136,9 @@ func (m *ManagementClient) response(ctx context.Context, method, path string, bo
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
+	if ifMatch != "" {
+		req.Header.Set("If-Match", ifMatch)
+	}
 	resp, err := m.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("management_uncertain: CPA request did not return a confirmed result")
@@ -167,14 +175,21 @@ func (m *ManagementClient) request(ctx context.Context, method, path string, bod
 // Snapshots contain hashes and public routing identity, never token material.
 // UpdatedAt is an additional interference check, not an atomic ownership token.
 type CredentialSnapshot struct {
-	AuthID         string    `json:"auth_id"`
-	AuthIndex      string    `json:"auth_index"`
-	Name           string    `json:"name"`
-	Provider       string    `json:"provider"`
-	Fingerprint    string    `json:"fingerprint"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	FileModifiedAt time.Time `json:"file_modified_at"`
-	Disabled       bool      `json:"disabled"`
+	ProviderGroupID   string   `json:"provider_group_id,omitempty"`
+	ProviderMechanism string   `json:"provider_mechanism,omitempty"`
+	ProviderMembers   []string `json:"provider_members,omitempty"`
+	ProviderETag      string   `json:"provider_etag,omitempty"`
+	// The restore operation can put an inherited field back in its original form.
+	ProviderExclusionSource string    `json:"provider_exclusion_source,omitempty"`
+	AccountFingerprint      string    `json:"account_fingerprint,omitempty"`
+	AuthID                  string    `json:"auth_id"`
+	AuthIndex               string    `json:"auth_index"`
+	Name                    string    `json:"name"`
+	Provider                string    `json:"provider"`
+	Fingerprint             string    `json:"fingerprint"`
+	UpdatedAt               time.Time `json:"updated_at"`
+	FileModifiedAt          time.Time `json:"file_modified_at"`
+	Disabled                bool      `json:"disabled"`
 }
 
 type managedHost interface {
@@ -187,6 +202,10 @@ func sameCredential(a, b CredentialSnapshot) bool {
 	return a.AuthID == b.AuthID && a.AuthIndex == b.AuthIndex && a.Name == b.Name && a.Provider == b.Provider && a.Fingerprint != "" && a.Fingerprint == b.Fingerprint
 }
 func sameSnapshot(a, b CredentialSnapshot) bool {
+	if a.ProviderMechanism != "" || b.ProviderMechanism != "" {
+		return sameCredential(a, b) && a.Disabled == b.Disabled && a.ProviderMechanism == b.ProviderMechanism &&
+			a.ProviderGroupID != "" && a.ProviderGroupID == b.ProviderGroupID && slices.Equal(a.ProviderMembers, b.ProviderMembers)
+	}
 	return sameCredential(a, b) && a.Disabled == b.Disabled && !a.UpdatedAt.IsZero() && a.UpdatedAt.Equal(b.UpdatedAt) && a.FileModifiedAt.Equal(b.FileModifiedAt)
 }
 
@@ -208,6 +227,9 @@ func (h *NativeHost) credentialProfile(ctx context.Context, id, index string) (C
 	const unsupportedFile = "unsupported: automatic handling requires one identifiable file credential"
 	if a.ID != id || a.AuthIndex != index {
 		return empty, a, nil, rejectScope(unsupportedFile, "identity_conflict", "CPA 返回的凭证标识或索引与本轮目标不一致。")
+	}
+	if providerFamily(a.ID, provider) != "" {
+		return empty, a, nil, rejectScope(unsupportedFile, "provider_route", "供应商配置通过 CPA 原生路由检测，不能作为文件凭证处置。")
 	}
 	if a.RuntimeOnly || a.Source != "file" || a.Name == "" || filepath.Base(a.Name) != a.Name || strings.ContainsAny(a.Name, "/\\") || !strings.HasSuffix(strings.ToLower(a.Name), ".json") {
 		return empty, a, nil, rejectScope(unsupportedFile, "unsupported_file", "管理探测需要可单独标识的 JSON 文件凭证。")
@@ -234,20 +256,82 @@ func (h *NativeHost) credentialProfile(ctx context.Context, id, index string) (C
 			return empty, a, nil, rejectScope("unsupported: credential requires native routing", "native_routing_required", "该凭证需要使用宿主原生路由。")
 		}
 	}
+	fileDisabled, hasDisabled := data["disabled"]
 	delete(data, "disabled")
 	stamp := fingerprint(struct {
 		ID, Index, Name, Provider, Base, Created string
 		Data                                     map[string]any
 	}{id, index, a.Name, provider, a.BaseURL, a.CreatedAt.Format(time.RFC3339Nano), data})
-	return CredentialSnapshot{AuthID: id, AuthIndex: index, Name: a.Name, Provider: provider, Fingerprint: stamp, UpdatedAt: a.UpdatedAt, FileModifiedAt: a.ModTime, Disabled: a.Disabled || a.Status == "disabled"}, a, data, nil
+	if hasDisabled {
+		data["disabled"] = fileDisabled
+	}
+	snapshot := CredentialSnapshot{AuthID: id, AuthIndex: index, Name: a.Name, Provider: provider, Fingerprint: stamp, UpdatedAt: a.UpdatedAt, FileModifiedAt: a.ModTime, Disabled: a.Disabled || a.Status == "disabled"}
+	if account, _ := data["account_id"].(string); strings.TrimSpace(account) != "" {
+		snapshot.AccountFingerprint = fingerprint([2]string{provider, account})
+	}
+	return snapshot, a, data, nil
+}
+
+// Re-read the pinned runtime and physical file through public SDK callbacks.
+// Token refresh and host restart may both change the full snapshot fingerprint.
+func (h *NativeHost) verifyEnabledManualFile(ctx context.Context, t Target, d *CredentialDisposition) (string, error) {
+	current, runtime, data, err := h.credentialProfile(ctx, t.AuthID, t.AuthIndex)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("blocked: 无法核实 CPA 当前凭证文件，请刷新后重试。")
+	}
+	if current.Disabled || runtime.Status != "active" || runtime.Unavailable || runtime.NextRetryAfter.After(time.Now()) {
+		return "", fmt.Errorf("blocked: CPA 当前凭证已停用或暂不可用。")
+	}
+	if disabled, exists := data["disabled"]; exists && disabled != false {
+		return "", fmt.Errorf("blocked: CPA 文件尚未确认启用此凭证，请核对文件状态。")
+	}
+	old := d.Snapshot
+	fileType, _ := data["type"].(string)
+	fileEmail, _ := data["email"].(string)
+	email := strings.TrimSpace(d.Email)
+	sameEmail := func(value string) bool { return strings.EqualFold(email, strings.TrimSpace(value)) }
+	if current.AuthID != old.AuthID || current.AuthIndex != old.AuthIndex || current.Provider != old.Provider || current.Name != old.Name ||
+		fileType != current.Provider || old.Fingerprint == "" ||
+		email != "" && (t.Email != "" && !sameEmail(t.Email) || runtime.Email != "" && !sameEmail(runtime.Email) || fileEmail != "" && !sameEmail(fileEmail)) {
+		return "", fmt.Errorf("blocked: CPA 当前凭证与原错误处置记录的身份不一致，请核对账号。")
+	}
+	if old.AccountFingerprint != "" {
+		if old.AccountFingerprint != current.AccountFingerprint {
+			return "", fmt.Errorf("blocked: CPA 当前账号标识与原错误处置记录不一致，请核对账号。")
+		}
+	} else if current.Fingerprint != old.Fingerprint && (email == "" || !sameEmail(fileEmail)) {
+		return "", fmt.Errorf("blocked: 无法确认刷新后的凭证仍属于原账号，请在质量运维中核对。")
+	}
+	// Pin the selected account throughout this run, including for legacy
+	// dispositions whose only retained principal was an email address.
+	if current.AccountFingerprint != "" {
+		return current.AccountFingerprint, nil
+	}
+	if email != "" && sameEmail(fileEmail) {
+		return fingerprint([2]string{current.Provider, strings.ToLower(email)}), nil
+	}
+	return current.Fingerprint, nil
 }
 
 func (h *NativeHost) CredentialSnapshot(ctx context.Context, id, index string) (CredentialSnapshot, error) {
+	if familyOfProviderID(id) != "" {
+		route, err := h.pinnedConfiguredRoute(ctx, id, index)
+		if err != nil {
+			return CredentialSnapshot{}, err
+		}
+		return route.snapshot(), nil
+	}
 	s, _, _, err := h.credentialProfile(ctx, id, index)
 	return s, err
 }
 
 func (h *NativeHost) SetCredentialDisabled(ctx context.Context, expected CredentialSnapshot, disabled bool) (CredentialSnapshot, error) {
+	if expected.ProviderMechanism != "" {
+		return h.setProviderDisabled(ctx, expected, disabled)
+	}
 	current, err := h.CredentialSnapshot(ctx, expected.AuthID, expected.AuthIndex)
 	if err != nil || !sameSnapshot(current, expected) || current.Disabled == disabled {
 		return CredentialSnapshot{}, fmt.Errorf("conflict: credential changed before status update")
@@ -298,6 +382,9 @@ func (h *NativeHost) SetCredentialDisabled(ctx context.Context, expected Credent
 }
 
 func (h *NativeHost) DeleteCredential(ctx context.Context, expected CredentialSnapshot) error {
+	if expected.ProviderMechanism != "" || familyOfProviderID(expected.AuthID) != "" {
+		return fmt.Errorf("unsupported: provider configuration cannot be removed")
+	}
 	current, err := h.CredentialSnapshot(ctx, expected.AuthID, expected.AuthIndex)
 	if err != nil || !sameSnapshot(current, expected) {
 		return fmt.Errorf("conflict: credential changed before removal")

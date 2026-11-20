@@ -2,6 +2,7 @@ package quality
 
 import (
 	"context"
+	"reflect"
 	"testing"
 )
 
@@ -46,7 +47,7 @@ func TestRestartReconcilesPendingCredentialWritesLocally(t *testing.T) {
 					t.Fatalf("restart %d: expected retained evidence and an uncertain result, got %+v", restart, got)
 				}
 				marker := en.managed["one"]
-				if marker.State != "attention" || marker.ActionID != d.ActionID || marker.Snapshot != snapshot {
+				if marker.State != "attention" || marker.ActionID != d.ActionID || !reflect.DeepEqual(marker.Snapshot, snapshot) {
 					t.Fatal("lost original ownership or snapshot", marker)
 				}
 				audits, err := en.History()

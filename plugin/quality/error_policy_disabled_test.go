@@ -111,6 +111,42 @@ func TestCatalogSuspensionSkipsRecovery(t *testing.T) {
 	if len(f.patches) != 1 || !f.patches[0] || f.probes != 0 || !f.entries["one"].Disabled {
 		t.Fatal("catalog disable must produce one write and no model calls", f.patches, f.probes)
 	}
+	cleared, err := f.engine.clearRuleHistory()
+	if err != nil || cleared != (historyClearResult{Archived: 1}) {
+		t.Fatal("confirmed catalog suspension should leave the history", cleared, err)
+	}
+	if again, err := f.engine.clearRuleHistory(); err != nil || again != (historyClearResult{}) {
+		t.Fatal("already cleared rows must not count a second time", again, err)
+	}
+	if err := f.engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := New(f.engine.cfg, f.host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	f.engine = reopened
+	if err := reopened.Prune(reopened.now().AddDate(1, 0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	binding := reopened.managed["one"]
+	evidence := reopened.runs[task.id]
+	if evidence == nil || !evidence.HistoryCleared || evidence.Config.CatalogMissingModel != "b" ||
+		binding == nil || binding.RunID != task.id || binding.CatalogMissingModel != "b" {
+		t.Fatal("clearing history lost the catalog evidence or binding", evidence, binding)
+	}
+	if _, err := reopened.Run(task.id); err == nil || len(reopened.Runs()) != 0 {
+		t.Fatal("cleared evidence is still visible", err)
+	}
+	page, err := reopened.QueryRuns(map[string][]string{"source": {"scheduled_probe"}, "scope_batch_id": {receipt.BatchID}, "view": {"summary"}})
+	if err != nil || page["total"] != 0 {
+		t.Fatal("cleared evidence was returned by a batch query", page, err)
+	}
+	assertErrorPolicySkip(t, f, r, "b")
+	if len(f.patches) != 1 || f.probes != 0 || !f.entries["one"].Disabled {
+		t.Fatal("clearing history or reopening issued an extra call", f.patches, f.probes)
+	}
 }
 
 func TestQualitySuspensionMeetsErrorDuringRecovery(t *testing.T) {

@@ -180,8 +180,17 @@ func (en *Engine) Tick(now time.Time) {
 	if len(due) == 0 {
 		return
 	}
-	read := sync.OnceValues(func() ([]Target, error) { return en.host.Targets(inventoryCtx) })
-	inventory := func(context.Context) ([]Target, error) { return read() }
+	status := &providerInventoryStatus{Verified: true}
+	read := sync.OnceValues(func() ([]Target, error) {
+		return en.host.Targets(context.WithValue(inventoryCtx, providerInventoryStatusKey{}, status))
+	})
+	inventory := func(ctx context.Context) ([]Target, error) {
+		targets, err := read()
+		if coverage, ok := ctx.Value(providerInventoryStatusKey{}).(*providerInventoryStatus); ok {
+			coverage.Verified = status.Verified
+		}
+		return targets, err
+	}
 	for _, scheduled := range due {
 		if _, err = en.dispatchWithInventory(en.ctx, scheduled.id, scheduled.revision, true, inventory); err != nil {
 			log.WithField("rule_id", scheduled.id).Debug("model-quality: scheduled run not admitted")

@@ -94,7 +94,7 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await page.locator('[data-page]').count(), 3);
     assert.deepEqual(await page.locator('[data-login-view]').evaluateAll(nodes => nodes.map(node => node.dataset.loginView)), ['accounts', 'tasks', 'settings']);
     assert.equal(await page.locator('#login-view-temporary, #login-form, #login-start, #login-method, #login-credential-rows').count(), 0, 'Temporary login is removed rather than hidden');
-    assert.equal(await page.locator('#login-disconnected').isVisible(), true);
+    assert.equal(await page.locator('#connection-open').isVisible(), true);
     await connect();
     assert.equal(await page.locator('#login-engine, .runtime-info').count(), 0);
     assert.equal(await page.locator('[data-page=login]').getAttribute('aria-current'), 'page');
@@ -242,8 +242,9 @@ const server = http.createServer(async (req, res) => {
     await page.locator('#login-callback').fill('http://localhost:1455/auth/callback?code=clear-on-401&state=offline-state');
     unauthorizedNext = true; await refresh(); await page.locator('body:not(.connected)').waitFor();
     assert.equal(await page.locator('[data-page=login]').getAttribute('aria-current'), 'page');
-    assert(await page.locator('#login-disconnected').isVisible());
-    assert.equal(await page.locator('#login-workbench').isVisible(), false);
+    assert(await page.locator('#connection-open').isVisible());
+    assert(await page.locator('#login-view-accounts').isVisible());
+    assert(await page.locator('#account-import-open').isDisabled());
     assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
     assert.equal(await page.locator('[data-login-secret], #login-callback').evaluateAll(nodes => nodes.some(node => node.value)), false);
     await connect(); assert.equal(await page.locator('[data-page=login]').getAttribute('aria-current'), 'page');
@@ -253,7 +254,8 @@ const server = http.createServer(async (req, res) => {
     let releaseQuality; qualityGate = new Promise(resolve => { releaseQuality = resolve; }); heldReads.add(releaseQuality);
     await page.locator('#connection-form button[type=submit]').click(); await page.evaluate(() => { location.hash = '#login'; });
     await page.locator('[data-page=login][aria-current=page]').waitFor();
-    assert(await page.locator('#login-disconnected').isVisible());
+    assert(await page.locator('#login-view-accounts').isVisible());
+    assert.equal(await page.locator('#connection-open').innerText(), '未连接');
     qualityGate = null; releaseQuality(); heldReads.delete(releaseQuality); await page.locator('body.connected').waitFor(); await ready();
     checks.push('Navigating to login during an unfinished management connection opens the correct account workspace when it completes');
     const clientResult = await page.evaluate(async () => {

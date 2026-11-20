@@ -2,12 +2,110 @@ package quality
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
+
+type scheduledDirectoryHost struct {
+	*observationHost
+	readErr error
+}
+
+func (h *scheduledDirectoryHost) Targets(ctx context.Context) ([]Target, error) {
+	if h.readErr != nil {
+		return nil, h.readErr
+	}
+	return h.observationHost.Targets(ctx)
+}
+
+func TestBackgroundTimerRematchesAfterUnavailableAndEmptyDirectory(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		host := &scheduledDirectoryHost{observationHost: &observationHost{&semanticsHost{targets: []Target{scopedTarget("first", "a")}}}}
+		cfg := DefaultConfig()
+		cfg.DataDir = t.TempDir()
+		en, err := New(cfg, host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := en.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		rule, err := en.saveRule(context.Background(), Rule{Name: "Fresh inventory", TargetScope: scopeAll,
+			ObjectTypes: []string{objectOAuth, objectProvider}, Cron: "* * * * *", RunConfig: RunConfig{QuestionID: "logic-boxes", Models: []string{"a"}, Samples: 1}}, false, "start")
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextRound := func() Rule {
+			t.Helper()
+			due := en.Rules()[0].NextRun
+			time.Sleep(time.Until(due) + time.Second)
+			synctest.Wait()
+			r := en.Rules()[0]
+			if r.Revision != rule.Revision || !r.timerActive || !r.NextRun.After(due) || r.LastScopeDispatch == nil || r.LastScopeDispatch.At.Before(due) {
+				t.Fatalf("scheduled occurrence was not accounted for: %+v", r)
+			}
+			return r
+		}
+		first := nextRound()
+		if first.LastScopeBatch == "" || host.executeCalls != 1 {
+			t.Fatal("first scheduled run did not reach its target", first, host.executeCalls)
+		}
+		host.readErr = errors.New("synthetic private directory contents")
+		failed := nextRound()
+		if !failed.LastScopeDispatch.DirectoryUnavailable || failed.LastScopeBatch != first.LastScopeBatch || !strings.Contains(failed.LastScopeDispatch.Reason, "目录尚未读到") || len(en.Runs()) != 1 || host.executeCalls != 1 {
+			t.Fatal("directory failure lost its receipt or changed an earlier run", failed.LastScopeDispatch)
+		}
+		var persisted Rule
+		if err := en.store.Get("rules", rule.ID, &persisted); err != nil || persisted.LastScopeDispatch == nil || !persisted.LastScopeDispatch.DirectoryUnavailable || persisted.LastScopeDispatch.Reason != failed.LastScopeDispatch.Reason || strings.Contains(persisted.LastScopeDispatch.Reason, host.readErr.Error()) {
+			t.Fatal("directory failure must persist a display-safe reason", persisted.LastScopeDispatch, err)
+		}
+		host.readErr = nil
+		host.targets[0].ManualDisabled = true
+		empty := nextRound()
+		if empty.LastScopeDispatch.DirectoryUnavailable || empty.LastScopeDispatch.Matched != 0 || !strings.Contains(empty.LastScopeDispatch.Reason, "没有可纳入") || len(en.Runs()) != 1 {
+			t.Fatal("unexpected evidence for empty scope", empty.LastScopeDispatch)
+		}
+		host.targets = append(host.targets, scopedTarget("added-after-timer-start", "a"))
+		last := nextRound()
+		var found bool
+		for _, run := range en.Runs() {
+			if run.Config.ScopeBatchID == last.LastScopeBatch {
+				found = run.Config.Scheduled && run.Config.AuthID == "added-after-timer-start" && run.Status == "completed"
+			}
+		}
+		if !found || last.LastScopeDispatch.Matched != 1 || host.executeCalls != 2 || len(en.Runs()) != 2 {
+			t.Fatal("new credential was not dispatched by the background timer", last.LastScopeDispatch, host.executeCalls)
+		}
+	})
+}
+
+func TestScheduledDirectoryFailureDoesNotOverwriteEditedRule(t *testing.T) {
+	en, _, rule := scopeFixture(t)
+	ctx := context.Background()
+	rule, err := en.saveRule(ctx, *rule, true, "start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = en.dispatchWithInventory(ctx, rule.ID, rule.Revision, true, func(context.Context) ([]Target, error) {
+		edit := *rule
+		edit.Name = "Updated during directory read"
+		if _, err := en.SaveRule(ctx, edit, true); err != nil {
+			t.Fatal(err)
+		}
+		return nil, errors.New("synthetic directory read error")
+	})
+	if err == nil || en.rules[rule.ID].LastScopeDispatch != nil || en.rules[rule.ID].Revision == rule.Revision {
+		t.Fatal("an obsolete timer occurrence changed the edited rule", err)
+	}
+}
 
 func TestRuleCronUsesServerWallClock(t *testing.T) {
 	for _, tc := range []struct{ zone, expr, from, want string }{

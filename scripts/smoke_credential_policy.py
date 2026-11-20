@@ -21,7 +21,7 @@ def docker(*args, **kwargs):
     return subprocess.run(['docker', *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).stdout
 
 
-def main(package, output, interrupt_status=False, upstream_errors=False, scope_skips=False, error_suspensions=False, credential_replacements=False, runtime_policy=False):
+def main(package, output, interrupt_status=False, upstream_errors=False, scope_skips=False, error_suspensions=False, credential_replacements=False, runtime_policy=False, manual_readmission=False, scheduled_addition=False, rule_history_clear=False):
     manifest = json.loads((package / 'build-manifest.json').read_text())
     archive = package / f'model-quality-v{manifest["plugin_version"]}-linux-arm64.zip'
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == manifest['checksums'][archive.name]
@@ -44,7 +44,7 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
         return data
 
     def rule(action, restore=False, scope='all_enabled'):
-        return request(PREFIX + '/rules', {'name': 'isolated policy check', 'target_scope': scope, 'models': models, 'samples': 2, 'question_id': 'logic-boxes', 'judge': {'mode': 'deterministic'}, 'parameters': {'max_tokens': 128, 'reasoning_effort': 'high'}, 'action': action, 'auto_restore': restore, 'enabled': True, 'activation': 'keep'})
+        return request(PREFIX + '/rules', {'name': 'isolated policy check', 'object_types': ['oauth'], 'target_scope': scope, 'models': models, 'samples': 2, 'question_id': 'logic-boxes', 'judge': {'mode': 'deterministic'}, 'parameters': {'max_tokens': 128, 'reasoning_effort': 'high'}, 'action': action, 'auto_restore': restore, 'enabled': True, 'activation': 'keep'})
 
     def recorded_calls():
         path = root / 'calls.jsonl'
@@ -59,8 +59,13 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
     def run(rule, outcomes=('4', '4', '4', '4'), write=None, target='one.json'):
         calls_before = len(recorded_calls())
         writes_before = len(mutation_log())
+        preview = request(PREFIX + '/rules/scope-preview', rule)
+        assert preview['verified'] and preview['candidates']['provider'] == 0
+        assert len(recorded_calls()) == calls_before and len(mutation_log()) == writes_before
         (root / 'round.json').write_text(json.dumps({'start': calls_before, 'outcomes': outcomes}))
         receipt = request(PREFIX + '/rules/run', {'id': rule['id'], 'revision': rule['revision']})
+        for field in ('candidates','count','skipped','recovery_count'):
+            assert receipt[field] == preview[field], (field, preview, receipt)
         rows = []
         if receipt['count']:
             until = time.monotonic() + 25
@@ -96,6 +101,7 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
             assert not probes, probes
         measured.append({'policy': rule['action'], 'scope': rule['target_scope'], 'file': target,
                          'action_status': rows[0]['action_status'] if rows else 'skipped',
+                         'candidates': receipt['candidates'], 'recovery_count': receipt['recovery_count'],
                          'samples': probes, 'cpa_writes': writes, 'file_exists_after': file.exists(),
                          'file_disabled_after': disabled})
         return rows
@@ -108,10 +114,10 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
             (root / 'plugins/model-quality.so').write_bytes(z.read('model-quality.so'))
         def credential(name):
             return {'type': 'codex', 'access_token': 'offline-only-' + name, 'account_id': 'synthetic-' + name, 'email': name + '@example.test', 'base_url': 'http://127.0.0.1:18887/v1'}
-        if credential_replacements or runtime_policy:
+        if credential_replacements or runtime_policy or manual_readmission or scheduled_addition:
             credentials = {'one': credential('one')}
-        elif error_suspensions:
-            from smoke_error_suspensions import ACCOUNTS, verify_error_suspensions
+        elif error_suspensions or rule_history_clear:
+            from smoke_error_suspensions import ACCOUNTS
             credentials = {account: {**credential(account), 'plan_type': 'free' if account == 'catalog' else 'plus'} for account in ACCOUNTS}
         elif upstream_errors:
             from smoke_upstream_errors import INITIAL_ACCOUNTS, verify
@@ -122,11 +128,13 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
             }}
             if scope_skips:
                 credentials = {'operator': {**credential('operator'), 'disabled': True},
-                               'missing-model': {**credential('missing-model'), 'plan_type': 'free'}, 'native': credentials['native']}
+                               'missing-model': {**credential('missing-model'), 'plan_type': 'free'}, 'native': credentials['native'],
+                               'native-disabled': {**credentials['native'], **credential('native-disabled'), 'type': 'kimi', 'disabled': True}}
         for account, data in credentials.items():
             (root / 'auths' / (account + '.json')).write_text(json.dumps(data))
         config = {'config-version': 8, 'server': {'host': '127.0.0.1', 'port': 18379, 'discovery': {'enabled': False}, 'kv-store': {'path': '/probe/kv.db'}}, 'management': {'secret-key': key, 'disable-control-panel': True, 'disable-auto-update-panel': True}, 'oauth': {'auth-dir': '/probe/auths'}, 'plugins': {'enabled': True, 'dir': '/probe/plugins', 'configs': {'model-quality': {'enabled': True, 'data_dir': '/probe/data', 'scheduling_enabled': False}}}}
-        if runtime_policy:
+        native_codex = runtime_policy or manual_readmission
+        if native_codex:
             config['access'] = {'api-keys': [business_key]}
             subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
                             '-subj', '/CN=chatgpt.com', '-addext', 'subjectAltName=DNS:chatgpt.com',
@@ -134,14 +142,14 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         (root / 'config.yaml').write_text(json.dumps(config))
         shutil.copyfile(Path(__file__).with_name('fixtures') / 'credential_policy_upstream.py', root / 'fake.py')
-        record_writes = upstream_errors or error_suspensions or credential_replacements or runtime_policy
+        record_writes = upstream_errors or error_suspensions or credential_replacements or native_codex or scheduled_addition or rule_history_clear
         adapter_port = 18479 if interrupt_status or record_writes else 18379
-        business_fixture = ['--add-host', 'chatgpt.com:127.0.0.1', '-e', 'SSL_CERT_FILE=/probe/fixture-cert.pem'] if runtime_policy else []
+        business_fixture = ['--add-host', 'chatgpt.com:127.0.0.1', '-e', 'SSL_CERT_FILE=/probe/fixture-cert.pem'] if native_codex else []
         docker('run', '-d', '--pull=never', '--network', 'none', '--name', name, *business_fixture, '-e', f'MODEL_QUALITY_CPA_URL=http://127.0.0.1:{adapter_port}', '--mount', f'type=bind,source={root},target=/probe', HOST, './CLIProxyAPI', '--config', '/probe/config.yaml', '--standalone', '--local-model')
         try:
             def start_fixture():
                 fixture_args = ['--record-writes'] if record_writes else []
-                if runtime_policy:
+                if native_codex:
                     fixture_args.append('--business-tls')
                 docker('run', '-d', '--pull=never', '--name', mock, '--network', 'container:' + name, '--mount', f'type=bind,source={root},target=/probe', CURL, 'python3', '-u', '/probe/fake.py', *fixture_args)
 
@@ -165,6 +173,22 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
                 time.sleep(.2)
             else:
                 raise AssertionError('Synthetic credential did not register')
+            if scheduled_addition:
+                from smoke_scheduled_addition import verify_scheduled_addition
+                report = verify_scheduled_addition(PREFIX, request, restart_with_fixture, root, targets[0], credential, recorded_calls, mutation_log)
+                report.update(plugin_version=manifest['plugin_version'], package_sha256=manifest['checksums'][archive.name],
+                              host='unchanged official 8.0.76', network='none', live_account_calls=0)
+                output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
+                print('Verified a newly uploaded credential ran on the next real cron tick after an empty round.')
+                return
+            if manual_readmission:
+                from smoke_error_suspensions import verify_manual_readmission
+                report = verify_manual_readmission(PREFIX, request, restart_with_fixture, root, targets[0], recorded_calls, mutation_log)
+                report.update(plugin_version=manifest['plugin_version'], package_sha256=manifest['checksums'][archive.name],
+                              host='unchanged official 8.0.76', network='none', live_account_calls=0)
+                output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
+                print('Verified manual readmission and automatic cleanup of confirmed policy ownership after rule deletion and restart.')
+                return
             if runtime_policy:
                 from smoke_runtime_policy import verify_runtime
                 models = targets[0]['models'][:2]
@@ -183,12 +207,17 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
                 output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
                 print('Verified same-name replacement and token rotation, new action ownership and retained original run evidence.')
                 return
-            if error_suspensions:
-                report = verify_error_suspensions(PREFIX, request, restart_with_fixture, root, targets, recorded_calls, mutation_log)
+            if error_suspensions or rule_history_clear:
+                from smoke_error_suspensions import verify_error_suspensions
+                report = verify_error_suspensions(PREFIX, request, restart_with_fixture, root, targets, recorded_calls,
+                                                  mutation_log, clear_history=rule_history_clear)
                 report.update(plugin_version=manifest['plugin_version'], package_sha256=manifest['checksums'][archive.name],
                               host='unchanged official 8.0.76', network='none', live_account_calls=0)
                 output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
-                print('Verified six terminal error suspensions through manual runs, scheduled runs and restart.')
+                if rule_history_clear:
+                    print('Verified cleared rule history with six confirmed suspensions and one ordinary run through restart.')
+                else:
+                    print('Verified six terminal error suspensions through manual runs, scheduled runs and restart.')
                 return
             if scope_skips:
                 from smoke_scope_skips import verify_scope_skips
@@ -245,7 +274,7 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
                     assert mutation_log() == [('PATCH', '/v8/management/credentials/status')]
                     snapshots.append({'action_status': detail['action_status'], 'handling': handling[0]['state'],
                                       'samples': len(detail['samples']), 'patches': len(mutation_log()), 'disabled': True})
-                assert request(PREFIX + '/rules/run-history', method='DELETE') == {'deleted': 1, 'kept': 1}
+                assert request(PREFIX + '/rules/run-history', method='DELETE') == {'deleted': 1, 'kept': 1, 'kept_for_handling': 1}
                 output.write_text(json.dumps({'package_sha256': manifest['checksums'][archive.name], 'before': initial['action_status'],
                                               'after_restarts': snapshots, 'fake_model_calls': len(recorded_calls())}, indent=2)+'\n')
                 print('Held a successful PATCH response, interrupted CPA and verified evidence through two starts.')
@@ -303,6 +332,10 @@ def main(package, output, interrupt_status=False, upstream_errors=False, scope_s
             request('/v8/management/credentials/status', {'name': 'one.json', 'auth_index': codex['auth_index'], 'disabled': True}, 'PATCH')
             # Wait for CPA's file watcher before freezing a fresh manual-disable round.
             time.sleep(1)
+            observation_all = rule('observe_only', False, 'all_credentials')
+            assert run(observation_all)[0]['action_status'] == 'observe_only'
+            assert run(rule('observe_only')) == []
+            assert json.loads((root / 'auths/one.json').read_text())['disabled']
             assert run(directory, mixed)[0]['action_status'] == 'credential_kept_disabled'
             assert json.loads((root / 'auths/one.json').read_text())['disabled']
             assert run(directory, write='enable')[0]['action_status'] == 'credential_restored'
@@ -383,9 +416,12 @@ if __name__ == '__main__':
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--interrupt-status', action='store_true')
     modes.add_argument('--upstream-errors', action='store_true', help='verify per-error policies and batch continuation')
-    modes.add_argument('--scope-skips', action='store_true', help='verify a zero-match batch and its durable credential-specific skips')
+    modes.add_argument('--scope-skips', action='store_true', help='verify catalog checks alongside probes and unexecuted disabled objects')
     modes.add_argument('--error-suspensions', action='store_true', help='verify error-disabled credentials stay excluded after restart and real cron triggers')
     modes.add_argument('--credential-replacements', action='store_true', help='verify an enabled replacement or renewed file can be tested and handled with current evidence')
     modes.add_argument('--runtime-policy', action='store_true', help='induce an official-host runtime error and verify current probe evidence and writes')
+    modes.add_argument('--manual-readmission', action='store_true', help='verify manual testing after external CPA enablement and continued exclusion from rules')
+    modes.add_argument('--scheduled-addition', action='store_true', help='verify a dynamic timer discovers a credential added after an empty round without panel traffic')
+    modes.add_argument('--rule-history-clear', action='store_true', help='clear completed history while preserving confirmed error dispositions through restart')
     args = parser.parse_args()
-    main(args.package.resolve(), args.output.resolve(), args.interrupt_status, args.upstream_errors, args.scope_skips, args.error_suspensions, args.credential_replacements, args.runtime_policy)
+    main(args.package.resolve(), args.output.resolve(), args.interrupt_status, args.upstream_errors, args.scope_skips, args.error_suspensions, args.credential_replacements, args.runtime_policy, args.manual_readmission, args.scheduled_addition, args.rule_history_clear)

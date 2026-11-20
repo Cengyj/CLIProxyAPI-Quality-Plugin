@@ -54,6 +54,8 @@ func managementTestFixture(t *testing.T) *managementFixture {
 			}
 		}
 		switch r.Method + " " + r.URL.Path {
+		case "GET /v8/management/config/api-keys":
+			write(map[string]any{})
 		case "POST /v8/management/requests/api-call":
 			var body struct {
 				AuthIndex         string `json:"auth_index"`
@@ -481,7 +483,7 @@ func TestManagedUncertainWriteIsDurableAndNeverReplayed(t *testing.T) {
 	})
 	for range 3 {
 		receipt, err := f.engine.dispatchRule(context.Background(), r.ID, r.Revision, false)
-		if err != nil || receipt.Count != 1 || receipt.Skipped != 0 || len(f.engine.queue) != 0 {
+		if err != nil || receipt.Count != 0 || receipt.RecoveryCount != 0 || len(f.engine.queue) != 0 {
 			t.Fatal(receipt, err)
 		}
 	}
@@ -579,11 +581,12 @@ func TestAllCredentialsRestoresManualAndOwnedDisablesOnlyAfterFullPass(t *testin
 		t.Fatal(err)
 	}
 	receipt, err := f.engine.dispatchRule(context.Background(), r.ID, r.Revision, false)
-	if err != nil || receipt.Count != 0 || receipt.Skipped != 1 || receipt.SkipReasons["manual_disabled"] != 1 {
+	if err != nil || receipt.Count != 1 || receipt.Skipped != 0 || receipt.RecoveryCount != 0 {
 		t.Fatal(receipt, err)
 	}
-	if err := f.engine.store.Get("rules", r.ID, &stored); err != nil || len(stored.LastManualSkips) != 1 || stored.LastManualSkips[0] != "operator" {
-		t.Fatal(stored.LastManualSkips, err)
+	f.engine.executeTask(f.engine.nextRunnableLocked())
+	if !f.entries["operator"].Disabled || f.disabledProbes != 10 || len(f.patches) != 3 {
+		t.Fatal("operator-disabled credential should have been probed without a write")
 	}
 }
 
@@ -785,7 +788,7 @@ func TestManagementSessionAndURLBoundaries(t *testing.T) {
 	r := f.rule(t, disableCredential, true, true)
 	f.host.Management.key = ""
 	receipt, err := f.engine.dispatchRule(context.Background(), r.ID, r.Revision, false)
-	if err != nil || receipt.Count != 1 || receipt.Skipped != 0 || len(f.engine.runs) != 1 {
+	if err != nil || len(f.engine.runs) != 1 || len(f.engine.queue) != 0 {
 		t.Fatal(receipt, err)
 	}
 	for _, run := range f.engine.runs {
@@ -897,6 +900,13 @@ func TestManualDisabledRecoveryCannotBorrowAnotherRulesAuthority(t *testing.T) {
 	entry.Disabled, entry.Status = true, "disabled"
 	f.entries["one"] = entry
 	for _, r := range restricted {
+		if r.TargetScope == scopeAllCredentials {
+			runs, err := f.round(t, r)
+			if err != nil || len(runs) != 1 || !f.entries["one"].Disabled || len(f.patches) != 0 || f.deletes != 0 {
+				t.Fatal("manual disable must remain in force during observation", runs, err)
+			}
+			continue
+		}
 		receipt, err := f.engine.dispatchRule(ctx, r.ID, r.Revision, false)
 		if err != nil || receipt.Count != 0 || len(f.engine.queue) != 0 {
 			t.Fatal("operator-disabled credential entered an unapproved rule", r.Action, r.TargetScope, receipt, err)
@@ -909,12 +919,12 @@ func TestManualDisabledRecoveryCannotBorrowAnotherRulesAuthority(t *testing.T) {
 			t.Fatal("missing history for known disabled credential", receipt)
 		}
 	}
-	if f.probes != 0 || f.nativeCalls != 0 || f.deletes != 0 || len(f.patches) != 0 {
-		t.Fatal("restricted rule used a disabled credential")
+	if f.probes != 12 || f.disabledProbes != 12 || f.nativeCalls != 0 || f.deletes != 0 || len(f.patches) != 0 {
+		t.Fatal("unexpected disabled probe or write count", f.probes, f.disabledProbes)
 	}
 	restore, err := f.round(t, authorized)
 	if err != nil || len(restore) != 1 || restore[0].ActionStatus != "credential_restored" ||
-		f.disabledProbes != 4 || len(f.patches) != 1 || f.patches[0] {
+		f.disabledProbes != 16 || len(f.patches) != 1 || f.patches[0] {
 		t.Fatal("manual disable was not restored after all four checks", err, f.disabledProbes, f.patches)
 	}
 	f.answers["a"] = "5"
@@ -923,7 +933,7 @@ func TestManualDisabledRecoveryCannotBorrowAnotherRulesAuthority(t *testing.T) {
 		t.Fatal("could not establish a different rule's disposition", runs, err)
 	}
 	f.answers["a"] = "4"
-	if runs, err := f.round(t, authorized); err != nil || len(runs) != 0 || f.disabledProbes != 4 ||
+	if runs, err := f.round(t, authorized); err != nil || len(runs) != 0 || f.disabledProbes != 16 ||
 		f.engine.managed["one"].RuleID != owner.ID || !f.entries["one"].Disabled || len(f.patches) != 2 {
 		t.Fatal("all-credentials manual recovery overrode another rule's disposition", runs, err)
 	}

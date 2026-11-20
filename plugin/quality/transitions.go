@@ -12,7 +12,9 @@ import (
 
 // changeSet publishes a state transition only after all of its records are durable.
 type changeSet struct {
+	settings           *Config
 	disposition        *CredentialDisposition
+	dispositions       []*CredentialDisposition
 	timers             map[string]bool
 	rules              map[string]*Rule
 	runs               map[string]*Run
@@ -24,12 +26,20 @@ type changeSet struct {
 
 func changes() *changeSet { return &changeSet{rules: map[string]*Rule{}, runs: map[string]*Run{}} }
 func (en *Engine) commitLocked(c *changeSet) error {
-	if len(c.rules) == 0 && len(c.runs) == 0 && len(c.audits) == 0 && c.timers == nil && c.intent == nil && c.loginPreparationID == "" && c.disposition == nil {
+	if len(c.rules) == 0 && len(c.runs) == 0 && len(c.audits) == 0 && c.settings == nil && c.timers == nil && c.intent == nil && c.loginPreparationID == "" && c.disposition == nil && len(c.dispositions) == 0 {
 		return nil
 	}
+	if c.disposition != nil {
+		c.dispositions = append(c.dispositions, c.disposition)
+	}
 	err := en.store.Write(func(tx *bolt.Tx) error {
-		if c.disposition != nil {
-			if err := put(tx, "meta", dispositionPrefix+c.disposition.AuthID, c.disposition); err != nil {
+		if c.settings != nil {
+			if err := put(tx, "meta", "settings", c.settings); err != nil {
+				return err
+			}
+		}
+		for _, d := range c.dispositions {
+			if err := put(tx, "meta", dispositionPrefix+d.AuthID, d); err != nil {
 				return err
 			}
 		}
@@ -73,11 +83,11 @@ func (en *Engine) commitLocked(c *changeSet) error {
 	if c.timers != nil {
 		en.timers = c.timers
 	}
-	if c.disposition != nil {
+	for _, d := range c.dispositions {
 		if en.managed == nil {
 			en.managed = map[string]*CredentialDisposition{}
 		}
-		en.managed[c.disposition.AuthID] = c.disposition
+		en.managed[d.AuthID] = d
 	}
 	for id, r := range c.rules {
 		if old := en.rules[id]; old != nil {
@@ -267,17 +277,16 @@ func (en *Engine) checkExecution(ctx context.Context, runID string, f Frozen) er
 		return err
 	}
 	var targets []Target
-	var err error
 	en.mu.Lock()
-	if en.terminalDependencyLocked(f.RunConfig) {
-		en.mu.Unlock()
-		return fmt.Errorf("blocked: credential already disabled by error policy")
-	}
-	ctx = en.inventoryContextLocked(ctx)
+	manualSubject, err := en.frozenDispositionLocked(f)
+	ctx = en.runInventoryContextLocked(ctx, manualSubject)
 	en.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	if host, ok := en.host.(interface {
 		pinnedTarget(context.Context, string, string) (Target, error)
-	}); ok && f.ScopeBatchID != "" {
+	}); ok && f.ScopeBatchID != "" && f.Judge.Mode != "llm" && f.ControlAuthID == "" {
 		var t Target
 		t, err = host.pinnedTarget(ctx, f.AuthID, f.SubjectIndex)
 		targets = []Target{t}
@@ -287,13 +296,29 @@ func (en *Engine) checkExecution(ctx context.Context, runID string, f Frozen) er
 	if err != nil {
 		return fmt.Errorf("unavailable: credential status cannot be verified")
 	}
-	en.mu.Lock()
-	if en.terminalDependencyLocked(f.RunConfig) {
-		en.mu.Unlock()
-		return fmt.Errorf("blocked: credential already disabled by error policy")
+	if f.RuleID != "" {
+		// Check the current target kind before reading any file credential state.
+		deps := dependencies(f.RunConfig)
+		for _, t := range targets {
+			if !contains(deps, t.AuthID) {
+				continue
+			}
+			wasProvider := f.ProviderObservation && t.AuthID == f.AuthID || contains(f.ProviderDependencies, t.AuthID)
+			if isProviderTarget(t) != wasProvider || contains(t.Reasons, "unverified_inventory_entry") {
+				return fmt.Errorf("blocked: credential origin changed or cannot be verified")
+			}
+			if t.AuthID == f.AuthID && t.IsProvider && f.CatalogMissingModel == "" && f.ManagedProbe == nil && firstMissingModel(t, f.Models) != "" {
+				return fmt.Errorf("blocked: 供应商不再注册本轮冻结的模型")
+			}
+		}
 	}
-	en.mu.Unlock()
 	if expected := f.ManagedProbe; expected != nil {
+		en.mu.Lock()
+		_, err = en.frozenDispositionLocked(f)
+		en.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		h, ok := en.host.(managedHost)
 		if !ok || !en.Capabilities().ManagementSession {
 			return fmt.Errorf("management_session_required: reconnect the authenticated plugin panel")
@@ -312,10 +337,29 @@ func (en *Engine) checkExecution(ctx context.Context, runID string, f Frozen) er
 	if r == nil || r.Status != "running" || r.CancelRequested {
 		return fmt.Errorf("blocked: task is no longer admitted")
 	}
+	manualSubject, err = en.frozenDispositionLocked(f)
+	if err != nil {
+		return err
+	}
+	manualAccount, err := en.verifyManualSubjectLocked(ctx, f.RunConfig, targets, manualSubject)
+	if err != nil {
+		return err
+	}
+	if manualAccount != f.ManualAccountFingerprint {
+		return fmt.Errorf("blocked: 测试提交后 CPA 凭证绑定的账号已变化，请重新核对。")
+	}
 	if id := r.Config.RuleID; id != "" {
 		rule := en.rules[id]
 		if rule == nil || !rule.Enabled || rule.Revision != r.Config.RuleRevision || ruleStatus(rule) != "detecting" {
 			return fmt.Errorf("blocked: stale or stopped rule")
+		}
+		if problem := en.checkRuleProvidersLocked(rule, f.RunConfig, targets); problem != nil {
+			return problem
+		}
+		for _, t := range targets {
+			if usesCredential(f.RunConfig, t.AuthID) && groupGuard(en.managed, t) != nil && !activeDisposition(en.managed[t.AuthID]) {
+				return fmt.Errorf("blocked: provider group membership changed")
+			}
 		}
 		if en.unsupportedRule(rule) {
 			return unsupportedQuality()
@@ -354,6 +398,14 @@ func (en *Engine) checkExecution(ctx context.Context, runID string, f Frozen) er
 
 func frozenIdentityError(f Frozen, targets []Target) error {
 	for _, t := range targets {
+		if f.RuleID == "" && f.ProviderName != "" && t.AuthID == f.AuthID {
+			if !isProviderTarget(t) || t.AuthIndex != f.SubjectIndex || t.Provider != f.Provider {
+				return fmt.Errorf("blocked: 所选供应商路由已变化，请重新选择后测试。")
+			}
+			if problem := providerRouteProblem(t, f.Models); problem != nil {
+				return fmt.Errorf("blocked: %s", problem.detail.Reason)
+			}
+		}
 		if t.AuthID == f.AuthID && t.IdentityVersion != f.IdentityVersion {
 			return fmt.Errorf("blocked: subject identity changed")
 		}

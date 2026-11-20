@@ -101,14 +101,18 @@ func (s *Service) uploadConversion(ctx context.Context, raw []byte) (any, error)
 		result, uploadErr := s.opts.Manager.ImportConverted(ctx, item, guard, func(ctx context.Context, id, identity string) error {
 			return owner.Prepare(ctx, id, identity, "conversion:"+conversion.Identity(item))
 		})
-		status := "uploaded"
-		if uploadErr != nil {
-			status = "failed"
+		row := map[string]any{"index": index, "filename": item.Filename, "auth_id": result.AuthID, "code": SafeCode(uploadErr)}
+		switch {
+		case result.State == auth.ConversionAlreadyPresent || result.State == auth.ConversionPreviouslyUploaded:
+			row["status"], row["code"] = "existing", result.State
+		case result.State == "commit_unknown" || result.State == "saved_not_adopted":
+			row["status"] = "uncertain"
+		case uploadErr != nil:
+			row["status"] = "failed"
+		default:
+			row["status"], row["enabled"] = "uploaded", result.CredentialEnabled
 		}
-		if result.State == "commit_unknown" || result.State == "saved_not_adopted" {
-			status = "uncertain"
-		}
-		results = append(results, map[string]any{"index": index, "filename": item.Filename, "status": status, "code": SafeCode(uploadErr), "auth_id": result.AuthID, "enabled": result.CredentialEnabled})
+		results = append(results, row)
 	}
 	return map[string]any{"items": results}, nil
 }

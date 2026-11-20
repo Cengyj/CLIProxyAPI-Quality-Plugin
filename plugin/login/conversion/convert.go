@@ -18,17 +18,18 @@ const MaxBytes = 2 << 20
 const MaxAccounts = 100
 
 type Item struct {
-	Index      int            `json:"index"`
-	Name       string         `json:"name"`
-	Email      string         `json:"email"`
-	AccountID  string         `json:"account_id"`
-	UserID     string         `json:"user_id,omitempty"`
-	Plan       string         `json:"plan_type"`
-	Filename   string         `json:"filename,omitempty"`
-	Status     string         `json:"status"`
-	Error      string         `json:"error,omitempty"`
-	Warnings   []string       `json:"warnings"`
-	Credential map[string]any `json:"credential,omitempty"`
+	Index       int            `json:"index"`
+	Name        string         `json:"name"`
+	Email       string         `json:"email"`
+	AccountID   string         `json:"account_id"`
+	UserID      string         `json:"user_id,omitempty"`
+	Plan        string         `json:"plan_type"`
+	Filename    string         `json:"filename,omitempty"`
+	Status      string         `json:"status"`
+	Error       string         `json:"error,omitempty"`
+	DuplicateOf *int           `json:"duplicate_of,omitempty"`
+	Warnings    []string       `json:"warnings"`
+	Credential  map[string]any `json:"credential,omitempty"`
 }
 
 type Result struct {
@@ -96,15 +97,16 @@ func Convert(raw []byte, now time.Time) (Result, error) {
 	if len(entries) == 0 || len(entries) > MaxAccounts {
 		return out, errors.New("conversion_account_limit")
 	}
-	seen := map[string]bool{}
+	seen := make(map[string]int)
 	for index, entry := range entries {
 		item := convertOne(entry, now)
 		item.Index = index
 		if item.Status == "ready" {
-			if seen[item.Filename] {
-				item.Status, item.Error, item.Credential = "invalid", "duplicate_identity", nil
+			if first, exists := seen[item.Filename]; exists {
+				item.Status, item.Error, item.Credential = "invalid", "conversion_duplicate_source", nil
+				item.DuplicateOf = &first
 			} else {
-				seen[item.Filename] = true
+				seen[item.Filename] = index
 				out.Ready++
 			}
 		}

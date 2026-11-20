@@ -141,10 +141,22 @@ function seedQuality() {
     action_status: 'not_applicable', cancel_requested: false, ...extra,
   });
   qualityRuns = [
+    run('fixture-run-correct', '2026-11-17T03:45:00Z', config(), [
+      sample('甲 9 颗、乙 7 颗、丙 5 颗。相邻各差 2 颗，总数为 21。', 0, { review: 'correct' }),
+    ]),
+    run('fixture-run-incorrect', '2026-11-17T03:30:00Z', config('custom', 'fixture-reasoner', {
+      question: { id: 'custom', kind: 'custom', title: '乘法应用题', prompt: '每盒有 5 支铅笔，7 盒共有多少支？', answer: '35 支' },
+    }), [sample('5 × 7 = 30，所以共有 30 支铅笔。', 0, { answer_match: 'incorrect' })]),
     run('fixture-run-complete', '2026-11-17T03:15:00Z', config('logic-candy', 'fixture-reasoner', { samples: 2 }), [sample(answer), sample(alternate, 1)]),
     run('fixture-run-visual', '2026-11-17T02:50:00Z', config('visual-pelican-html', 'fixture-visual', { parameters: { max_tokens: 2048, stream: true } }), [sample(visual, 0, { model: 'fixture-visual', response_model: 'fixture-visual', total_ms: 3480, evidence: { verified: false, requested_model: 'fixture-visual', auth_id: 'fixture-quality-primary', path: 'official-sdk', conditions_changed: false } })]),
     run('fixture-run-error', '2026-11-17T02:30:00Z', config(), [sample('', 0, { execution_status: 'error', reason: '离线错误样例：网络连接超时，不作为回答质量失败。', error: 'synthetic transport timeout', total_ms: 15000, ttft_ms: null, usage: null })], { status: 'failed', error: '离线错误样例：请求未取得完整回答。' }),
-    ...Array.from({ length: 9 }, (_, index) => run(`fixture-run-history-${index + 1}`, new Date(Date.UTC(2026, 10, 16, 18 - index, 10)).toISOString(), config(), [sample(index % 2 ? alternate : answer)])),
+    ...Array.from({ length: 9 }, (_, index) => {
+      const id = `fixture-run-history-${index + 1}`, created = new Date(Date.UTC(2026, 10, 16, 18 - index, 10)).toISOString();
+      if (index === 0) return run(id, created, config('logic-candy', 'fixture-reasoner', { samples: 2 }), [sample(answer, 1, { answer_match: 'correct' })], { pruned_samples: 1, pruned_sample_slots: [{ model: 'fixture-reasoner', index: 0 }] });
+      if (index === 1) return run(id, created, config('logic-candy', 'fixture-reasoner', { samples: 2 }), [sample(answer, 0, { review: 'correct' }), sample(alternate, 1)]);
+      if (index === 2) return run(id, created, config(), [sample('', 0, { review: 'correct' })]);
+      return run(id, created, config(), [sample(index % 2 ? alternate : answer)]);
+    }),
     run('fixture-run-observation', '2026-11-17T03:05:00Z', config('logic-candy', 'fixture-reasoner', { rule_id: 'fixture-rule-observe', rule_revision: 2, judge: { mode: 'deterministic', template_version: 'fixture-1' } }), [sample('21', 0, { reason: '官方观察模式：未取得已验证的可比较证据，不推进质量失败计数。' })], { source: 'scheduled_probe', action_status: 'observe_only' }),
     run('fixture-run-observation-error', '2026-11-16T22:05:00Z', config('logic-candy', 'fixture-reasoner', { rule_id: 'fixture-rule-paused', rule_revision: 1 }), [sample('', 0, { execution_status: 'error', error: 'synthetic rate limit', reason: '离线限流样例，不计为答错。', usage: null, ttft_ms: null })], { status: 'failed', source: 'scheduled_probe', action_status: 'observe_only', error: '离线限流样例：未取得回答。' }),
   ];
@@ -184,6 +196,28 @@ function pageOf(values, url) {
   return { items: values.slice(offset, offset + limit), total: values.length, offset, limit, has_more: offset + limit < values.length };
 }
 
+function manualRunForDisplay(run, summary) {
+  if (run.source !== 'manual_test') return run;
+  const sample = run.samples.find(item => item.output);
+  let preview;
+  if (sample) {
+    preview = { model: sample.model, index: sample.index };
+    if (run.id === 'fixture-run-visual') preview.kind = 'html';
+    else {
+      const text = sample.output.replace(/\s+/gu, ' ').trim();
+      preview.text = text.slice(0, 96);
+      preview.truncated = preview.text.length < text.length;
+    }
+  }
+  if (!summary) return { ...run, answer_preview: preview };
+  const { id, source, created_at, status, config, credential_email, error, pruned_samples } = run;
+  const samples = run.samples.map(({ model, index, execution_status, quality_verdict, review, answer_match, error }) =>
+    ({ model, index, execution_status, quality_verdict, review, answer_match, error }));
+  return { id, source, created_at, status, credential_email, error, pruned_samples, samples, answer_preview: preview,
+    config: { auth_id: config.auth_id, question_id: config.question_id, question: { id: config.question.id, title: config.question.title },
+      models: config.models, samples: config.samples, parameters: { reasoning_effort: config.parameters.reasoning_effort } } };
+}
+
 function qualityMetrics() {
   const samples = qualityRuns.flatMap(run => run.samples);
   const completed = samples.filter(sample => sample.execution_status === 'completed');
@@ -191,6 +225,22 @@ function qualityMetrics() {
     known_tokens: samples.reduce((total, sample) => total + (sample.usage?.total_tokens || 0), 0),
     unknown_usage: samples.filter(sample => !sample.usage).length, dropped_usage_events: 0,
     error_types: { error: samples.length - completed.length }, capabilities: qualitySettings.capabilities };
+}
+
+function hostNavigationPreview() {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>CLI Proxy API Management Center</title>
+<style>body{margin:0;display:grid;grid-template-columns:125px minmax(0,1fr);height:100dvh;font:14px system-ui}nav{padding:12px}nav a{display:block;margin-bottom:8px}iframe{display:block;width:100%;height:100%;border:0}</style></head>
+<body><nav aria-label="CPA 导航"><a href="#/auth-files">认证文件</a><a href="#/plugin-pages/model-quality/0">Credential Ops</a></nav><main id="fixture-host-view"></main>
+<script>
+const container = document.getElementById('fixture-host-view');
+function renderRoute() {
+  if (location.hash === '#/auth-files') { container.textContent = '认证文件'; return; }
+  const frame = document.createElement('iframe');
+  frame.id = 'fixture-plugin'; frame.title = 'Credential Ops'; frame.src = '/v0/resource/plugins/model-quality/index.html';
+  container.replaceChildren(frame);
+}
+addEventListener('hashchange', renderRoute); renderRoute();
+</script></body></html>`;
 }
 
 function embeddedPreview(url) {
@@ -273,9 +323,9 @@ const server = http.createServer(async (req, res) => {
       return send(res, { error: 'invalid_control_action' }, 400);
     }
     if (!url.pathname.startsWith('/v0/management/')) {
-      if (url.pathname === '/embedded.html' && req.method === 'GET') {
+      if (['/embedded.html', '/management.html'].includes(url.pathname) && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'" });
-        return res.end(embeddedPreview(url));
+        return res.end(url.pathname === '/management.html' ? hostNavigationPreview() : embeddedPreview(url));
       }
       const name = url.pathname === '/' ? 'index.html' : url.pathname.startsWith('/v0/resource/plugins/model-quality/') ? url.pathname.slice('/v0/resource/plugins/model-quality/'.length) : url.pathname.slice(1);
       if (req.method !== 'GET' || !staticFiles.has(name)) return send(res, { error: 'not_found' }, 404);
@@ -299,6 +349,13 @@ const server = http.createServer(async (req, res) => {
     }
     const reply = (data, status = 200) => send(res, data, status, delay);
     if (!url.pathname.startsWith(loginPrefix + '/')) {
+      if (req.method === 'POST' && route === '/rules/scope-preview') {
+        const selected = qualityTargets.filter(t => body.object_types?.includes('oauth') &&
+          (body.target_scope === 'single' ? t.auth_id === body.auth_id : body.target_scope === 'all_credentials' || !t.manual_disabled));
+        const blocked = selected.filter(t => t.retained_pause);
+        return reply({verified:true,candidates:{oauth:selected.length,provider:0},count:selected.length-blocked.length,
+          skipped:blocked.length,recovery_count:0,skip_details:blocked.map(t => ({auth_id:t.auth_id,code:'quality_paused',reason:'历史独立质量暂停。'}))});
+      }
       if (req.method !== 'GET') return reply({ code: 'fixture_model_execution_disabled', error: '离线视觉 fixture 禁止执行模型、规则及质量管理写入。请从历史记录查看预置合成回答。' }, 409);
       if (route === '/targets') return reply(pageOf(qualityTargets, url));
       if (route === '/questions') return reply(pageOf(questions, url));
@@ -307,10 +364,15 @@ const server = http.createServer(async (req, res) => {
         return q ? reply({...q, answer:'合成参考答案'}) : reply({code:'not_found'}, 404);
       }
       if (route === '/settings') return reply(qualitySettings);
-      if (route === '/runs') return reply(pageOf(qualityRuns.filter(run => (!url.searchParams.get('source') || run.source === url.searchParams.get('source')) && (!url.searchParams.get('rule_id') || run.config.rule_id === url.searchParams.get('rule_id')) && (!url.searchParams.get('scope_batch_id') || run.config.scope_batch_id === url.searchParams.get('scope_batch_id'))).sort((a, b) => b.created_at.localeCompare(a.created_at)), url));
+      if (route === '/runs') {
+        const rows = qualityRuns.filter(run => (!url.searchParams.get('source') || run.source === url.searchParams.get('source')) && (!url.searchParams.get('rule_id') || run.config.rule_id === url.searchParams.get('rule_id')) && (!url.searchParams.get('scope_batch_id') || run.config.scope_batch_id === url.searchParams.get('scope_batch_id'))).sort((a, b) => b.created_at.localeCompare(a.created_at));
+        const result = pageOf(rows, url);
+        result.items = result.items.map(row => manualRunForDisplay(row, url.searchParams.get('view') === 'summary'));
+        return reply(result);
+      }
       if (route === '/runs/detail') {
         const run = qualityRuns.find(run => run.id === url.searchParams.get('id'));
-        return run ? reply(run) : reply({ code: 'not_found' }, 404);
+        return run ? reply(manualRunForDisplay(run, false)) : reply({ code: 'not_found' }, 404);
       }
       if (route === '/rules') return reply(pageOf(qualityRules, url));
       if (route === '/actions') return reply(pageOf(qualityActions, url));

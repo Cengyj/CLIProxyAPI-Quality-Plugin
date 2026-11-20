@@ -200,7 +200,8 @@ func handle(method string, raw []byte) (any, error) {
 		if err := cfg.Validate(); err != nil {
 			return nil, err
 		}
-		management, err := quality.NewManagementClient(os.Getenv("MODEL_QUALITY_CPA_URL"))
+		managementURL := os.Getenv("MODEL_QUALITY_CPA_URL")
+		management, err := quality.NewManagementClient(managementURL)
 		if err != nil {
 			return nil, err
 		}
@@ -208,7 +209,7 @@ func handle(method string, raw []byte) (any, error) {
 		if err := native.Check(); err != nil {
 			return nil, err
 		}
-		if err := runtime.replace(func() (runtimeEngine, error) { return newApplication(cfg, native) }); err != nil {
+		if err := runtime.configure(runtimeConfig{settings: cfg, managementURL: managementURL}, method == pluginabi.MethodPluginReconfigure, func() (runtimeEngine, error) { return newApplication(cfg, native) }); err != nil {
 			return nil, err
 		}
 		return registration(), nil

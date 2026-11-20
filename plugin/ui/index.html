@@ -3,13 +3,29 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="referrer" content="no-referrer"><title>Credential Ops</title>
-  <link rel="stylesheet" href="./style.css"><script type="module" src="./app.js"></script>
+  <link rel="stylesheet" href="./style.css">
+  <link rel="modulepreload" href="./login.js">
+  <link rel="modulepreload" href="./client.js">
+  <link rel="modulepreload" href="./view.js">
+  <script type="module" src="./app.js"></script>
 </head>
 <body>
 <a class="skip-link" href="#main">跳到工作区</a>
 <header class="app-header">
   <div class="page-heading"><h1 id="page-crumb">账号管理</h1><p id="page-description"><!--{{block "account-description" .}}-->管理 OpenAI 账号、授权与登录状态。<!--{{end}}--></p></div>
-  <div class="header-actions"><div class="data-freshness"><span id="data-state" class="stale">管理接口未连接</span><button class="text-button small" id="refresh" aria-label="刷新数据"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8a6.3 6.3 0 1 0 .1 4M16 3v5h-5"/></svg><span>刷新</span></button></div><select id="theme-toggle" aria-label="界面主题"><option value="light">浅色</option><option value="white">纯白</option><option value="dark">深色</option></select><button id="connection-open" class="primary connection-button" aria-haspopup="dialog">连接管理接口</button><button id="connection-top" class="connection-button" aria-haspopup="dialog" aria-label="管理连接"><span class="connection-dot" aria-hidden="true"></span><span id="connection-state">未连接</span><span class="connection-label">管理连接</span></button></div>
+  <div class="header-actions">
+    <div class="data-freshness">
+      <span id="data-state" class="stale">管理接口未连接</span>
+      <button class="text-button small" id="refresh" aria-label="刷新数据" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8a6.3 6.3 0 1 0 .1 4M16 3v5h-5"/></svg><span>刷新</span></button>
+    </div>
+    <select id="theme-toggle" aria-label="界面主题"><option value="light">浅色</option><option value="white">纯白</option><option value="dark">暗色</option></select>
+    <button id="connection-open" class="connection-button" aria-haspopup="dialog" aria-controls="connection-dialog">
+      <span class="connection-dot" aria-hidden="true"></span><span id="login-connect">未连接</span>
+    </button>
+    <button id="connection-top" class="connection-button" aria-haspopup="dialog" aria-controls="connection-dialog">
+      <span class="connection-dot" aria-hidden="true"></span><span id="connection-state">未连接</span>
+    </button>
+  </div>
 </header>
 <div class="workspace">
   <!-- Lucide: Copyright (c) 2026 Lucide Icons and Contributors. Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies. THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
@@ -31,21 +47,30 @@
     <div class="manual-workbench">
 
     <section id="manual-setup" class="card" aria-label="题目测试">
-      <header class="setup-heading"><h2>测试设置</h2><span>选择模型与题目</span></header>
+      <header class="setup-heading"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></svg><h2>测试设置</h2>
+        <span class="manual-kind-caption" aria-hidden="true">测试来源</span><fieldset class="manual-target-kind"><legend class="sr-only">测试来源</legend>
+          <label><input id="manual-kind-credential" type="radio" name="manual-target-kind" value="credential" checked><span>普通凭证</span></label>
+          <label><input id="manual-kind-provider" type="radio" name="manual-target-kind" value="provider"><span>供应商</span></label>
+        </fieldset>
+      </header>
       <form id="run-form">
         <div class="test-configuration">
           <div class="test-model-config">
+              <div id="manual-provider-field" class="credential-strip" hidden>
+                <label for="manual-provider">供应商</label>
+                <select id="manual-provider" aria-describedby="target-summary"><option value="">选择供应商</option></select>
+              </div>
               <div class="credential-strip">
-                <label for="target">测试凭证</label>
+                <label id="manual-target-label" for="target">测试凭证</label>
                 <select id="target" required aria-describedby="target-summary"><option value="">连接后选择凭证</option></select>
-                <div id="target-summary" class="target-summary">先选择用于本次测试的凭证。</div>
+                <div id="target-summary" class="target-summary"></div>
               </div>
           <fieldset class="test-target">
             <legend class="sr-only">模型与测试选项</legend>
             <div class="model-field">
               <label for="models">测试模型</label>
               <select id="models" required disabled aria-describedby="model-note"><option value="">先选择凭证</option></select>
-              <p id="model-note" class="field-note">模型列表随凭证加载。</p>
+              <p id="model-note" class="field-note"></p>
             </div>
             <div class="option-row">
               <label>思考强度<select id="reasoning" disabled aria-describedby="reasoning-note"><option value="">默认</option></select></label>
@@ -56,34 +81,67 @@
           </div>
           <div class="question-paper">
             <label class="question-heading" for="question">测试题目<select id="question"><option value="">连接后加载题目</option></select></label>
-            <label class="prompt-label" for="prompt">题目内容<span>可以直接编辑</span></label>
+            <label class="prompt-label" for="prompt">题目内容</label>
             <textarea id="prompt" aria-describedby="question-version prompt-note" rows="7" required placeholder="选择内置题目，或编写你想测试的问题"></textarea>
             <div class="prompt-caption"><small id="question-version"></small><p id="prompt-note" class="field-note" hidden></p><p id="question-read-note" class="field-note error-note" role="status" hidden>题库读取失败，请刷新后再测试。</p></div>
           </div>
         </div>
       </form>
-      <footer class="manual-panel-footer setup-footer"><span id="manual-config-summary">1 份回答</span><button class="primary" type="submit" form="run-form" id="run-submit" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 3 11 7-11 7Z"/></svg><span id="run-submit-label" aria-live="polite">开始测试</span></button></footer>
+      <footer class="manual-panel-footer setup-footer">
+        <span id="manual-config-summary" role="status" aria-atomic="true">1 份回答</span>
+        <button class="primary" type="submit" form="run-form" id="run-submit" aria-describedby="manual-config-summary" disabled>
+          <svg id="run-submit-play" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 3 11 7-11 7Z"/></svg>
+          <svg id="run-submit-spinner" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7" opacity=".3"/><path d="M10 3a7 7 0 0 1 7 7" stroke-linecap="round"/></svg>
+          <span id="run-submit-label">开始测试</span>
+        </button>
+      </footer>
     </section>
     <div class="card answer-workspace">
-    <header class="workspace-toolbar answer-toolbar"><nav class="view-nav" aria-label="回答与记录"><button data-manual-view="results" class="active">本次回答 <span id="task-indicator"></span></button><button data-manual-view="history">测试记录 <span id="history-count"></span></button></nav><button id="reading-toggle" class="text-button small" type="button" aria-pressed="false" aria-controls="manual-setup">展开阅读</button></header>
+    <header class="workspace-toolbar answer-toolbar">
+      <nav class="view-nav" aria-label="回答与记录"><button data-manual-view="results" class="active">本次回答</button><button data-manual-view="history">测试记录 <span id="history-count"></span></button></nav>
+      <div class="history-tools"><span id="history-total"></span><button id="history-clear-all" class="text-button small" type="button" aria-haspopup="dialog" aria-controls="action-dialog" disabled>
+        清空所有记录
+      </button></div>
+      <button id="reading-toggle" class="text-button small" type="button" aria-pressed="false" aria-controls="manual-setup"><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="12" rx="2"/><path d="M7.5 4v12"/></svg><span>展开阅读</span></button>
+    </header>
     <section id="manual-results" aria-label="本次测试结果">
 
-      <div id="run-empty" class="empty-state question-empty"><div class="answer-empty-art" aria-hidden="true"><svg viewBox="0 0 72 72"><rect x="12" y="10" width="38" height="48" rx="8"/><path d="M22 24h18M22 33h13M22 42h9"/><rect x="31" y="27" width="29" height="35" rx="7"/><path d="m39 45 5 5 9-12"/></svg></div><h3>回答将在这里呈现</h3><p>选择题目并开始测试，在这里阅读和比较回答。</p></div>
+      <div id="run-empty" class="empty-state question-empty">
+        <svg class="control-icon answer-empty-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9l-5 3v-3a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z"/><path d="M7.5 9.5h9m-9 4h6"/></svg>
+        <h3 id="run-empty-title">暂无回答</h3><p>模型回答将在这里逐份显示。</p>
+      </div>
       <div id="run-feedback" class="notice hidden" role="status" aria-live="polite"></div>
       <div id="run-content" class="hidden">
+        <button id="history-return" class="text-button small" type="button" aria-controls="manual-history" hidden><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m8 4.5-5.5 5.5L8 15.5M3 10h13.5"/></svg>返回测试记录</button>
         <div class="run-overview">
           <div id="run-meta" class="run-meta" role="status" aria-live="polite"></div>
-          <button id="run-frozen" type="button" aria-expanded="false" aria-controls="run-frozen-data">本次测试详情<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+          <button id="run-frozen" type="button" aria-expanded="false" aria-controls="run-frozen-data">测试详情<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
           <div id="run-frozen-data" role="region" aria-labelledby="run-frozen" hidden></div>
         </div>
-        <div class="progress-track" role="progressbar" aria-label="已结束样本进度" aria-valuemin="0" aria-valuemax="100"><div id="run-progress"></div></div>
+        <div class="progress-track" role="progressbar" aria-label="回答完成进度" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" hidden><div id="run-progress"></div></div>
         <div class="comparison-toolbar"><div class="model-selectors"><label>查看模型<select id="compare-model-a"></select></label><label>对比模型<select id="compare-model-b"></select></label></div><label>样本<select id="sample-filter"><option value="all">全部样本</option></select></label></div><div id="sample-list" class="sample-list"></div>
       </div>
     </section>
-    <section id="manual-history" class="hidden" aria-label="测试记录" tabindex="0"><h2 class="sr-only">测试记录</h2><p id="history-read-note" class="quality-read-note" role="status" hidden>测试记录读取失败，以下为上次读取的页面。可再次翻页或刷新。</p><div id="history-list" class="history-list"><p class="empty-line">连接管理接口后查看历史。</p></div></section>
+    <section id="manual-history" class="hidden" aria-label="测试记录" tabindex="0">
+      <h2 class="sr-only">测试记录</h2>
+      <p id="history-read-note" class="quality-read-note" role="status" hidden>测试记录读取失败，以下为上次读取的页面。可再次翻页或刷新。</p>
+      <div id="history-list" class="history-list"><p class="empty-line">连接管理接口后查看测试记录。</p></div>
+    </section>
     <footer class="manual-panel-footer answer-footer">
-      <div id="manual-result-footer"><span id="manual-result-summary" role="status" aria-live="polite">等待开始测试</span><div class="result-heading"><h2 class="sr-only">任务操作</h2><div class="button-row result-actions"><button id="run-cancel" class="danger small hidden">停止测试</button><details id="task-actions" class="task-actions hidden" open><summary>任务操作</summary><div class="button-row"><button id="run-rerun" class="subtle small hidden">同配置再测试</button><button id="run-export" class="subtle small hidden">下载结果</button></div></details></div></div></div>
-      <div id="manual-history-footer" class="hidden"><span id="history-total">任务数未确认</span><div id="history-pagination" class="pagination" hidden><button class="text-button small" id="history-prev" disabled>上一页</button><span id="history-page">第 1 页</span><button class="text-button small" id="history-next" disabled>下一页</button></div></div>
+      <div id="manual-result-footer">
+        <span id="manual-result-summary" role="status" aria-live="polite"></span>
+        <div class="button-row result-actions">
+          <button id="run-cancel" type="button" class="danger small hidden">停止测试</button>
+          <details id="task-actions" class="task-actions hidden" open>
+            <summary>任务操作</summary>
+            <div class="button-row">
+              <button id="run-rerun" type="button" class="small hidden"><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 8.5A6.7 6.7 0 1 1 5 14.8M3 4v5h5"/></svg>同配置再测试</button>
+              <button id="run-export" type="button" class="small hidden"><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v10m-3.5-3.5L10 12.5l3.5-3.5m-10 4v2.5A1.5 1.5 0 0 0 5 17h10a1.5 1.5 0 0 0 1.5-1.5V13"/></svg>下载结果</button>
+            </div>
+          </details>
+        </div>
+      </div>
+      <div id="manual-history-footer" class="hidden"><span id="history-range"></span><div id="history-pagination" class="pagination" hidden><button class="text-button small" id="history-prev" disabled>上一页</button><span id="history-page">第 1 页</span><button class="text-button small" id="history-next" disabled>下一页</button></div></div>
     </footer>
     </div>
     </div>
@@ -102,10 +160,14 @@
           <footer class="quality-panel-footer"><span id="rule-summary" role="status">尚未读取检测规则</span><span id="rule-timed-count"></span></footer>
         </section>
         <section id="ops-activity" class="quality-panel" aria-labelledby="activity-title" tabindex="-1">
-          <header class="quality-panel-heading"><div><h3 id="activity-title">运行记录 <span id="ops-record-count" class="count-inline"></span></h3><p>检测结果与凭证处理分别展示</p></div><button type="button" id="ops-history-clear" class="text-button small" aria-haspopup="dialog" title="清空所有规则的运行记录" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6M10 10v7m4-7v7"/></svg>清空记录</button></header>
-          <div id="ops-dispatch-receipt" class="dispatch-receipt" aria-label="手动执行回执" role="region" hidden></div>
-          <div class="quality-activity-scope"><strong id="ops-scope-label">全部规则</strong><button id="ops-scope-clear" class="text-button small" hidden>清除筛选</button></div>
-          <div id="ops-batch-bar" class="quality-batch" hidden><span>正在查看单个检测批次</span><button id="ops-batch-clear" class="text-button small">退出批次</button></div>
+          <header class="quality-panel-heading activity-heading"><div>
+            <h3 id="activity-title">运行记录 <span id="ops-record-count" class="count-inline"></span></h3>
+            <div class="quality-activity-scope"><span id="ops-scope-label">全部规则</span><button id="ops-scope-clear" type="button" class="text-button small" hidden>清除筛选</button><span id="ops-batch-bar" hidden><button id="ops-batch-clear" type="button" class="text-button small" aria-label="退出当前批次" title="退出当前批次">当前批次 <span aria-hidden="true">×</span></button></span></div>
+          </div><button type="button" id="ops-history-clear" class="text-button small" aria-haspopup="dialog" title="清空所有规则的运行记录" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6M10 10v7m4-7v7"/></svg>清空记录</button></header>
+          <div class="quality-activity-notes">
+            <div id="ops-dispatch-receipt" class="dispatch-receipt" aria-label="手动执行回执" role="region" hidden></div>
+            <div id="ops-rule-context" role="region" aria-label="所选规则的调度与处置记录" hidden></div>
+          </div>
           <p id="activity-read-note" class="quality-read-note" role="status" hidden></p>
           <div id="operations-history" class="quality-run-list" tabindex="0" role="region" aria-label="规则运行记录"></div>
           <footer class="quality-pagination"><span id="ops-batch-summary">尚未读取运行记录</span><div class="button-row"><button id="ops-batch-prev" class="text-button small" disabled>上一页</button><button id="ops-batch-next" class="text-button small" disabled>下一页</button></div></footer>
@@ -119,13 +181,28 @@
         <p id="rule-hold-note" class="field-note hidden">该规则涉及已保留的凭证暂停归属，不能通过编辑重新启用检测。</p>
         <div class="rule-identity">
           <div class="rule-name-line"><label for="rule-name">规则名称 <span class="field-optional">便于区分检测任务</span></label><input id="rule-name" required maxlength="100" placeholder="例如：Codex 日常质量检测" autocomplete="off" autofocus></div>
-          <fieldset class="rule-context" aria-labelledby="rule-scope-label" aria-describedby="rule-scope-note">
-            <div class="rule-context-line"><span id="rule-scope-label">检测范围</span><div class="rule-scope-options">
-              <label><input type="radio" name="rule-scope" id="rule-scope-all" value="all_enabled" checked>全部已启用凭证</label>
-              <label><input type="radio" name="rule-scope" id="rule-scope-directory" value="all_credentials">全部凭证</label>
-              <label><input type="radio" name="rule-scope" id="rule-scope-single" value="single">指定凭证</label>
-            </div><label id="rule-target-field" hidden><span class="sr-only">目标凭证</span><select id="rule-target" aria-describedby="rule-scope-note"></select></label><p id="rule-scope-note" class="field-note" role="status"></p></div>
-          </fieldset>
+          <div class="rule-membership">
+            <fieldset class="rule-context"><legend>检测范围</legend><div class="rule-scope-options">
+              <label><input type="radio" name="rule-scope" id="rule-scope-all" value="all_enabled" checked><span>仅已启用</span></label>
+              <label><input type="radio" name="rule-scope" id="rule-scope-directory" value="all_credentials"><span>全部</span></label>
+              <label><input type="radio" name="rule-scope" id="rule-scope-single" value="single"><span>指定对象</span></label>
+            </div></fieldset>
+            <fieldset class="rule-object-field"><legend>检测对象</legend><div class="rule-object-options">
+              <label>
+                <input type="checkbox" id="rule-object-oauth" name="rule-object" value="oauth" checked><span>OAuth 账户</span>
+              </label>
+              <label>
+                <input type="checkbox" id="rule-object-provider" name="rule-object" value="provider"><span>AI 提供商</span>
+              </label>
+            </div></fieldset>
+            <label id="rule-target-field" hidden>指定对象<select id="rule-target" aria-describedby="rule-scope-note"></select></label>
+          </div>
+          <p id="rule-scope-note" role="status"></p>
+          <div class="rule-group-access" id="rule-group-access" hidden>
+            <h3>整组启停授权</h3><p class="field-note">勾选后，暂停和恢复可作用于该组全部路由。仅选检测对象不会授权整组启停。</p>
+            <div id="rule-group-options"></div>
+          </div>
+          <div class="rule-legacy-scope" id="rule-legacy-scope" hidden><label class="check"><input type="checkbox" id="rule-adopt-scope">采用当前规则的检测与处置范围</label><p class="field-note">此规则沿用升级前的检测范围与权限。勾选后将按本表单的范围、动作和授权执行。</p></div>
         </div>
         <section class="rule-instrument" aria-labelledby="rule-model-title">
           <div class="model-deck">
@@ -171,7 +248,7 @@
             <h3 id="rule-handling-title">答错后的处理</h3>
             <div class="handling-options" role="group" aria-labelledby="rule-handling-title" aria-describedby="rule-handling-note">
               <label><input type="radio" name="rule-action" value="observe_only" checked><span>仅检测</span><small>记录结果</small></label>
-              <label><input type="radio" name="rule-action" value="disable_credential"><span>暂停凭证</span><small>停止业务调用</small></label>
+              <label><input type="radio" name="rule-action" value="disable_credential"><span>暂停对象</span><small>停止业务调用</small></label>
               <label><input type="radio" name="rule-action" value="delete_credential"><span>移除凭证</span><small>从 CPA 删除</small></label>
             </div>
             <div id="rule-restore-option" class="handling-recovery" hidden><label class="check"><input id="rule-auto-restore" type="checkbox" aria-describedby="rule-restore-detail"><span>答错暂停后，整轮检测通过才自动恢复</span></label><small id="rule-restore-detail"></small></div>
@@ -209,19 +286,15 @@
   <!--{{block "accounts" .}}-->
   <section id="page-login" aria-labelledby="login-page-title">
     <h2 id="login-page-title" class="sr-only">OpenAI 账号管理</h2>
-    <section id="login-disconnected" class="login-disconnected" aria-live="polite">
-      <div class="login-connect-intro"><h2>OpenAI 账号管理</h2><p>导入账号、完成授权，并查看 CPA 中的认证状态。</p><button id="login-connect" type="button" class="primary">连接管理接口</button></div>
-      <div class="login-connect-guide"><h3>连接后可以</h3><ol><li><strong>管理账号资料</strong><span>批量导入邮箱、密码与 2FA 密钥。</span></li><li><strong>登录并保存凭证</strong><span>2FA 成功后自动保存并启用 CPA 凭证。</span></li><li><strong>设置定时巡检</strong><span>为已绑定账号配置检查周期与自动重登。</span></li></ol></div>
-    </section>
-    <section id="login-workbench" class="login-workbench hidden" aria-labelledby="login-title">
+    <section id="login-workbench" class="login-workbench" data-initializing aria-labelledby="login-title">
       <h2 id="login-title" class="sr-only" tabindex="-1">账号管理</h2>
       <span id="account-action-announcement" class="sr-only" role="status" aria-live="polite"></span>
       <div class="login-scroll">
         <section aria-label="账号列表" id="login-view-accounts" class="account-layout" data-panel="list" >
           <div class="account-main">
             <div class="account-toolbar" role="group" aria-label="账号查询与操作">
-              <label class="account-status-filter"><span class="sr-only">账号状态</span><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M6 10h8M8 15h4"/></svg><select id="account-status-filter" aria-label="账号状态"><option value="all">全部状态</option><option value="attention">待处理</option><option value="linked">已绑定</option><option value="active">进行中</option></select></label>
-              <label class="account-search"><span class="sr-only">搜索账号</span><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="account-search" type="search" placeholder="搜索邮箱、备注或凭证" autocomplete="off"></label>
+              <label class="account-status-filter"><span class="sr-only">账号状态</span><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M6 10h8M8 15h4"/></svg><select id="account-status-filter" aria-label="账号状态" disabled><option value="all">全部状态 · —</option><option value="attention">待处理 · —</option><option value="linked">已绑定 · —</option><option value="active">进行中 · —</option></select></label>
+              <label class="account-search"><span class="sr-only">搜索账号</span><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="account-search" type="search" placeholder="搜索邮箱、备注或凭证" autocomplete="off" disabled></label>
               <div class="account-list-tools">
                 <div class="account-tool-group account-tool-primary" role="group" aria-label="账号操作">
                   <button id="account-import-open" type="button" class="account-toolbar-button primary" aria-label="导入账号" title="导入账号" disabled><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg><span>导入账号</span></button>
@@ -229,17 +302,17 @@
                   <button id="account-inspect" type="button" class="account-toolbar-button toolbar-outline" aria-label="巡检全部" title="巡检全部账号" disabled><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3H4v14h12v-6M7 7h2M7 11h3m3-7 2 2 3-4"/></svg><span>巡检全部</span></button>
                 </div>
                 <div class="account-tool-group account-tool-secondary" role="group" aria-label="记录与设置">
-                  <button type="button" id="account-history-open" class="account-toolbar-button toolbar-quiet" aria-haspopup="dialog" aria-controls="login-history-dialog"><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8a7 7 0 1 1 .5 6M3 3v5h5M10 6v4l3 2"/></svg><span>历史记录</span><span id="login-job-count" class="surface-count"></span></button>
-                  <button type="button" id="account-settings-open" class="account-toolbar-button toolbar-quiet" aria-haspopup="dialog" aria-controls="login-settings-dialog"><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h3m4 0h7M3 14h7m4 0h3"/><circle cx="8" cy="6" r="2"/><circle cx="12" cy="14" r="2"/></svg><span>全局设置</span><span id="account-settings-draft" class="surface-draft" hidden>未保存</span></button>
+                  <button type="button" id="account-history-open" class="account-toolbar-button toolbar-quiet" aria-haspopup="dialog" aria-controls="login-history-dialog" disabled><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8a7 7 0 1 1 .5 6M3 3v5h5M10 6v4l3 2"/></svg><span>历史记录</span><span id="login-job-count" class="surface-count"></span></button>
+                  <button type="button" id="account-settings-open" class="account-toolbar-button toolbar-quiet" aria-haspopup="dialog" aria-controls="login-settings-dialog" disabled><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h3m4 0h7M3 14h7m4 0h3"/><circle cx="8" cy="6" r="2"/><circle cx="12" cy="14" r="2"/></svg><span>全局设置</span><span id="account-settings-draft" class="surface-draft" hidden>未保存</span></button>
                 </div>
               </div>
             </div>
             <p id="account-action-error" class="field-error" role="alert" hidden></p>
-            <p id="account-list-summary" class="field-note" role="status">正在读取账号…</p>
-            <div id="account-table-wrap" class="table-scroll account-table-wrap"><table class="account-table" aria-label="OpenAI 账号"><thead><tr><th scope="col">账号</th><th scope="col">CPA 状态</th><th scope="col">最近操作</th><th scope="col" class="account-actions-heading">操作</th></tr></thead><tbody id="account-list"></tbody></table></div>
-            <div id="account-empty" class="account-empty hidden"><div class="account-empty-symbol" aria-hidden="true"><svg viewBox="0 0 48 48"><rect x="7" y="10" width="34" height="28" rx="4"/><circle cx="18" cy="21" r="4"/><path d="M11 32c1-6 13-6 14 0M29 19h7M29 25h7M29 31h4"/></svg></div><div><h3>添加你的 OpenAI 账号</h3><p>点击 2FA 登录，成功后自动保存并启用 CPA 凭证。</p><div class="account-format"><span>每行一个账号</span><code>邮箱----密码----2FA</code></div><button id="account-import-empty" type="button" class="subtle">开始导入</button><p class="field-note">导入只保存资料，不会自动登录。</p></div></div>
+            <p id="account-list-summary" class="field-note" role="status" hidden></p>
+            <div id="account-table-wrap" class="table-scroll account-table-wrap hidden"><table class="account-table" aria-label="OpenAI 账号"><thead><tr><th scope="col">账号</th><th scope="col">CPA 状态</th><th scope="col">最近操作</th><th scope="col" class="account-actions-heading">操作</th></tr></thead><tbody id="account-list"></tbody></table></div>
+            <div id="account-empty" class="account-empty"><div class="account-empty-symbol" aria-hidden="true"><svg viewBox="0 0 48 48"><rect x="7" y="10" width="34" height="28" rx="4"/><circle cx="18" cy="21" r="4"/><path d="M11 32c1-6 13-6 14 0M29 19h7M29 25h7M29 31h4"/></svg></div><div><h3>添加你的 OpenAI 账号</h3><p>点击 2FA 登录，成功后自动保存并启用 CPA 凭证。</p><div class="account-format"><span>每行一个账号</span><code>邮箱----密码----2FA</code></div><button id="account-import-empty" type="button" class="subtle" disabled>开始导入</button><p class="field-note">导入只保存资料，不会自动登录。</p></div></div>
             <div id="account-no-results" class="account-empty account-no-results" hidden><div><h3>没有匹配的账号</h3><p>试试其他邮箱或备注，或清除当前筛选。</p><button id="account-clear-filter" type="button" class="subtle">清除筛选</button></div></div>
-            <div class="account-pagination"><div class="account-page-summary"><span id="account-page-label" class="field-note"></span><span id="account-filter-count" class="field-note"></span></div><div class="button-row"><button id="account-page-prev" type="button" class="text-button small" disabled>上一页</button><button id="account-page-next" type="button" class="text-button small" disabled>下一页</button></div></div>
+            <div class="account-pagination" hidden><div class="account-page-summary"><span id="account-page-label" class="field-note"></span><span id="account-filter-count" class="field-note"></span></div><div class="button-row"><button id="account-page-prev" type="button" class="text-button small" disabled>上一页</button><button id="account-page-next" type="button" class="text-button small" disabled>下一页</button></div></div>
           </div>
 
         </section>
@@ -311,24 +384,44 @@
         <span class="account-menu-label account-menu-divider">账号安全</span>
         <button id="account-logout-all" type="button">退出所有设备</button>
       </div>
-      <dialog id="account-convert-dialog" class="credential-convert-dialog" aria-labelledby="account-convert-title">
-  <div class="account-dialog-heading"><div><span class="conversion-eyebrow">SUB2API → CPA</span><h2 id="account-convert-title">转换凭证</h2></div><button id="account-convert-close" type="button" class="icon-button" aria-label="关闭转换凭证">×</button></div>
-  <div class="conversion-scroll">
-    <p class="conversion-intro">导入 OpenAI / Codex OAuth 凭证，转换后直接上传到当前 CPA。</p>
-    <section id="account-convert-input">
-      <div class="conversion-source-heading"><label for="account-convert-source">凭证 JSON</label><button id="account-convert-file-open" type="button" class="subtle small">选择 JSON 文件</button><input id="account-convert-file" type="file" accept=".json,application/json" hidden></div>
-      <textarea id="account-convert-source" data-login-secret rows="8" spellcheck="false" autocomplete="off" placeholder="粘贴 sub2api 导出的 JSON，支持导出文件、账号数组或单条凭证。" aria-describedby="account-convert-note"></textarea>
-      <p id="account-convert-note" class="field-note">最多 100 个账号、2 MB。只转换凭证字段，分组、代理和并发设置不迁移。</p>
-    </section>
-    <section id="account-convert-results" hidden aria-labelledby="account-convert-summary">
-      <div class="conversion-result-heading"><div><h3 id="account-convert-summary"></h3><p class="field-note">核对结果后，可下载 JSON 或上传选中的凭证。</p></div><button id="account-convert-edit" type="button" class="text-button small">修改输入</button></div>
-      <div id="account-convert-list" class="conversion-list"></div>
-      <p class="field-note conversion-destination">上传到当前 CPA 的凭证列表；不会创建密码 / 2FA 账号资料。已有同账号凭证不会被覆盖。</p>
-    </section>
-    <p id="account-convert-feedback" class="conversion-feedback" role="status" aria-live="polite" hidden></p>
-  </div>
-  <div class="account-dialog-footer conversion-footer"><span id="account-convert-count" class="field-note">转换不会登录或刷新 token</span><div class="button-row"><button id="account-convert-cancel" type="button" class="subtle">关闭</button><button id="account-convert-preview" type="button" class="primary">开始转换</button><button id="account-convert-upload" type="button" class="primary" hidden>上传到 CPA</button></div></div>
-</dialog>
+      <dialog id="account-convert-dialog" class="credential-convert-dialog" aria-labelledby="account-convert-title" aria-describedby="account-convert-intro">
+        <header class="conversion-heading">
+          <div><h2 id="account-convert-title">转换凭证</h2><p id="account-convert-intro">预览 sub2api 导出的 OpenAI / Codex OAuth 凭证，确认后上传到 CPA。</p></div>
+          <button id="account-convert-close" type="button" class="icon-button" aria-label="关闭转换凭证"><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
+        </header>
+        <div class="conversion-scroll">
+          <p class="conversion-file-origin"><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2.5H5.5a1.5 1.5 0 0 0-1.5 1.5v12a1.5 1.5 0 0 0 1.5 1.5h9a1.5 1.5 0 0 0 1.5-1.5V7.5L11 2.5Z"/><path d="M11 2.5v5h5M7.5 12h5"/></svg><span>来源文件</span><bdi id="account-convert-file-name" hidden></bdi></p>
+          <section id="account-convert-input" aria-label="导入凭证">
+            <div id="account-convert-dropzone" class="conversion-dropzone" role="group" aria-labelledby="account-convert-drop-title" aria-describedby="account-convert-note">
+              <span class="conversion-drop-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 15V3.5m-4.5 4.5L12 3.5l4.5 4.5M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg></span>
+              <div class="conversion-drop-copy"><h3 id="account-convert-drop-title">将 JSON 文件拖到这里</h3><p id="account-convert-note">每份文件最多 100 个账号，最大 2 MiB。</p></div>
+              <button id="account-convert-file-open" type="button" class="primary" autofocus>选择文件</button>
+              <input id="account-convert-file" type="file" accept=".json,application/json" hidden>
+            </div>
+            <details id="account-convert-paste" class="conversion-paste">
+              <summary><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 4.5h-1A1.5 1.5 0 0 0 5 6v1.5C5 9 4.5 9.5 3 10c1.5.5 2 1 2 2.5V14a1.5 1.5 0 0 0 1.5 1.5h1m5-11h1A1.5 1.5 0 0 1 15 6v1.5c0 1.5.5 2 2 2.5-1.5.5-2 1-2 2.5V14a1.5 1.5 0 0 1-1.5 1.5h-1"/></svg>粘贴 JSON<svg class="login-control-icon conversion-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg></summary>
+              <div class="conversion-paste-body">
+                <label for="account-convert-source" class="sr-only">凭证 JSON</label>
+                <textarea id="account-convert-source" data-login-secret rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="粘贴导出内容、账号数组或单条凭证" aria-describedby="account-convert-note"></textarea>
+                <button id="account-convert-preview" type="button" class="primary">预览凭证</button>
+              </div>
+            </details>
+          </section>
+          <section id="account-convert-results" hidden aria-labelledby="account-convert-results-title">
+            <div class="conversion-result-heading">
+              <div><h3 id="account-convert-results-title" tabindex="-1">凭证预览</h3><p id="account-convert-summary" role="status"></p></div>
+              <button id="account-convert-edit" type="button" class="subtle small">重新导入</button>
+            </div>
+            <div id="account-convert-list" class="conversion-list"></div>
+            <p class="field-note conversion-destination">上传后可在 CPA 的凭证列表查看。同一账号已有凭证时会跳过上传。</p>
+          </section>
+          <p id="account-convert-feedback" class="conversion-feedback" role="status" hidden></p>
+        </div>
+        <footer class="conversion-footer">
+          <span id="account-convert-count" hidden></span>
+          <div class="button-row"><button id="account-convert-cancel" type="button" class="subtle">关闭</button><button id="account-convert-upload" type="button" class="primary" hidden>上传到 CPA</button></div>
+        </footer>
+      </dialog>
       <dialog id="account-login-dialog" class="account-delete-dialog account-login-dialog" aria-labelledby="account-login-title">
         <form id="account-login-form">
           <div class="dialog-heading"><h2 id="account-login-title">2FA 登录</h2><button type="button" id="account-login-close" class="icon-button" aria-label="关闭登录窗口"><svg class="login-control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></div>
@@ -491,19 +584,19 @@
   <div class="button-row end"><button type="button" id="action-cancel" class="subtle" data-close="action-dialog">取消</button><button type="submit" id="action-confirm" class="primary">确认</button></div>
 </form></dialog>
 <dialog id="quality-detail" aria-labelledby="quality-detail-title">
-  <header class="dialog-heading"><h2 id="quality-detail-title">检测详情</h2><button type="button" class="icon-button" data-close="quality-detail" aria-label="关闭检测详情" autofocus><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header>
+  <header class="dialog-heading"><h2 id="quality-detail-title">运行详情</h2><button type="button" class="icon-button" data-close="quality-detail" aria-label="关闭运行详情" autofocus><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header>
   <div class="quality-detail-scroll">
     <div id="quality-detail-message" role="status"></div>
     <button type="button" id="quality-detail-retry" class="subtle small" hidden>重新读取</button>
     <div id="quality-detail-content"></div>
   </div>
-  <footer class="quality-detail-footer" hidden><button type="button" id="quality-detail-cancel" class="text-button" hidden>取消检测</button><button type="button" id="quality-detail-export" class="subtle small">导出记录</button></footer>
+  <footer class="quality-detail-footer" hidden><button type="button" id="quality-detail-cancel" class="text-button" hidden>取消检测</button><button type="button" id="quality-detail-export" class="subtle small"><svg class="control-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v10m-3.5-3.5L10 12.5l3.5-3.5m-10 4v2.5A1.5 1.5 0 0 0 5 17h10a1.5 1.5 0 0 0 1.5-1.5V13"/></svg>导出记录</button></footer>
 </dialog>
-<dialog aria-labelledby="evidence-title" id="evidence-dialog" class="wide-dialog"><div class="dialog-heading"><h2 id="evidence-title">样本条件与证据</h2><button class="subtle" data-close="evidence-dialog">关闭</button></div><div id="evidence-content"></div></dialog>
+<dialog aria-labelledby="evidence-title" id="evidence-dialog" class="wide-dialog"><div class="dialog-heading"><div><h2 id="evidence-title">样本条件与证据</h2><p class="answer-dialog-context" id="evidence-context" hidden></p></div><button class="subtle" data-close="evidence-dialog">关闭</button></div><div id="evidence-content"></div></dialog>
 <dialog aria-labelledby="release-title" id="release-dialog" class="release-dialog"><div class="dialog-heading"><h2 id="release-title">人工解除质量暂停</h2><button class="subtle" data-close="release-dialog">关闭</button></div><p>只释放身份、归属与动作版本匹配的暂停。</p><div id="release-feedback" class="notice hidden" role="status" aria-live="polite"></div><div id="release-preview"></div><div class="release-consequence"><strong>解除后，相关规则继续停止</strong><p>旧失败计数清零。人工禁用、原生冷却和其他归属的限制继续生效；需另行显式恢复检测规则。</p></div><div class="button-row end"><button class="subtle" data-close="release-dialog">取消</button><button id="release-refresh" class="subtle hidden">刷新并核对状态</button><button id="release-confirm" class="danger">确认解除，保持检测停止</button></div></dialog>
 <dialog aria-labelledby="preview-title" id="preview-dialog" class="preview-dialog">
       <div class="dialog-heading">
-        <h2 id="preview-title">隔离预览</h2>
+        <div><h2 id="preview-title">隔离预览</h2><p class="answer-dialog-context" id="preview-context" hidden></p></div>
         <button class="icon-button" data-close="preview-dialog" aria-label="关闭">关闭</button>
       </div>
       <p>脚本禁用、外部网络阻止、表单与弹窗禁用。CSS / SVG 动画仍可展示。</p>
@@ -516,5 +609,5 @@
         referrerpolicy="no-referrer"
       ></iframe>
     </dialog>
-<script type="application/json" id="build-info">{"application":"model-quality","ui_version":"13.6.35"}</script>
+<script type="application/json" id="build-info">{"application":"model-quality","ui_version":"13.6.62"}</script>
 </body></html>

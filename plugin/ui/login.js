@@ -138,7 +138,8 @@ const networkReasons = {
   proxy_connection_refused: '代理拒绝连接', network_connection_refused: '认证服务拒绝连接',
   proxy_connection_timeout: '连接代理超时', network_timeout: '认证网络请求超时', network_tls_failed: '认证服务 TLS 连接失败',
 };
-const key = () => crypto.randomUUID();
+// getRandomValues is also available on remotely hosted HTTP management panels.
+const key = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 const messageFor = code => reasons[code] || '登录操作未完成，请刷新任务核对状态。';
 const safeAuthorizationURL = value => {
   try {
@@ -168,15 +169,31 @@ function saveWorkflowPreference(workflow, choices) {
 // Authentication inputs remain in this workbench only until its request is sent.
 export function createLoginWorkbench({ request, connected, onCommitted }) {
   const $ = id => document.getElementById(id);
-  const state = { open: false, epoch: 0, capabilities: null, targets: [], jobs: [], selected: '', job: null, candidate: null, vault: null, timer: null, busy: new Set(), urls: new Map(), detailSignature: '', storageRead: 0, detailRead: 0, jobsRead: 0, view: 'accounts', accounts: [], accountSettings: null, accountRead: 0, accountsAvailable: false, accountSignature: '', accountEditing: null, accountStarting: '', accountDetailFailed: false, settingsDirty: false, settingsDraftRevision: null, accountDetailRead: 0, accountDetailLoading: false, accountQuery: '', accountFilter: 'all', accountPage: 0, jobSignature: '', revealJob: false, accountsLoaded: false, jobsAvailable: false, bootstrapReady: false, readErrors: new Map(), lastReadAt: '', readFailures: 0 };
+  const state = { open: false, epoch: 0, capabilities: null, targets: [], jobs: [], selected: '', job: null, candidate: null, vault: null, timer: null, busy: new Set(), urls: new Map(), detailSignature: '', storageRead: 0, detailRead: 0, jobsRead: 0, view: 'accounts', accounts: [], accountSettings: null, accountRead: 0, accountsAvailable: false, accountSignature: '', accountEditing: null, accountStarting: '', accountDetailFailed: false, settingsDirty: false, settingsDraftRevision: null, accountDetailRead: 0, accountDetailLoading: false, accountQuery: '', accountFilter: 'all', accountPage: 0, jobSignature: '', revealJob: false, accountsLoaded: false, jobsAvailable: false, bootstrapReady: false, readErrors: new Map(), nextReadAt: 0, readFailures: 0 };
   const get = path => request(path);
-  const write = (path, body, method = 'POST') => {
+  let snapshotReads = new Map();
+  function snapshotRead(path) {
+    if (snapshotReads.has(path)) return snapshotReads.get(path);
+    const pending = get(path).finally(() => {
+      if (snapshotReads.get(path) === pending) snapshotReads.delete(path);
+    });
+    snapshotReads.set(path, pending);
+    return pending;
+  }
+  function invalidateSnapshot() {
+    state.nextReadAt = 0;
+    snapshotReads.clear();
+  }
+  const write = async (path, body, method = 'POST') => {
     if (navigator.onLine === false) {
       const error = new Error('The management connection is offline.');
       error.code = 'management_offline';
-      return Promise.reject(error);
+      throw error;
     }
-    return request(path, method, body, key());
+    const session = snapshotReads;
+    invalidateSnapshot();
+    try { return await request(path, method, body, key()); }
+    finally { if (snapshotReads === session) invalidateSnapshot(); }
   };
   const current = epoch => state.open && state.epoch === epoch && connected();
   const accountLoginAvailable = () => state.capabilities?.account_login_available ?? (state.capabilities?.methods?.password_totp?.available === true && state.capabilities?.available !== false);
@@ -201,85 +218,192 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
   let securitySubmissionUncertain = false;
   let securityRecoveryJob = '';
   let securityRecoveryCompletable = false;
-  const conversion = { items: [], source: '', busy: false, sequence: 0 };
+  const convertEl = name => $('account-convert-' + name);
+  const convertLimit = 2 * 1024 * 1024;
+  const conversion = { items: [], source: '', fileName: '', busy: '', sequence: 0 };
+  const retryableConversion = new Set(['cpa_plan_excluded', 'security_pending', 'quality_authority_unavailable', 'plugin_unavailable', 'cancelled']);
   const conversionMessages = {
     conversion_invalid_json: 'JSON 无效、字段重复或内容过大，请检查导出文件。', conversion_unsupported_format: '未识别到 sub2api 账号或凭证，请使用包含 credentials 的导出 JSON。',
     conversion_unsupported_version: '不支持此导出版本。', conversion_account_limit: '每次支持 1–100 个账号。', conversion_unsupported_provider: '仅支持 OpenAI / Codex。', conversion_unsupported_type: '仅支持 OAuth 凭证，不支持 API Key 或 Cookie。',
     conversion_missing_access_token: '缺少 access_token。', conversion_missing_account_id: '缺少 ChatGPT 账号 ID，token 中也未找到。', conversion_invalid_token: 'Token 格式无效，无法解析账号信息。', conversion_invalid_expiry: '凭证有效期格式无效。', conversion_expired_without_refresh: 'Access token 已过期且没有 refresh_token。',
     invalid_credentials: '凭证字段格式不正确。', duplicate_identity: '此账号已有凭证，未覆盖或重复上传。', identity_conflict: '凭证与 token 中的账号信息不一致。', identity_unverifiable: 'Token 缺少稳定的账号或用户身份，无法安全上传。',
     cpa_plan_excluded: '此套餐被 CPA 上传策略排除。', security_pending: '此账号有进行中或待核对的操作，请先处理。', commit_unknown: '上传结果待核对，请在 CPA 凭证列表确认，勿重复上传。', saved_not_adopted: '文件可能已保存，运行状态待核对，勿重复上传。',
+    conversion_duplicate_source: '文件内已有相同身份的凭证。', conversion_already_present: 'CPA 已有相同凭证。', conversion_previously_uploaded: '已核对上次上传的凭证。', conversion_previous_upload_changed: '上次上传后的凭证已变化或移除，请在 CPA 核对。',
     missing_email: '未提供邮箱', missing_expiry: '有效期未知', no_refresh_token: '无 refresh_token，到期后无法自动刷新', access_token_expired: 'Access token 已过期，由 CPA 按需刷新', kept_disabled: '保留禁用状态',
   };
-  const conversionMessage = code => conversionMessages[code] || messageFor(code);
-  function conversionFeedback(message = '') {
-    $('account-convert-feedback').textContent = message;
-    $('account-convert-feedback').hidden = !message;
+  const conversionMessage = code => conversionMessages[code] || reasons[code] || '请在 CPA 凭证列表核对该条记录。';
+  function conversionFeedback(message = '', tone = '') {
+    const el = convertEl('feedback');
+    el.textContent = message;
+    el.dataset.tone = tone;
+    el.hidden = !message;
+  }
+  function canSelectConversion(item) {
+    return item.status === 'ready' || (item.status === 'failed' && retryableConversion.has(item.code));
   }
   function updateConversionControls() {
-    const busy = conversion.busy;
-    const selected = conversion.items.filter(item => item.status === 'ready' && item.selected);
-    for (const id of ['account-convert-source', 'account-convert-file', 'account-convert-file-open', 'account-convert-edit', 'account-convert-close', 'account-convert-cancel']) $(id).disabled = busy;
-    $('account-convert-preview').disabled = busy || !connected() || !$('account-convert-source').value.trim();
-    $('account-convert-upload').disabled = busy || !connected() || !selected.length;
-    $('account-convert-preview').textContent = busy ? '正在转换…' : '开始转换';
-    $('account-convert-upload').textContent = busy ? '正在上传…' : selected.length ? `上传 ${selected.length} 个凭证` : '上传到 CPA';
-    $('account-convert-count').textContent = conversion.items.length ? `${selected.length} 个待上传` : '转换不会登录或刷新 token';
-    $('account-convert-dialog').setAttribute('aria-busy', String(busy));
-    $('account-convert-list').querySelectorAll('button, input').forEach(el => { el.disabled = busy || el.dataset.convertSelect !== undefined && conversion.items[Number(el.dataset.convertSelect)]?.status !== 'ready'; });
+    const { busy, items, fileName } = conversion;
+    const uploading = busy === 'upload';
+    const selected = items.filter(item => item.selected && canSelectConversion(item)).length;
+    for (const id of ['source', 'file', 'file-open', 'edit', 'close', 'cancel']) convertEl(id).disabled = uploading;
+    convertEl('preview').disabled = !!busy || !connected() || !convertEl('source').value.trim();
+    convertEl('upload').disabled = !!busy || !connected() || !selected;
+    convertEl('preview').textContent = busy === 'preview' ? '正在转换…' : '预览转换结果';
+    convertEl('upload').textContent = uploading ? '正在上传…' : selected ? `上传 ${selected} 个凭证` : '上传到 CPA';
+    convertEl('count').textContent = `已选 ${selected} 个`;
+    convertEl('count').hidden = !items.length;
+    convertEl('file-name').textContent = fileName;
+    convertEl('file-name').hidden = !fileName;
+    convertEl('dialog').setAttribute('aria-busy', String(!!busy));
+    for (const el of convertEl('list').querySelectorAll('[data-convert-select]')) {
+      el.disabled = !!busy || !canSelectConversion(items[Number(el.dataset.convertSelect)]);
+    }
+    for (const el of convertEl('list').querySelectorAll('[data-convert-download]')) el.disabled = !!busy;
   }
   function renderConversion() {
-    const ready = conversion.items.filter(item => item.status === 'ready').length;
-    $('account-convert-input').hidden = conversion.items.length > 0;
-    $('account-convert-results').hidden = !conversion.items.length;
-    $('account-convert-preview').hidden = conversion.items.length > 0;
-    $('account-convert-upload').hidden = !conversion.items.length;
-    const uploaded = conversion.items.filter(item => item.status === 'uploaded').length;
-    $('account-convert-summary').textContent = uploaded ? `${uploaded} 个已上传 · 共 ${conversion.items.length} 个` : `${ready} 个可上传 · 共 ${conversion.items.length} 个`;
-    $('account-convert-list').innerHTML = conversion.items.map((item, index) => {
-      const name = item.email || item.name || `账号 ${item.index + 1}`;
-      const status = item.status === 'ready' ? '转换成功' : item.status === 'uploaded' ? item.enabled ? '已上传并启用' : '已上传，保持禁用' : conversionMessage(item.code || item.error);
-      return `<div class="conversion-item" data-state="${escapeHTML(item.status)}"><input type="checkbox" data-convert-select="${index}" aria-label="选择${escapeHTML(name)}" ${item.selected ? 'checked' : ''} ${item.status !== 'ready' ? 'disabled' : ''}><div><strong>${escapeHTML(name)}</strong><small>${escapeHTML(item.filename || item.name || '')}${item.plan_type && item.plan_type !== 'unknown' ? ` · ${escapeHTML(planLabel(item.plan_type))}` : ''}</small><div class="conversion-item-status">${escapeHTML(status)}</div>${item.warnings?.length ? `<small>${escapeHTML(item.warnings.map(conversionMessage).join('；'))}</small>` : ''}</div>${item.credential ? `<button type="button" class="text-button small" data-convert-download="${index}">下载 JSON</button>` : ''}</div>`;
+    const { items } = conversion;
+    convertEl('input').hidden = !!items.length;
+    convertEl('results').hidden = !items.length;
+    convertEl('upload').hidden = !items.length;
+    const counts = new Map();
+    for (const item of items) counts.set(item.status, (counts.get(item.status) || 0) + 1);
+    convertEl('results-title').textContent = items.some(item => !['ready', 'invalid'].includes(item.status)) ? '上传结果' : '凭证预览';
+    const labels = { ready: '可上传', uploaded: '已上传', existing: '已存在', invalid: '无法转换', failed: '未上传', uncertain: '待核对' };
+    convertEl('summary').textContent = [`共 ${items.length} 条`, ...Object.entries(labels).filter(([status]) => counts.has(status)).map(([status, label]) => `${counts.get(status)} 条${label}`)].join(' · ');
+    convertEl('list').innerHTML = items.map((item, index) => {
+      const name = item.email || item.name || `凭证 ${item.index + 1}`;
+      const meta = [item.name !== name && item.name, item.plan_type && item.plan_type !== 'unknown' && planLabel(item.plan_type)].filter(Boolean).join(' · ');
+      let status = labels[item.status];
+      if (item.status === 'uploaded') status = item.enabled ? '已上传并启用' : '已上传，保持禁用';
+      const issue = item.code || item.error;
+      const notes = [];
+      if (issue === 'conversion_duplicate_source' && Number.isInteger(item.duplicate_of)) notes.push(`与第 ${item.duplicate_of + 1} 条凭证重复。`);
+      else if (issue) notes.push(conversionMessage(issue));
+      if (item.status === 'failed' && canSelectConversion(item)) notes.push('处理后可重新勾选上传。');
+      for (const warning of item.warnings || []) {
+        if (warning !== 'kept_disabled' || item.status !== 'uploaded') notes.push(conversionMessage(warning));
+      }
+      return `<div class="conversion-item" data-state="${escapeHTML(item.status)}"><input type="checkbox" data-convert-select="${index}" aria-label="选择${escapeHTML(name)}" ${item.selected ? 'checked' : ''}><div class="conversion-item-details"><strong dir="auto">${escapeHTML(name)}</strong>${meta ? `<small>${escapeHTML(meta)}</small>` : ''}<div class="conversion-item-status">${escapeHTML(status)}</div>${notes.length ? `<small>${escapeHTML(notes.join(' '))}</small>` : ''}</div>${item.credential ? `<button type="button" class="text-button small" data-convert-download="${index}" title="${escapeHTML(item.filename || '下载 CPA JSON')}" aria-label="下载 ${escapeHTML(name)} 的 CPA JSON">下载 JSON</button>` : ''}</div>`;
     }).join('');
     updateConversionControls();
   }
-  function closeConversion(restoreFocus = false) {
-    conversion.sequence++; conversion.items = []; conversion.source = ''; conversion.busy = false;
-    $('account-convert-source').value = ''; $('account-convert-file').value = '';
-    conversionFeedback(); renderConversion();
-    if ($('account-convert-dialog').open) $('account-convert-dialog').close();
-    if (restoreFocus && !$('account-convert-open').disabled) $('account-convert-open').focus({ preventScroll: true });
+  function resetConversion() {
+    conversion.sequence++;
+    Object.assign(conversion, { items: [], source: '', fileName: '', busy: '' });
+    convertEl('source').value = '';
+    convertEl('file').value = '';
+    convertEl('paste').open = false;
+    delete convertEl('dropzone').dataset.dragging;
+    conversionFeedback();
+    renderConversion();
   }
-  $('account-convert-open').addEventListener('click', () => {
+  function closeConversion(restoreFocus = false) {
+    resetConversion();
+    if (convertEl('dialog').open) convertEl('dialog').close();
+    if (restoreFocus && !convertEl('open').disabled) convertEl('open').focus({ preventScroll: true });
+  }
+  convertEl('open').addEventListener('click', () => {
     if (accountBusy()) return;
-    clearSecrets(); closeAccountEditors(); conversionFeedback(); renderConversion();
-    $('account-convert-dialog').showModal(); $('account-convert-source').focus();
+    clearSecrets(); closeAccountEditors();
+    convertEl('dialog').showModal();
+    convertEl('file-open').focus({ preventScroll: true });
   });
-  for (const id of ['account-convert-close', 'account-convert-cancel']) $(id).addEventListener('click', () => { if (!conversion.busy) closeConversion(true); });
-  $('account-convert-dialog').addEventListener('cancel', event => { event.preventDefault(); if (!conversion.busy) closeConversion(true); });
-  $('account-convert-source').addEventListener('input', () => { conversion.sequence++; conversionFeedback(); updateConversionControls(); });
-  $('account-convert-edit').addEventListener('click', () => {
+  for (const id of ['close', 'cancel']) convertEl(id).addEventListener('click', () => { if (conversion.busy !== 'upload') closeConversion(true); });
+  convertEl('dialog').addEventListener('cancel', event => { event.preventDefault(); if (conversion.busy !== 'upload') closeConversion(true); });
+  convertEl('source').addEventListener('input', () => {
+    conversion.sequence++; conversion.busy = ''; conversion.fileName = ''; conversionFeedback(); updateConversionControls();
+  });
+  convertEl('edit').addEventListener('click', () => {
     if (conversion.busy) return;
-    conversion.items = []; conversion.source = ''; conversionFeedback(); renderConversion(); $('account-convert-source').focus();
+    const pasted = conversion.fileName ? '' : conversion.source;
+    resetConversion();
+    if (pasted) {
+      convertEl('paste').open = true;
+      convertEl('source').value = pasted;
+      updateConversionControls(); convertEl('source').focus();
+    } else convertEl('file-open').focus();
   });
-  $('account-convert-file-open').addEventListener('click', () => { if (!conversion.busy) $('account-convert-file').click(); });
-  $('account-convert-file').addEventListener('change', async () => {
-    const file = $('account-convert-file').files[0];
-    if (!file || conversion.busy) return;
-    const sequence = ++conversion.sequence;
-    if (file.size > 2 * 1024 * 1024) { conversionFeedback('文件不能超过 2 MB。'); $('account-convert-file').value = ''; return; }
+  function conversionCurrent(sequence, epoch) {
+    return sequence === conversion.sequence && current(epoch) && convertEl('dialog').open;
+  }
+  async function previewConversion(source, sequence, epoch) {
+    if (!source.trim()) { conversionFeedback('没有可读取的 JSON 内容。', 'error'); return; }
+    if (new TextEncoder().encode(source).length > convertLimit) { conversionFeedback('内容超过 2 MiB，请分批导入。', 'error'); return; }
+    conversion.busy = 'preview'; conversionFeedback('正在预览凭证…'); updateConversionControls();
     try {
-      const text = await file.text();
-      if (sequence !== conversion.sequence || !$('account-convert-dialog').open) return;
-      $('account-convert-source').value = text; conversionFeedback(`已读取 ${file.name}`); updateConversionControls();
-    } catch { if (sequence === conversion.sequence) conversionFeedback('文件读取失败，请重新选择。'); }
+      const result = await write('/conversion/preview', { source });
+      if (!conversionCurrent(sequence, epoch)) return;
+      const rows = result?.items;
+      if (!Array.isArray(rows) || !rows.length || rows.length > 100 || rows.some((item, i) => item?.index !== i || !['ready', 'invalid'].includes(item.status))) {
+        conversionFeedback('CPA 返回的预览不完整，请重新预览。', 'error'); return;
+      }
+      conversion.source = source;
+      conversion.items = rows.map(item => ({ ...item, selected: item.status === 'ready' }));
+      convertEl('source').value = '';
+      conversionFeedback(); renderConversion();
+      convertEl('dialog').querySelector('.conversion-scroll').scrollTop = 0;
+      convertEl('results-title').focus({ preventScroll: true });
+    } catch (error) {
+      if (conversionCurrent(sequence, epoch) && !isDiscarded(error)) {
+        conversionFeedback(conversionMessages[error.code] || reasons[error.code] || '未能取得 CPA 的转换预览，请检查面板连接后重试。', 'error');
+      }
+    } finally {
+      if (sequence === conversion.sequence) { conversion.busy = ''; updateConversionControls(); }
+    }
+  }
+  convertEl('preview').addEventListener('click', () => {
+    if (conversion.busy || !connected()) return;
+    void previewConversion(convertEl('source').value.trim(), ++conversion.sequence, state.epoch);
   });
-  $('account-convert-list').addEventListener('change', event => {
+  async function importConversionFile(files) {
+    if (conversion.busy === 'upload' || !connected() || !convertEl('dialog').open || conversion.items.length) return;
+    resetConversion();
+    if (files.length !== 1) { conversionFeedback('请每次选择一个 JSON 文件，同一文件可包含多个凭证。', 'error'); return; }
+    const [file] = files;
+    conversion.fileName = file.name;
+    updateConversionControls();
+    if (file.size > convertLimit) { conversionFeedback('文件超过 2 MiB，请分批导入。', 'error'); return; }
+    const sequence = conversion.sequence, epoch = state.epoch;
+    conversion.busy = 'read'; conversionFeedback('正在读取文件…'); updateConversionControls();
+    try {
+      const source = await file.text();
+      if (!conversionCurrent(sequence, epoch)) return;
+      await previewConversion(source, sequence, epoch);
+    } catch {
+      if (conversionCurrent(sequence, epoch)) conversionFeedback('读取失败，请重新选择 JSON 文件。', 'error');
+    } finally {
+      if (sequence === conversion.sequence) { conversion.busy = ''; updateConversionControls(); }
+    }
+  }
+  convertEl('file-open').addEventListener('click', () => convertEl('file').click());
+  convertEl('file').addEventListener('change', event => {
+    const files = Array.from(event.target.files);
+    if (files.length) void importConversionFile(files);
+  });
+  const fileDrag = event => Array.from(event.dataTransfer?.types || []).includes('Files');
+  const dropzone = convertEl('dropzone');
+  dropzone.addEventListener('dragover', event => {
+    if (!fileDrag(event)) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; dropzone.dataset.dragging = 'true';
+  });
+  dropzone.addEventListener('dragleave', event => {
+    if (!dropzone.contains(event.relatedTarget)) delete dropzone.dataset.dragging;
+  });
+  dropzone.addEventListener('drop', event => {
+    delete dropzone.dataset.dragging;
+    if (!fileDrag(event)) return;
+    event.preventDefault(); void importConversionFile(Array.from(event.dataTransfer.files));
+  });
+  for (const type of ['dragover', 'drop']) document.addEventListener(type, event => {
+    if (convertEl('dialog').open && fileDrag(event)) event.preventDefault();
+  });
+  convertEl('list').addEventListener('change', event => {
     if (conversion.busy || event.target.dataset.convertSelect === undefined) return;
     const item = conversion.items[Number(event.target.dataset.convertSelect)];
-    if (item?.status === 'ready') item.selected = event.target.checked;
+    if (item && canSelectConversion(item)) item.selected = event.target.checked;
     updateConversionControls();
   });
-  $('account-convert-list').addEventListener('click', event => {
+  convertEl('list').addEventListener('click', event => {
     const button = event.target.closest('[data-convert-download]');
     if (!button || conversion.busy) return;
     const item = conversion.items[Number(button.dataset.convertDownload)];
@@ -287,47 +411,37 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     const url = URL.createObjectURL(new Blob([JSON.stringify(item.credential, null, 2) + '\n'], { type: 'application/json' }));
     const link = document.createElement('a'); link.href = url; link.download = item.filename; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
-  $('account-convert-preview').addEventListener('click', async () => {
-    if (conversion.busy || !connected()) return;
-    const source = $('account-convert-source').value.trim();
-    if (!source) return;
-    if (new TextEncoder().encode(source).length > 2 * 1024 * 1024) { conversionFeedback('内容不能超过 2 MB。'); return; }
-    const sequence = ++conversion.sequence, epoch = state.epoch;
-    conversion.busy = true; conversionFeedback(); updateConversionControls();
-    try {
-      const result = await write('/conversion/preview', { source });
-      if (sequence !== conversion.sequence || !current(epoch)) return;
-      if (!Array.isArray(result.items) || !result.items.length) throw Error('Invalid preview');
-      conversion.source = source; conversion.items = result.items.map(item => ({ ...item, selected: item.status === 'ready' }));
-      renderConversion(); $('account-convert-dialog').querySelector('.conversion-scroll').scrollTop = 0;
-    } catch (error) { if (sequence === conversion.sequence && current(epoch) && !isDiscarded(error)) conversionFeedback(conversionMessages[error.code] || '转换未完成，请检查 JSON 内容后重试。'); }
-    finally { if (sequence === conversion.sequence) { conversion.busy = false; updateConversionControls(); } }
-  });
-  $('account-convert-upload').addEventListener('click', async () => {
-    const selected = conversion.items.filter(item => item.status === 'ready' && item.selected);
+  convertEl('upload').addEventListener('click', async () => {
+    const selected = conversion.items.filter(item => item.selected && canSelectConversion(item));
     if (conversion.busy || !selected.length || !connected()) return;
     const sequence = ++conversion.sequence, epoch = state.epoch;
-    conversion.busy = true; conversionFeedback(); updateConversionControls();
+    conversion.busy = 'upload'; conversionFeedback(); updateConversionControls();
+    const unknown = { status: 'uncertain', code: 'commit_unknown', selected: false };
     try {
       const result = await write('/conversion/upload', { source: conversion.source, indexes: selected.map(item => item.index) });
-      if (sequence !== conversion.sequence || !current(epoch)) return;
+      if (!conversionCurrent(sequence, epoch)) return;
       for (const item of selected) {
-        const saved = result.items?.find(value => value.index === item.index);
-        if (!saved || !['uploaded', 'failed', 'uncertain'].includes(saved.status)) Object.assign(item, { status: 'uncertain', code: 'commit_unknown', selected: false });
-        else Object.assign(item, { status: saved.status, code: saved.code, enabled: saved.enabled, selected: false });
+        const matches = Array.isArray(result?.items) ? result.items.filter(row => row?.index === item.index) : [];
+        const saved = matches[0];
+        if (matches.length !== 1 || !['uploaded', 'existing', 'failed', 'uncertain'].includes(saved.status) || (saved.status === 'uploaded' && typeof saved.enabled !== 'boolean')) Object.assign(item, unknown);
+        else Object.assign(item, { status: saved.status, code: saved.code || (saved.status === 'uncertain' ? 'commit_unknown' : ''), enabled: saved.enabled, selected: false });
       }
-      renderConversion(); conversionFeedback('上传处理完成，请查看每条凭证的结果。');
-      await reload();
-      if (sequence === conversion.sequence && current(epoch)) {
-        try { await onCommitted?.(); } catch { /* Keep the confirmed upload if another workspace cannot refresh. */ }
-      }
+      renderConversion();
+      if (selected.some(item => item.status === 'uncertain')) conversionFeedback('部分上传结果尚未确认，请在 CPA 凭证列表核对。', 'error');
     } catch (error) {
-      if (sequence !== conversion.sequence || !current(epoch) || isDiscarded(error)) return;
-      if (error.outcomeUnknown || !error.status || ['idempotency_unknown', 'storage_unavailable'].includes(error.code)) {
-        for (const item of selected) Object.assign(item, { status: 'uncertain', code: 'commit_unknown', selected: false });
-        renderConversion(); conversionFeedback('上传结果尚未确认，请在 CPA 凭证列表核对，勿重复上传。');
-      } else conversionFeedback(conversionMessage(error.code));
-    } finally { if (sequence === conversion.sequence) { conversion.busy = false; updateConversionControls(); } }
+      if (!conversionCurrent(sequence, epoch) || isDiscarded(error)) return;
+      if (error.code !== 'management_offline' && (error.outcomeUnknown || !error.status || error.status >= 500 || ['idempotency_unknown', 'storage_unavailable'].includes(error.code))) {
+        for (const item of selected) Object.assign(item, unknown);
+        renderConversion(); conversionFeedback('上传结果尚未确认，请在 CPA 凭证列表核对，勿重复上传。', 'error');
+      } else conversionFeedback(conversionMessage(error.code), 'error');
+      return;
+    } finally {
+      if (sequence === conversion.sequence) { conversion.busy = ''; updateConversionControls(); }
+    }
+    if (selected.some(item => ['uploaded', 'uncertain'].includes(item.status))) {
+      try { await reload(); if (current(epoch)) await onCommitted?.(); }
+      catch { /* Refresh errors do not change confirmed per-row receipts. */ }
+    }
   });
 
   function importFeedback(message = '') {
@@ -412,6 +526,10 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     const previous = state.view, opener = surfaceOpener;
     surfaceOpener = null;
     state.view = 'accounts';
+    if (previous === 'tasks') {
+      clearSelectedDetail();
+      state.readErrors.delete('任务详情');
+    }
     for (const id of ['login-history-dialog', 'login-settings-dialog']) if ($(id).open) $(id).close();
     if (restoreFocus && state.open && connected()) {
       const fallback = $(previous === 'tasks' ? 'account-history-open' : 'account-settings-open');
@@ -422,14 +540,18 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
   function setView(view, opener = document.activeElement) {
     if (!['accounts', 'tasks', 'settings'].includes(view)) return;
     if (view === 'accounts') { closeAccountSurface(); return; }
-    if (state.view === view || !closeAccountSurface()) return;
+    if (!state.open || !connected() || state.view === view || !closeAccountSurface()) return;
     clearSecrets(); feedback(); closeAccountEditors();
     state.view = view;
     surfaceOpener = opener;
     $(view === 'tasks' ? 'login-history-dialog' : 'login-settings-dialog').showModal();
     if (view === 'settings' && !$('account-settings-note').textContent) $('account-settings-note').textContent = state.settingsDirty ? '有未保存更改，关闭后保留草稿' : '修改后点击保存生效';
     $(view === 'tasks' ? 'login-task-search' : 'account-default-proxy').focus({ preventScroll: true });
-    if (view === 'tasks') { state.revealJob = true; revealSelectedJob(); void loadTaskLogs(); }
+    if (view === 'tasks') {
+      state.revealJob = true;
+      revealSelectedJob();
+      void loadSelected().catch(() => { /* The detail view reports its own read error. */ });
+    }
     renderReadStatus();
     updateControls();
   }
@@ -666,7 +788,7 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
   function applyAccountJob(account, job) {
     Object.assign(account, { last_job_id: idOf(job), last_job_status: job.status || 'queued', last_job_created_at: job.created_at, last_job_automatic: !!job.automatic, last_job_phase: job.phase, last_job_intent: job.intent, last_job_error_code: job.error_code, last_job_error_stage: job.error_stage, last_job_error_reason: job.error_reason, last_job_auto_commit: !!job.auto_commit, last_job_credential_enabled: !!job.credential_enabled, last_job_action: job.action, last_job_security_status: job.security_status, last_job_totp_reset: !!job.totp_reset, last_job_devices_logged_out: !!job.devices_logged_out });
   }
-  function accountBusy() { return loading || !connected() || navigator.onLine === false || !state.accountsAvailable || !state.jobsAvailable || !state.bootstrapReady || state.busy.has('account'); }
+  function accountBusy() { return !state.open || loading || !connected() || navigator.onLine === false || !state.accountsAvailable || !state.jobsAvailable || !state.bootstrapReady || state.busy.has('account'); }
   function deleteUnavailable(account) {
     return !account || accountLoginPending(account) || !localStorageReady(state.vault || state.capabilities?.vault || {});
   }
@@ -714,6 +836,11 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     } else focusAccount(target.id, 'delete');
   }
   function updateAccountControls() {
+    const unavailable = !state.open || !connected();
+    $('login-workbench').toggleAttribute('data-initializing', unavailable || loading || !state.accountsLoaded);
+    $('account-history-open').disabled = unavailable;
+    $('account-settings-open').disabled = unavailable;
+    $('account-search').disabled = $('account-status-filter').disabled = unavailable || !state.accountsLoaded;
     $('account-convert-open').disabled = accountBusy() || !state.capabilities?.credential_conversion;
     const busy = accountBusy();
     for (const id of ['account-inspect', 'account-import-open', 'account-import-empty', 'account-settings-save', 'account-default-proxy', 'account-inspection-enabled', 'account-auto-enabled', 'account-interval', 'account-editor-save', 'account-login-start']) $(id).disabled = busy;
@@ -766,8 +893,8 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     });
     const pages = Math.max(1, Math.ceil(filteredAccounts().length / 20));
     updateSecurityControls();
-    $('account-page-prev').disabled = busy || state.accountPage === 0;
-    $('account-page-next').disabled = busy || state.accountPage >= pages - 1;
+    $('account-page-prev').disabled = unavailable || state.accountPage === 0;
+    $('account-page-next').disabled = unavailable || state.accountPage >= pages - 1;
   }
   function renderAccountSettings() {
     const settings = state.accountSettings;
@@ -801,10 +928,13 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     const filterLabels = { all:'全部状态', attention:'待处理', linked:'已绑定', active:'进行中' };
     for (const option of $('account-status-filter').options) option.textContent = `${filterLabels[option.value]} · ${state.accountsLoaded ? totals[option.value] : '—'}`;
     $('account-status-filter').value = state.accountFilter;
-    $('account-list-summary').textContent = !state.accountsLoaded ? '正在读取账号…' : !state.accountsAvailable ? '显示上次读取的账号。恢复连接后可继续操作。' : '';
-    $('account-list-summary').hidden = state.accountsLoaded && state.accountsAvailable;
-    $('account-table-wrap').classList.toggle('hidden', !filtered.length || !state.accountsLoaded);
-    $('account-empty').classList.toggle('hidden', count > 0 || !state.accountsLoaded);
+    let message = '';
+    if (state.readErrors.has('账号列表')) message = state.accountsLoaded ? '显示上次读取的账号，正在等待重新读取。' : '账号列表读取失败，正在等待重新读取。';
+    else if (state.readErrors.has('巡检设置')) message = '巡检设置暂未刷新，部分操作暂不可用。';
+    $('account-list-summary').textContent = message;
+    $('account-list-summary').hidden = !message;
+    $('account-table-wrap').classList.toggle('hidden', !filtered.length);
+    $('account-empty').classList.toggle('hidden', count > 0);
     $('account-no-results').hidden = !state.accountsLoaded || !count || filtered.length > 0;
     $('account-filter-count').textContent = state.accountQuery || state.accountFilter !== 'all' ? `${filtered.length} 个匹配` : '';
     $('account-page-label').textContent = filtered.length ? `${state.accountPage * 20 + 1}–${Math.min((state.accountPage + 1) * 20, filtered.length)} / ${filtered.length}` : '0 个账号';
@@ -859,7 +989,7 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
           </div></td>
           <td data-label="操作"><div class="account-row-actions">
             <div class="account-primary-actions">
-              <button type="button" class="account-action account-start-action" data-account-action="start" data-account-id="${id}" title="${escapeHTML(loginTitle)}" aria-busy="${loginBusy}" data-unavailable="${loginBlocked || !accountLoginAvailable() || !!account.credentials_error || securityProxyIssue(account)}" ${loginBlocked ? 'disabled' : ''}>${loginBusy ? '<span class="account-login-progress" aria-hidden="true"></span>' : accountIcon('login')}<span class="account-action-label">${escapeHTML(loginLabel)}</span></button>
+              <button type="button" class="account-action account-start-action" data-account-action="start" data-account-id="${id}" title="${escapeHTML(loginTitle)}" aria-busy="${loginBusy}" data-unavailable="${loginBlocked || !accountLoginAvailable() || !!account.credentials_error || securityProxyIssue(account)}" ${loginBlocked ? 'disabled' : ''}>${accountIcon('login')}<span class="account-action-label">${escapeHTML(loginLabel)}</span></button>
               <button type="button" class="account-action account-reset-action" data-account-action="reset_totp" data-account-id="${id}" title="重置 2FA，核对后执行" disabled>${accountIcon('reset')}<span class="account-action-label">重置 2FA</span></button>
               <button type="button" class="account-action account-delete-action" data-account-action="delete" data-account-id="${id}" aria-label="删除账号 ${escapeHTML(account.email || account.id)}" aria-haspopup="dialog" aria-controls="account-delete-confirm" title="删除账号资料，确认后执行；CPA 凭证仍保留" disabled>${accountIcon('delete')}<span class="account-action-label">删除</span></button>
             </div>
@@ -1134,26 +1264,48 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
       $(id).textContent = message;
     }
   }
-  async function loadAccounts() {
+  async function readAccountList() {
+    const data = await snapshotRead('/accounts');
+    if (!Array.isArray(data?.items) || !data.items.every(account => account && typeof account.id === 'string' && account.id && Number.isSafeInteger(account.revision))) {
+      throw new Error('管理接口返回了无效的账号列表。');
+    }
+    return data.items;
+  }
+  async function loadAccounts(initialAccounts) {
     const epoch = state.epoch;
     const sequence = ++state.accountRead;
-    const results = await Promise.allSettled([get('/accounts'), get('/accounts/settings')]);
-    if (!current(epoch) || sequence !== state.accountRead) return;
-    const [accounts, settings] = results;
-    const validAccounts = accounts.status === 'fulfilled' && Array.isArray(accounts.value.items) && accounts.value.items.every(account => account && typeof account.id === 'string' && account.id && Number.isSafeInteger(account.revision));
-    const validSettings = settings.status === 'fulfilled' && Number.isSafeInteger(settings.value?.revision) && typeof settings.value.inspection_enabled === 'boolean' && typeof settings.value.auto_relogin_enabled === 'boolean' && Number.isFinite(settings.value.interval_minutes);
-    if (validAccounts) {
-      state.accounts = accounts.value.items;
-      state.accountsLoaded = true;
-      setReadError('账号列表', null);
-    } else setReadError('账号列表', accounts.reason || new Error('invalid_accounts'));
-    if (validSettings) {
-      state.accountSettings = settings.value;
-      setReadError('巡检设置', null);
-      renderAccountSettings();
-    } else setReadError('巡检设置', settings.reason || new Error('invalid_settings'));
+    const isCurrent = () => current(epoch) && sequence === state.accountRead;
+    async function read(response, label, apply) {
+      try {
+        const data = await response;
+        if (!isCurrent()) return false;
+        apply(data);
+        setReadError(label, null);
+        return true;
+      } catch (error) {
+        if (isCurrent() && !isDiscarded(error)) {
+          state.accountsAvailable = false;
+          setReadError(label, error);
+        }
+        return false;
+      } finally {
+        if (isCurrent()) renderAccounts();
+      }
+    }
+    const [validAccounts, validSettings] = await Promise.all([
+      read(initialAccounts ?? readAccountList(), '账号列表', accounts => {
+        state.accounts = accounts;
+        state.accountsLoaded = true;
+      }),
+      read(snapshotRead('/accounts/settings'), '巡检设置', data => {
+        if (!Number.isSafeInteger(data?.revision) || typeof data.inspection_enabled !== 'boolean' || typeof data.auto_relogin_enabled !== 'boolean' || !Number.isFinite(data.interval_minutes)) throw new Error('invalid_settings');
+        state.accountSettings = data;
+        renderAccountSettings();
+      }),
+    ]);
+    if (!isCurrent()) return;
     state.accountsAvailable = validAccounts && validSettings;
-    renderAccounts();
+    updateAccountControls();
   }
   async function accountAction(action) {
     if (accountBusy()) return;
@@ -1379,12 +1531,16 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     renderTaskLogs();
     $('login-job-detail').querySelectorAll('[data-login-action]').forEach(button => { button.disabled = taskActionBlocked() || button.hasAttribute('data-plan-blocked'); });
   }
-  function selectJob(id) {
-    state.selected = id; state.job = null; state.candidate = null; state.detailSignature = ''; state.detailRead++;
-    state.revealJob = true;
-    taskLogs.read++; taskLogs.query = ''; taskLogs.filter = 'all'; taskLogs.follow = false; taskLogs.error = ''; taskLogs.updated = ''; taskLogs.signature = ''; taskLogs.loading = false; taskLogs.cycle = null;
-    $('login-job-detail').innerHTML = id ? '<p class="empty-line" role="status">正在读取任务…</p>' : '<p class="empty-line">请选择一条记录。</p>';
+  function clearSelectedDetail() {
+    state.job = null; state.candidate = null; state.detailSignature = ''; state.detailRead++;
+    taskLogs.signature = '';
+    $('login-job-detail').innerHTML = state.selected ? '<p class="empty-line" role="status">正在读取任务…</p>' : '<p class="empty-line">请选择一条记录。</p>';
     updateHistoryDelete();
+  }
+  function selectJob(id) {
+    state.selected = id; state.revealJob = true;
+    taskLogs.read++; taskLogs.query = ''; taskLogs.filter = 'all'; taskLogs.follow = false; taskLogs.error = ''; taskLogs.updated = ''; taskLogs.loading = false; taskLogs.cycle = null;
+    clearSelectedDetail();
   }
   function openHistoryDelete() {
     if ($('login-history-delete-open').disabled) return;
@@ -1476,6 +1632,7 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
       <div class="account-log-footer"><span data-task-log-update role="status"></span><button type="button" data-task-log-action="follow" aria-pressed="false">跟随最新</button></div>
       <details class="login-task-diagnostics"><summary>任务诊断信息</summary><dl class="login-diagnostic-facts" data-task-diagnostic-facts></dl><p class="field-note">报告包含全部已读取事件，不受筛选影响；不含密码、2FA 密钥或令牌。</p></details>
     </section>`);
+    $('login-job-detail').querySelector('[data-task-log-search]').value = taskLogs.query;
     $('login-job-detail').querySelector('.login-task-log-viewport').addEventListener('scroll', event => {
       const viewport = event.currentTarget;
       if (taskLogs.follow && viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop > 30) {
@@ -1576,7 +1733,7 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     }
   }
   async function loadSelected() {
-    if (!state.selected) return;
+    if (state.view !== 'tasks' || !state.selected) return;
     const epoch = state.epoch;
     const sequence = ++state.detailRead;
     const selected = state.selected;
@@ -1610,7 +1767,7 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
   async function refreshBootstrap() {
     const epoch = state.epoch;
     try {
-      const [capabilities, targets, vault] = await Promise.all([get('/capabilities'), get('/targets'), get('/vault/status')]);
+      const [capabilities, targets, vault] = await Promise.all([snapshotRead('/capabilities'), snapshotRead('/targets'), snapshotRead('/vault/status')]);
       if (!current(epoch)) return;
       if (typeof capabilities?.available !== 'boolean' || !capabilities.methods || !Array.isArray(targets?.items) || typeof vault?.available !== 'boolean') throw new Error('invalid_capabilities');
       state.capabilities = capabilities; state.targets = targets.items; state.vault = vault;
@@ -1620,32 +1777,40 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
       state.bootstrapReady = false; setReadError('登录服务', error);
     }
   }
-  async function refreshSnapshot() {
+  async function refreshSnapshot(initialAccounts) {
     const epoch = state.epoch;
     const sequence = ++state.jobsRead;
+    const detailReadAtStart = state.detailRead;
     const previous = new Map(state.jobs.map(job => [idOf(job), job.status]));
     state.readErrors.delete('网络连接'); state.readErrors.delete('登录状态');
-    const reads = [loadAccounts(), (async () => {
+    const reads = [loadAccounts(initialAccounts), (async () => {
+      let selectedFirstJob = false;
       try {
-        const result = await get('/jobs?limit=200');
+        const result = await snapshotRead('/jobs?limit=200');
         if (!current(epoch) || sequence !== state.jobsRead) return;
         if (!Array.isArray(result.items) || result.items.some(job => !idOf(job) || typeof job.status !== 'string')) throw new Error('invalid_jobs');
         state.jobs = result.items; taskList.hasMore = !!result.has_more; state.jobsAvailable = true; setReadError('任务列表', null);
         if (!state.selected) {
           const next = filterTaskJobs(state.jobs, taskList.filter, taskList.query)[0];
-          if (next) selectJob(idOf(next));
+          if (next) {
+            selectJob(idOf(next));
+            selectedFirstJob = true;
+          }
         }
         renderJobs();
       } catch (error) {
-        if (!current(epoch) || isDiscarded(error)) return;
+        if (!current(epoch) || sequence !== state.jobsRead || isDiscarded(error)) return;
         state.jobsAvailable = false; setReadError('任务列表', error);
+      }
+      if (state.view === 'tasks') {
+        // Opening history during this poll starts a detail read. Refresh again if the list is newer.
+        const latest = state.jobs.find(job => idOf(job) === state.selected);
+        if (selectedFirstJob || state.detailRead === detailReadAtStart || latest?.revision > state.job?.revision) await loadSelected();
       }
     })()];
     if (!state.bootstrapReady) reads.push(refreshBootstrap());
     await Promise.allSettled(reads);
     if (!current(epoch) || sequence !== state.jobsRead) return;
-    try { await loadSelected(); }
-    catch { /* The selected request owns its scoped read error. */ }
     void loadAccountLogs();
     if (!current(epoch) || sequence !== state.jobsRead) return;
     renderAccounts();
@@ -1656,11 +1821,12 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
       const enabled = completed.every(job => job.credential_enabled);
       feedback(`${completed.length === 1 ? completed[0].email || '账号' : `${completed.length} 个账号`}${completed.every(isSecurityJob) ? '安全操作与重新授权完成' : '登录完成'}，${enabled ? '凭证已保存到 CPA 并启用' : '凭证已保存到 CPA'}。`);
       try { await onCommitted?.(); } catch { /* Keep the completed result if other workspaces are unavailable. */ }
+      if (!current(epoch) || sequence !== state.jobsRead) return;
     }
-    if (!state.readErrors.size) state.lastReadAt = new Date().toISOString();
     state.readFailures = state.readErrors.size ? Math.min(3, state.readFailures + 1) : 0;
+    state.nextReadAt = state.readErrors.size ? 0 : performance.now() + pollDelay();
   }
-  function reload() {
+  function reload(initialAccounts) {
     if (!state.open || !connected()) return Promise.resolve();
     if (refreshCycle?.epoch === state.epoch) { refreshCycle.pending = true; return refreshCycle.promise; }
     const cycle = { epoch: state.epoch, pending: false, promise: null };
@@ -1668,7 +1834,7 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     clearTimeout(state.timer);
     cycle.promise = (async () => {
       try {
-        do { cycle.pending = false; await refreshSnapshot(); }
+        do { cycle.pending = false; await refreshSnapshot(initialAccounts); initialAccounts = undefined; }
         while (cycle.pending && current(cycle.epoch));
       } catch (error) {
         if (current(cycle.epoch)) setReadError('登录状态', error);
@@ -1680,43 +1846,43 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     renderReadStatus();
     return cycle.promise;
   }
-  function schedule() {
+  function pollDelay() {
+    return state.readFailures ? Math.min(30000, 3000 * 2 ** (state.readFailures - 1)) : state.jobs.some(job => activeStates.has(job.status)) ? 2000 : 6000;
+  }
+  function schedule(delay = pollDelay()) {
     clearTimeout(state.timer);
     if (!state.open || !connected() || document.hidden || navigator.onLine === false) return;
-    const delay = state.readFailures ? Math.min(30000, 3000 * 2 ** (state.readFailures - 1)) : state.jobs.some(job => activeStates.has(job.status)) ? 2000 : 6000;
     state.timer = setTimeout(() => { reload(); }, delay);
   }
-  function showDisconnected() {
-    $('login-disconnected').classList.remove('hidden');
-    $('login-workbench').classList.add('hidden');
-  }
-  async function open({ focus = true } = {}) {
-    if (state.open) return;
-    if (!connected()) {
-      state.epoch++;
-      clearTimeout(state.timer);
-      showDisconnected();
+  function resumeReads(initialAccounts) {
+    if (!state.open || !connected()) return;
+    if (refreshCycle?.epoch === state.epoch) return refreshCycle.promise;
+    const remaining = state.nextReadAt - performance.now();
+    if (!initialAccounts && remaining > 0 && state.accountsAvailable && state.jobsAvailable && state.bootstrapReady && !state.readErrors.size) {
+      updateControls();
+      schedule(remaining);
       return;
     }
-    state.open = true;
-    const epoch = ++state.epoch;
-    loading = true;
-    state.capabilities = null;
-    clearTimeout(state.timer);
-    $('login-disconnected').classList.add('hidden');
-    $('login-workbench').classList.remove('hidden');
-    if (focus) $('login-title').focus({ preventScroll: true });
-    feedback();
-    updateControls();
     state.bootstrapReady = false;
     state.jobsAvailable = false;
     state.accountsAvailable = false;
-    state.readErrors.clear();
-    try { await reload(); }
+    updateControls();
+    return reload(initialAccounts);
+  }
+  async function open({ focus = true, initialAccounts } = {}) {
+    if (state.open || !connected()) return;
+    state.open = true;
+    const epoch = ++state.epoch;
+    loading = !state.accountsLoaded;
+    clearTimeout(state.timer);
+    if (focus) $('login-title').focus({ preventScroll: true });
+    feedback();
+    try { await resumeReads(initialAccounts); }
     finally { if (current(epoch)) { loading = false; updateControls(); renderReadStatus(); } }
   }
   function close({ reset = false, focus = true } = {}) {
     if (!state.open && !reset) return;
+    if (state.view !== 'accounts' || state.busy.size || conversion.busy || refreshCycle?.epoch === state.epoch) state.nextReadAt = 0;
     state.open = false;
     loading = false;
     state.epoch++;
@@ -1732,12 +1898,12 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     state.jobSignature = ''; state.revealJob = false;
     closeAccountEditors();
     closeAccountSurface(false, true);
-    $('login-workbench').classList.add('hidden');
-    $('login-disconnected').classList.toggle('hidden', connected());
     $('login-job-detail').innerHTML = '<p class="empty-line">选择任务，查看进度和结果。</p>';
     if (reset) {
+      snapshotReads.clear();
+      snapshotReads = new Map();
       state.capabilities = null; state.targets = []; state.jobs = []; state.selected = ''; state.vault = null;
-      state.accounts = []; state.accountsLoaded = false; state.readErrors.clear(); state.lastReadAt = ''; state.readFailures = 0; state.bootstrapReady = false; state.jobsAvailable = false; state.accountSettings = null; state.accountsAvailable = false; state.accountSignature = ''; state.settingsDirty = false; state.settingsDraftRevision = null; taskList.query = ''; taskList.filter = 'all'; $('login-task-search').value = ''; state.accountQuery = ''; state.accountFilter = 'all'; state.accountPage = 0; $('account-search').value = '';
+      state.accounts = []; state.accountsLoaded = false; state.readErrors.clear(); state.nextReadAt = 0; state.readFailures = 0; state.bootstrapReady = false; state.jobsAvailable = false; state.accountSettings = null; state.accountsAvailable = false; state.accountSignature = ''; state.settingsDirty = false; state.settingsDraftRevision = null; taskList.query = ''; taskList.filter = 'all'; $('login-task-search').value = ''; state.accountQuery = ''; state.accountFilter = 'all'; state.accountPage = 0; $('account-search').value = '';
       $('account-list').replaceChildren(); $('account-settings-form').reset(); $('account-settings-note').textContent = ''; renderAccountSettings(); renderAccounts();
       renderJobs(); feedback(); renderReadStatus();
     }
@@ -1853,9 +2019,9 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
   }
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) clearTimeout(state.timer);
-    else if (state.open && connected()) reload();
+    else resumeReads();
   });
-  addEventListener('online', () => { if (state.open && connected()) reload(); });
+  addEventListener('online', () => { if (!document.hidden) resumeReads(); });
   addEventListener('offline', () => { clearTimeout(state.timer); if (state.open && connected()) setReadError('网络连接', new Error('offline')); });
   for (const id of ['account-security-logout', 'account-security-reauthorize', 'account-security-upload']) $(id).addEventListener('change', () => {
     if (!securityAction) return;
@@ -2050,12 +2216,10 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
       return;
     }
     if (action === 'task' || action === 'upload') {
-      const epoch = state.epoch;
       taskList.query = ''; taskList.filter = 'all'; $('login-task-search').value = '';
       selectJob(action === 'upload' && account.pending_upload_job_id ? account.pending_upload_job_id : account.last_job_id);
       const opener = [...$('account-list').querySelectorAll('[data-account-action="more"]')].find(node => node.dataset.accountId === account.id);
       setView('tasks', action === 'upload' ? button : opener); renderJobs();
-      try { await loadSelected(); } catch (error) { if (current(epoch)) fail(error); }
       return;
     }
     if (action === 'start') openAccountLogin(account);
@@ -2097,9 +2261,6 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
     }
     void startAccount(account, target.targetID, upload);
   });
-  $('login-connect').addEventListener('click', () => {
-    document.getElementById('connection-dialog').showModal();
-  });
   $('login-jobs').addEventListener('click', async event => {
     const button = event.target.closest('[data-login-job]');
     if (!button) return;
@@ -2133,7 +2294,7 @@ export function createLoginWorkbench({ request, connected, onCommitted }) {
       if (taskLogs.follow) viewport.scrollTop = viewport.scrollHeight;
     } else if (['copy', 'export'].includes(action)) void exportTaskLog(action);
   });
-  return { open, close, refresh: () => { state.bootstrapReady = false; return reload(); }, reset: () => close({ reset: true, focus: false }) };
+  return { open, close, readInitialAccounts: readAccountList, refresh: () => { state.bootstrapReady = false; return reload(); }, reset: () => close({ reset: true, focus: false }) };
 }
 
 function phaseLabel(phase) {

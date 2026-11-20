@@ -9,7 +9,7 @@ func catalogMissingModelAction(rule *Rule, target Target, snapshot CredentialSna
 		(rule.AuthID == "" || rule.AuthID == target.AuthID && rule.Provider == target.Provider) &&
 		detail.Code == "missing_model" && detail.Model != "" && contains(rule.Models, detail.Model) &&
 		target.catalogVerified && len(target.Models) > 0 && ruleSubjectEnabled(target) && !contains(target.Models, detail.Model) &&
-		!snapshot.Disabled && snapshot.Fingerprint != "" && !snapshot.UpdatedAt.IsZero() &&
+		!snapshot.Disabled && snapshot.Fingerprint != "" && (!snapshot.UpdatedAt.IsZero() || snapshot.ProviderMechanism != "") &&
 		snapshot.AuthID == target.AuthID && snapshot.AuthIndex == target.AuthIndex && snapshot.Provider == target.Provider
 }
 

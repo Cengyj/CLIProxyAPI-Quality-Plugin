@@ -102,7 +102,7 @@ func TestConversionBoundsDuplicatesAndExpiry(t *testing.T) {
 	d := fixture(t)
 	row := d.String()
 	r, err := Convert([]byte("["+row+","+row+"]"), time.Unix(1900000000, 0))
-	if err != nil || r.Ready != 1 || r.Items[1].Error != "duplicate_identity" {
+	if err != nil || r.Ready != 1 || r.Items[1].Error != "conversion_duplicate_source" || r.Items[1].DuplicateOf == nil || *r.Items[1].DuplicateOf != 0 || r.Items[1].Credential != nil {
 		t.Fatal("duplicate identity accepted")
 	}
 	if err := d.Set("credentials.expires_at", 1000); err != nil {

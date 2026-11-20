@@ -32,6 +32,7 @@ async function run() {
     await context.route('**/*', route => {
       const req = route.request(), u = new URL(req.url());
       if (u.origin !== origin) { external.push(u.origin); return route.abort(); }
+      if (req.method() === 'POST' && u.pathname.endsWith('/rules/scope-preview')) return route.continue();
       if (req.method() !== 'GET') { writes.push(`${req.method()} ${u.pathname}`); return route.abort(); }
       if (u.pathname.endsWith('/login/accounts/detail')) accountDetailReads.push(u.searchParams.get('id'));
       return route.continue();
@@ -76,7 +77,7 @@ async function run() {
       report.screenshots.push(`${name}.png`);
     };
     await page.goto(origin);
-    await visible('#login-disconnected');
+    await visible('#connection-open');
     assert.equal(await find('[data-page][aria-current=page]').getAttribute('data-page'), 'login');
     await click('#login-connect'); assert.equal(await find('#connection-build').innerText(), `UI ${version}`);
     await find('#management-key').fill(key);

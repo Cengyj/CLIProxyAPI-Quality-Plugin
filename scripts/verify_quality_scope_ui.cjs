@@ -18,10 +18,10 @@ async function main() {
     assert.equal(info.pid,child.pid); assert.notEqual(new URL(origin).port,'8317');
     browser = await chromium.launch({executablePath:process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
     const context = await browser.newContext({viewport:{width:1440,height:900},timezoneId:'America/Los_Angeles',reducedMotion:'reduce'});
-    const directory = Array.from({length:123},(_,i) => ({auth_id:`fixture-${i}`,auth_index:`index-${i}`,provider:i%2?'codex':'offline',models:[i===122?'new-only':'shared'],runtime_status:'active',effective_available:true}));
+    const directory = Array.from({length:123},(_,i) => ({auth_id:`fixture-${i}`,auth_index:`index-${i}`,provider:i%2?'codex':'offline',object_type:'oauth',models:[i===122?'new-only':'shared'],runtime_status:'active',effective_available:true}));
     const rules = [], children = [], writes = [], unexpected = [], errors = [], readOffsets = new Set();
     directory[122].email = 'scope@example.test';
-    let uncertain = false, failActivity = false, previewReads = 0, detailGate, failDetail = false;
+    let uncertain = false, failActivity = false, previewReads = 0, dispatchPreviews = 0, detailGate, failDetail = false;
     const reads = [];
     await context.route('**/*', async route => {
       const req=route.request(), u=new URL(req.url()), p=u.pathname.slice(prefix.length);
@@ -42,7 +42,13 @@ async function main() {
         if(p==='/runs' && u.searchParams.get('source')==='scheduled_probe') { if(failActivity) return route.fulfill({status:503,json:{error:{message:'synthetic read failure'}}}); return range(children.filter(r=>!u.searchParams.has('scope_batch_id')||u.searchParams.get('scope_batch_id')===r.config.scope_batch_id).filter(r=>!u.searchParams.has('rule_id')||u.searchParams.get('rule_id')===r.config.rule_id)); }
         return route.continue();
       }
-      const b=req.postDataJSON();writes.push({p,method:req.method(),b});
+      const b=req.postDataJSON();
+      if(p==='/rules/scope-preview' && req.method()==='POST') {
+        dispatchPreviews++;
+        const oauth=b.target_scope==='single'?directory.filter(t=>t.auth_id===b.auth_id).length:directory.length;
+        return route.fulfill({json:{verified:true,candidates:{oauth,provider:0},count:oauth,skipped:0,recovery_count:0,skip_details:[]}});
+      }
+      writes.push({p,method:req.method(),b});
       if(p==='/rules/run-history' && req.method()==='DELETE') {
         const deleted=children.length; children.length=0;
         return route.fulfill({json:{deleted,kept:0}});
@@ -65,6 +71,11 @@ async function main() {
         Object.assign(children[0], {action_status:'observe_only', samples:[{model:'shared', index:0, execution_status:'completed', quality_verdict:'correct', comparable:false, output:'21', reason:'exact answer', evidence:{path:'cpa_management_probe',reason:'management_probe_not_business_payload'}}]});
         children[1].config.auth_id = directory[122].auth_id;
         children[1].samples = [{model:'shared', index:0, execution_status:'completed', quality_verdict:'incorrect', output:'22'}];
+        const correctSample = children[0].samples[0];
+        children[2].config.samples = 2;
+        children[2].samples = [correctSample, { ...correctSample }];
+        children[3].config.samples = 1;
+        children[3].samples = [{ ...correctSample, error: 'fixture request failed', quality_verdict: 'incorrect' }];
         rules[0].last_scope_batch='test-batch';return route.fulfill({status:202,json:{count:23,skipped:100,scope_batch_id:'test-batch'}});
       }
       unexpected.push(p);return route.abort();
@@ -96,7 +107,7 @@ async function main() {
     assert.deepEqual(await radios.evaluateAll(nodes=>nodes.map(n=>n.value)),efforts);
     assert(await el('#rule-target').isDisabled());assert(!(await el('#rule-target').evaluate(e=>e.required)));
     assert.equal(await el('#rule-form [role=tab],#rule-form [role=tabpanel],#rule-schedule-toggle,[data-rule-pause]').count(),0);
-    assert.equal(await el('#rule-form input[type=checkbox]:visible').count(),1);
+    assert.equal(await el('#rule-form input[type=checkbox]:visible').count(),3);
     assert.equal(await el('#rule-form').getByLabel(/^规则名称/).count(),1);
     await checkRuleLayout(el('#rule-dialog'));
     assert(await el('#rule-cron').isVisible());assert.equal(await el('#rule-cron').inputValue(),defaultCron);
@@ -121,7 +132,7 @@ async function main() {
     await cleanDraft();assert.equal(writes.length,0);
     const selected = () => el('#rule-model-selection code').allTextContents();
     const quick = id => el(`[data-add-model="${id}"]`);
-    const defaults = ['gpt-6-astra','gpt-6.1-sol','gpt-5.6-sol'];
+    const defaults = ['gpt-6.2-sol','gpt-6-astra','gpt-6.1-sol'];
     assert.deepEqual(await selected(),[defaults[0]]);assert.deepEqual(await el('#rule-model-shortcuts code').allTextContents(),defaults);
     // Capture the initial composer and its dense/empty states without changing saved rules.
     for (const width of [1440,390,320]) {
@@ -167,8 +178,8 @@ async function main() {
     await el('#rule-question').selectOption('logic-candy');await el('#rule-judge-mode').selectOption('deterministic');await cleanDraft();
         await el('#rule-name').fill('指向字段的校验');await el('#rule-scope-single').check();await click('#rule-form button[type=submit]');await focused('rule-target');assert(await el('#rule-model-title').isVisible());assert.equal(writes.length,0);
     await el('#rule-scope-all').check();await el('#rule-name').fill('');
-    assert(await quick(defaults[0]).isDisabled());assert.match(await el('#rule-scope-note').innerText(),/当前范围 123 个凭证/);
-    await el('#rule-scope-all').focus();await page.keyboard.press('ArrowRight');assert(await el('#rule-scope-directory').isChecked());assert(await el('#rule-target-field').isHidden());await text('#rule-scope-note','人工禁用');await page.keyboard.press('ArrowRight');assert(await el('#rule-scope-single').isChecked());await el('#rule-scope-all').check();
+    assert(await quick(defaults[0]).isDisabled());await text('#rule-scope-note','OAuth 账户 123 个');
+    await el('#rule-scope-all').focus();await page.keyboard.press('ArrowRight');assert(await el('#rule-scope-directory').isChecked());assert(await el('#rule-target-field').isHidden());await text('#rule-scope-note','OAuth 账户 123 个');await page.keyboard.press('ArrowRight');assert(await el('#rule-scope-single').isChecked());await el('#rule-scope-all').check();
     await click('#rule-shortcut-toggle');await el('#rule-shortcut-draft').fill('local-one，local-two\nlocal-one；gpt-6-astra');await click('#rule-shortcut-save');
     assert.deepEqual(await el('#rule-custom-shortcuts code').allTextContents(),['local-one','local-two']);await cleanDraft();
     await click('#rule-shortcut-toggle');await quick(defaults[1]).press('Enter');await quick(defaults[2]).click();await quick('local-two').click();
@@ -179,6 +190,7 @@ async function main() {
     await el('#rule-model-catalog').selectOption('new-only');assert.doesNotMatch(await el('#rule-scope-note').innerText(),/暂无匹配/);
     await el('#rule-models').fill('shared\nnew-only，shared;shared');await el('#rule-models').press('Enter');assert.deepEqual(await selected(),['new-only','shared']);
     await el('#rule-name').fill('日常观察');await el('#rule-samples').fill('2');await pick('max').check();await configOnly();await text('#rule-model-count','已选 2');
+    for (const select of await el('#rule-upstream-options select').all()) await select.selectOption('observe_only');
     await el('#rule-timer').check();await text('#rule-schedule-note','仅运行本条规则');await el('#rule-timer').uncheck();
     await el('#rule-cron').fill('');assert(await el('#rule-cron').evaluate(n=>n.validity.valueMissing));await click('#rule-form button[type=submit]');await focused('rule-cron');assert(await el('#rule-plan-title').isVisible());assert.equal(writes.length,0);
     await el('#rule-cron').fill('* * * *');await click('#rule-form button[type=submit]');await text('#rule-cron-error','五段 Cron');assert.equal(writes.length,0);await el('#rule-cron').fill(defaultCron);
@@ -205,30 +217,37 @@ async function main() {
     }
     await click('#rule-form button[type=submit]'); await el('[data-rule-run="rule-1"]').waitFor();assert.equal(writes.length,1);
     assert.equal(rules[0].target_scope,'all_enabled');assert(!rules[0].auth_id && !rules[0].provider);assert.equal(rules[0].parameters.max_tokens,undefined);assert.deepEqual(rules[0].models,['new-only','shared']);assert.equal(rules[0].parameters.reasoning_effort,'max');
-    await text('#rules-list summary','请求强度 max');await click('[data-rule-edit="rule-1"]');assert(await pick('max').isChecked());assert(await el('#rule-legacy-effort').isHidden());await click('#rule-form .editor-footer [data-close]');
+    assert.equal(await el('#rules-list summary').count(),0);await click('[data-rule-edit="rule-1"]');assert(await pick('max').isChecked());assert(await el('#rule-legacy-effort').isHidden());await click('#rule-form .editor-footer [data-close]');
     assert.equal(rules[0].cron,defaultCron);assert.equal(rules[0].max_results,100);assert.equal(rules[0].timer_active,false);assert(!['interval_seconds','timezone','retention_days','auth_id','provider'].some(k=>k in writes[0].b));assert(!('temperature' in writes[0].b.parameters));
-    await click('#rule-new');await el('#rule-scope-single').check();await el('#rule-target').selectOption('fixture-122');await text('#rule-scope-note','未注册部分已选模型');await click('[data-remove-model="gpt-6-astra"]');await el('#rule-models').fill('new-only');await el('#rule-name').fill('指定凭证');await click('#rule-form button[type=submit]');await el('[data-rule-run="rule-2"]').waitFor();assert.equal(writes.length,2);assert.equal(rules[1].target_scope,'single');assert.equal(rules[1].auth_id,'fixture-122');assert.deepEqual(rules[1].models,['new-only']);assert.equal(rules[1].parameters.reasoning_effort,'high');
+    await click('#rule-new');await el('#rule-scope-single').check();await el('#rule-target').selectOption('fixture-122');await text('#rule-scope-note','OAuth 账户 1 个');await click('[data-remove-model="gpt-6.2-sol"]');await el('#rule-models').fill('new-only');await el('#rule-name').fill('指定凭证');await click('#rule-form button[type=submit]');await el('[data-rule-run="rule-2"]').waitFor();assert.equal(writes.length,2);assert.equal(rules[1].target_scope,'single');assert.equal(rules[1].auth_id,'fixture-122');assert.deepEqual(rules[1].models,['new-only']);assert.equal(rules[1].parameters.reasoning_effort,'high');
     for(const on of [true,false]) {
       await click('[data-rule-edit="rule-2"]');assert.equal(await el('#rule-timer').isChecked(),!on);
       await el('#rule-timer').setChecked(on);await click('#rule-form button[type=submit]');await el('#rule-dialog').waitFor({state:'hidden'});
       assert.equal(writes.at(-1).b.activation,on?'start':'stop');assert.equal(rules[0].timer_active,false);
-      await text('[data-key="rule:rule-2"] .rule-state',on?'运行中':'已暂停');
+      await text('[data-key="rule:rule-2"] .rule-state',on?'定时开启':'仅手动');
     }
     for(const on of [true,false]) {
       const toggle=el('[data-rule-timer="rule-2"]');
       await toggle.focus();await page.keyboard.press('Space');
       await el(`[data-rule-timer="rule-2"][aria-checked="${on}"]:enabled`).waitFor();
-      assert.equal(await toggle.innerText(),on?'运行中':'已暂停');
+      assert.equal(await toggle.innerText(),on?'定时开启':'仅手动');
       assert.equal(rules[0].timer_active,false);
       assert.equal(writes.at(-1).p,'/rules/timer');
       await click('[data-rule-edit="rule-2"]');assert.equal(await el('#rule-timer').isChecked(),on);
       await click('#rule-form .editor-footer [data-close]');
     }
-    await click('[data-rule-run="rule-1"]');await text('#action-description','最多计划 492 份目标回答'); await click('#action-cancel');assert(!writes.some(w=>w.p==='/rules/run'));
+    assert.equal(dispatchPreviews,0);
+    await click('[data-rule-run="rule-1"]');await text('#action-description','最多计划 492 份目标回答'); await click('#action-cancel');assert(!writes.some(w=>w.p==='/rules/run'));assert.equal(dispatchPreviews,1);
     await click('[data-rule-run="rule-1"]');await click('#action-confirm');await text('#ops-batch-summary','1–20 / 23');assert.equal(await el('#operations-history [data-run]').count(),20);
     await text('#operations-history','请求强度 low');
     await text('#operations-history','snapshot@example.test');
     await text('#operations-history','scope@example.test');
+    const runResult = index => el(`[data-key="run:run-${index}"] .quality-result`);
+    assert.equal(await runResult(0).locator('.history-ratio').innerText(), '1 / 1');
+    assert.equal(await runResult(1).locator('.history-ratio').count(), 0, 'Missing sample plan cannot establish a whole-round score');
+    assert.equal(await runResult(2).locator('.history-ratio').count(), 0, 'Duplicate records cannot cover a missing slot');
+    assert.match(await runResult(3).innerText(), /执行失败 1/);
+    assert.doesNotMatch(await runResult(3).innerText(), /答错|0 \/ 1/);
     await text('[data-key="rule:rule-2"] .quality-rule-scope','scope@example.test');
     assert.equal(await el('#rule-target option[value="fixture-122"]').textContent(),'scope@example.test');
     await el('#rule-search').fill('scope@example.test');assert.equal(await el('.quality-rule').count(),1);await el('#rule-search').fill('');
@@ -241,7 +260,7 @@ async function main() {
     await text('#ops-batch-summary','本批次 21–23 / 23');
     assert(await el('#operations-history [data-run="run-21"]').evaluate(node => node === document.activeElement));
     await el('#ops-activity').screenshot({path:path.join(out,'scope-batch-390.png')});await click('#ops-batch-prev');await text('#ops-batch-summary','1–20 / 23');await click('#ops-batch-clear');await el('#ops-batch-bar').waitFor({state:'hidden'});
-    await click('[data-rule-batch="test-batch"]');await text('#ops-batch-summary','1–20 / 23');
+    await click('[data-rule-select="rule-1"]');await click('#ops-rule-context [data-rule-batch="test-batch"]');await text('#ops-batch-summary','1–20 / 23');
     await page.setViewportSize({width:1440,height:900});await el('#ops-activity').screenshot({path:path.join(out,'scope-batch-1440.png')});
     // Rule selection filters on the server before pagination; all history is reachable.
     await click('#ops-batch-clear');await text('#ops-batch-summary','1–20 / 23');await click('#ops-batch-next');await text('#ops-batch-summary','21–23 / 23');
@@ -305,10 +324,13 @@ async function main() {
     assert.equal(writes.at(-1).b.action,'disable_credential');assert.equal(writes.at(-1).b.auto_restore,true);
     const handlingRule=rules.at(-1);await click(`[data-rule-edit="${handlingRule.id}"]`);
     assert(await handling('disable_credential').isChecked());assert(await el('#rule-auto-restore').isChecked());
-    await el('#rule-scope-directory').check();await text('#rule-restore-detail','人工停用');await text('#rule-scope-note','待复检');await click('#rule-form button[type=submit]');await el('#rule-dialog').waitFor({state:'hidden'});
+    await el('#rule-scope-directory').check();await text('#rule-restore-detail','人工停用');
+    assert.equal(await el('#rule-scope-note').innerText(),'候选对象 · OAuth 账户 0 个 · AI 提供商 0 条路由。');
+    await click('#rule-form button[type=submit]');await el('#rule-dialog').waitFor({state:'hidden'});
     assert.equal(writes.at(-1).b.target_scope,'all_credentials');assert(!writes.at(-1).b.auth_id);assert(writes.at(-1).b.auto_restore);
     handlingRule.last_manual_skips=['operator-fixture'];await click('#refresh');
-    await text(`[data-key="rule:${handlingRule.id}"] summary`,'上轮跳过 1 个手动禁用凭证');
+    await click(`[data-rule-select="${handlingRule.id}"]`);await text('#ops-rule-context summary','上轮跳过 1 个手动禁用凭证');
+    assert.doesNotMatch(await el('#rules-list').textContent(),/上轮跳过|operator-fixture/);
     await click(`[data-rule-edit="${handlingRule.id}"]`);assert(await el('#rule-scope-directory').isChecked());assert(await el('#rule-auto-restore').isChecked());
     await handling('delete_credential').check();await click('#rule-form button[type=submit]');await el('#rule-dialog').waitFor({state:'hidden'});
     assert.equal(writes.at(-1).b.action,'delete_credential');assert.equal(writes.at(-1).b.auto_restore,false);
@@ -368,6 +390,7 @@ async function main() {
     assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
     fs.writeFileSync(path.join(out,'quality-workspace.json'),JSON.stringify({ui_version,checks:workspaceChecks,sticky_table_header:true,fixed_pagination:true,all_rules_selection:true,real_writes:0},null,2)+'\n');
     fs.writeFileSync(path.join(out,'quality-scope.json'),JSON.stringify({ui_version,widths,reference_defaults:true,persistent_shortcuts:true,multi_model:true,empty_directory:true,legacy_round_trip:true,keyboard_scope:true,limit_validation:true,uncertain_no_retry:true,paged_batch:true,no_global_write:true,single_server_cron:true,explicit_conversion:true,zoned_list:true,rule_efforts:efforts,per_account_result_limit:true,effort_keyboard_and_roundtrip:true,requested_effort_in_history:true,intersection_estimate_at_execution:true,no_editor_estimate:true,exact_cron_label:true,layout_checks:layouts,lazy_question_reference:true,continuous_sheet:true,modal:true,rule_filter:true,server_history_filter:true,all_history_pagination:true,read_error_preserves_rows:true,escape_discard_focus:true,single_timer:true,inline_validation:true,layouts:layouts.length,fixture_writes:writes.length,real_writes:0},null,2)+'\n');
+    assert.equal(dispatchPreviews,3);
     console.log('Quality rule editor: reference defaults, keyboard, custom shortcuts, batch input, multi-model payloads, original rules, empty catalog, budgets, scheduling and paged results passed.');
   } finally { if(browser) await browser.close();child.kill();await exit; }
 }

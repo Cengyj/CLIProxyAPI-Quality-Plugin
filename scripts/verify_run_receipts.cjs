@@ -41,6 +41,7 @@ async function main() {
         if (p.endsWith('/runs') && req.method() === 'POST') {
           const config = req.postDataJSON();
           posts.push(config.idempotency_key);
+          if (control.blockReason) return route.fulfill({ status: 409, json: { code: 'blocked', error: control.blockReason } });
           if (control.dropBeforeAdmission) { control.dropBeforeAdmission = false; return route.abort('connectionfailed'); }
           let run = tasks.get(config.idempotency_key);
           if (!run) {
@@ -56,6 +57,12 @@ async function main() {
           return route.fulfill({ json: {} });
         }
         assert.equal(req.method(), 'GET');
+        if (p.endsWith('/plugins/model-quality/targets') && control.targetState) {
+          const data = await (await route.fetch()).json();
+          const target = data.items.find(row => row.auth_id === 'fixture-quality-primary');
+          Object.assign(target, control.targetState);
+          return route.fulfill({ json: data });
+        }
         if (p.endsWith('/runs/detail')) {
           const id = u.searchParams.get('id'), key = u.searchParams.get('idempotency_key');
           reads.push(id || 'by-receipt');
@@ -114,6 +121,75 @@ async function main() {
       const file = await pending;
       return JSON.parse(await fs.readFile(await file.path(), 'utf8')).id;
     };
+    await scenario('manual_error_policy', async ({ page, control, posts, tasks }) => {
+      const history = { code: 'error_policy_disabled', model: 'former-model', reason: 'CPA 注册目录缺少所选模型' };
+      const manualModel = 'test-model-9,manual-alias';
+      const models = ['fixture-reasoner', ...Array.from({ length: 13 }, (_, i) => 'test-model-' + (i + 1))];
+      models[9] = manualModel;
+      const changeTarget = async state => {
+        control.targetState = { models, ...state };
+        await page.click('#refresh');
+        await page.waitForSelector('#refresh:not([aria-busy="true"])');
+      };
+      const summary = page.locator('#target-summary');
+      const setup = page.locator('#manual-setup');
+      const policyText = /错误策略|质量运维|处置|上次.*停用|former-model|开始测试时将核对|CPA 注册目录缺少所选模型/;
+      await changeTarget({});
+      assert.deepEqual(new Set(await page.locator('#models > option').evaluateAll(options => options.map(o => o.value))), new Set(models));
+      await page.selectOption('#models', manualModel);
+      const healthySummary = await summary.textContent();
+      assert.equal(healthySummary, '凭证可用');
+      assert.equal(await page.locator('#model-note').textContent(), '');
+      assert.doesNotMatch(await setup.innerText(), /可选\s*14\s*个模型/);
+      await changeTarget({ credential_handling: 'disabled', error_policy_block: history, manual_disabled: true, runtime_status: 'disabled', effective_available: false });
+      assert.equal(await summary.textContent(), 'CPA 当前仍停用此凭证，无法开始智商测试。');
+      assert.doesNotMatch(await setup.innerText(), policyText);
+      assert(await submit(page).isDisabled());
+      await page.locator('#run-form').evaluate(form => form.requestSubmit());
+      assert.equal(posts.length, 0);
+      await changeTarget({ credential_handling: 'attention', error_policy_block: history });
+      assert.equal(await summary.textContent(), '当前凭证状态尚未确认，无法开始智商测试。请刷新后重试。');
+      assert.doesNotMatch(await setup.innerText(), policyText);
+      assert(await submit(page).isDisabled());
+      await changeTarget({ credential_handling: 'disabled', error_policy_block: history });
+      assert.equal(await summary.textContent(), healthySummary);
+      assert.equal(await page.locator('#models').inputValue(), manualModel);
+      assert.doesNotMatch(await setup.innerText(), policyText);
+      assert(await submit(page).isEnabled());
+      await screenshot(page, 'manual-model-selection');
+      const refusals = [
+        ['blocked: credential already disabled by error policy', /刷新|不可用|停用/],
+        ['blocked: CPA 注册目录缺少所选模型，CPA 当前仍停用此凭证。', /停用|禁用/],
+        ['blocked: CPA 凭证身份核对失败，请刷新。', /凭证身份|状态/],
+        ['blocked: 凭证存在未解除的处置记录，请在质量运维中核对。', /凭证.*状态|刷新/],
+        ['blocked: 凭证的处置记录在测试提交后发生了变化，请重新核对。', /凭证.*状态|刷新/],
+      ];
+      for (const [message, expected] of refusals) {
+        control.blockReason = message;
+        const rejected = page.waitForResponse(r => r.url().endsWith('/runs') && r.request().method() === 'POST' && r.status() === 409);
+        await submit(page).click();
+        await (await rejected).finished();
+        await page.waitForSelector('#run-submit:enabled');
+        const notice = page.locator('#notice').filter({ hasText: expected });
+        await notice.waitFor();
+        assert.doesNotMatch(await notice.innerText(), /blocked|credential already disabled/);
+        assert.doesNotMatch(await notice.innerText(), policyText);
+      }
+      assert.equal(posts.length, refusals.length);
+      assert.equal(tasks.size, 0);
+      control.blockReason = '';
+      await submit(page).click();
+      await page.waitForFunction(() => document.querySelector('#run-frozen-data').textContent.includes('manual-1'));
+      assert.equal(posts.length, refusals.length + 1);
+      assert.equal(tasks.size, 1);
+      const submitted = tasks.get(posts.at(-1)).config;
+      assert.equal(submitted.auth_id, 'fixture-quality-primary');
+      assert.deepEqual(submitted.models, [manualModel]);
+      assert.equal(submitted.judge.mode, 'manual');
+      assert.equal(submitted.question_id, 'logic-candy');
+      assert.doesNotMatch(JSON.stringify(submitted), /former-model|error_policy|credential_handling/);
+      return { options: models.length, selectedModel: manualModel, submittedModels: submitted.models, accepted: tasks.size, rejected: posts.length - tasks.size };
+    });
     await scenario('history_poll_after_selection', async ({ page, control }) => {
       control.otherActive = 'fixture-run-complete';
       await page.click('[data-manual-view=history]');
@@ -134,13 +210,14 @@ async function main() {
       control.ack = gate();
       const receipt = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/runs'));
       await submit(page).click();
-      await page.locator('#run-submit-label').filter({ hasText: '提交中' }).waitFor();
+      await page.locator('#manual-config-summary').filter({ hasText: '提交中' }).waitFor();
+      assert.equal(await submit(page).getAttribute('aria-busy'), 'true');
       await page.click('[data-manual-view=history]');
       await page.click('[data-run=fixture-run-complete]');
       await page.waitForFunction(() => document.querySelector('#run-frozen-data')?.textContent.includes('fixture-run-complete'));
       control.ack.release();
       await receipt;
-      await page.locator('#run-submit-label').filter({ hasText: '测试中' }).waitFor();
+      await page.locator('#manual-config-summary').filter({ hasText: '测试中' }).waitFor();
       const readAfterAck = await selected(page);
       await screenshot(page, 'slow-receipt');
       await page.click('[data-manual-view=history]');
@@ -202,7 +279,8 @@ async function main() {
       await submit(page).click();
       const checked = await failedRead;
       if (checked) {
-        await page.locator('#run-submit-label').filter({ hasText: '核对中' }).waitFor();
+        await page.locator('#manual-config-summary').filter({ hasText: '正在核对上次提交' }).waitFor();
+        assert.equal(await submit(page).getAttribute('aria-busy'), 'true');
         assert(await submit(page).isDisabled());
         await page.locator('#run-form').evaluate(form => form.requestSubmit());
         await page.reload();

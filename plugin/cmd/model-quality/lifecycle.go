@@ -17,9 +17,15 @@ type runtimeEngine interface {
 
 type engineInstance struct {
 	engine runtimeEngine
+	config runtimeConfig
 	ctx    context.Context
 	cancel context.CancelFunc
 	users  sync.WaitGroup
+}
+
+type runtimeConfig struct {
+	settings      quality.Config
+	managementURL string
 }
 
 // Transitions serialize replacement and shutdown; leases keep each store alive
@@ -57,8 +63,17 @@ func (r *engineRuntime) stopCurrent() error {
 }
 
 func (r *engineRuntime) replace(create func() (runtimeEngine, error)) error {
+	return r.configure(runtimeConfig{}, false, create)
+}
+
+func (r *engineRuntime) configure(config runtimeConfig, reconfigure bool, create func() (runtimeEngine, error)) error {
 	r.transition.Lock()
 	defer r.transition.Unlock()
+	// CPA announces ordinary provider config writes to every plugin. Keep
+	// in-flight confirmations and the authenticated session for the same config.
+	if reconfigure && r.current != nil && r.current.config == config {
+		return nil
+	}
 	if err := r.stopCurrent(); err != nil {
 		return err
 	}
@@ -68,7 +83,7 @@ func (r *engineRuntime) replace(create func() (runtimeEngine, error)) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
-	r.current = &engineInstance{engine: engine, ctx: ctx, cancel: cancel}
+	r.current = &engineInstance{engine: engine, config: config, ctx: ctx, cancel: cancel}
 	r.mu.Unlock()
 	return nil
 }

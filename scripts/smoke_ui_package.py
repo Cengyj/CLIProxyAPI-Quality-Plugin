@@ -26,7 +26,7 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def check(package, output, quality_scope=False):
+def check(package, output, quality_scope=False, provider_targets=False, provider_fixture=None):
     manifest = json.loads((package / 'build-manifest.json').read_bytes())
     archive = package / f'model-quality-v{manifest["plugin_version"]}-linux-arm64.zip'
     assert digest(archive.read_bytes()) == manifest['checksums'][archive.name]
@@ -67,12 +67,15 @@ def check(package, output, quality_scope=False):
             'management': {'secret-key': key, 'disable-control-panel': True, 'disable-auto-update-panel': True},
             'oauth': {'auth-dir': '/probe/auths'}, 'plugins': {'enabled': True, 'dir': '/probe/plugins', 'configs': {'model-quality': {'enabled': True, 'data_dir': '/probe/data', 'scheduling_enabled': False}}},
         }
+        if provider_targets:
+            from smoke_provider_targets import ProviderFixture
+            suppliers = (provider_fixture or ProviderFixture)(root, config)
         if quality_scope:
             config['api-keys'] = {'openai-compatibility': [{'name': 'catalog-only', 'base-url': 'http://127.0.0.1:18887/v1', 'keys': [{'api-key': 'fixture-catalog-only'}], 'models': [{'name': 'offline-model', 'alias': 'offline-model'}]}]}
             for synthetic in ('fixture-one', 'fixture-two'):
                 (root / 'auths' / (synthetic + '.json')).write_text(json.dumps({'type':'kimi', 'access_token':synthetic, 'base_url':'http://127.0.0.1:18887'}))
         (root / 'config.yaml').write_text(json.dumps(config))
-        docker('run', '-d', '--pull=never', '--network', 'none', '--name', name, '-e', 'TZ=Asia/Kathmandu', '--mount', f'type=bind,source={root},target=/probe', HOST, './CLIProxyAPI', '--config', '/probe/config.yaml', '--standalone', '--local-model')
+        docker('run', '-d', '--pull=never', '--network', 'none', '--name', name, '-e', 'TZ=Asia/Kathmandu', '-e', ('MODEL_QUALITY_CPA_URL=http://127.0.0.1:18888' if provider_targets else 'MODEL_QUALITY_CPA_URL=http://127.0.0.1:18379'), '--mount', f'type=bind,source={root},target=/probe', HOST, './CLIProxyAPI', '--config', '/probe/config.yaml', '--standalone', '--local-model')
         try:
             phases = []
             for phase in ['load', 'restart']:
@@ -95,6 +98,10 @@ def check(package, output, quality_scope=False):
                 assert entry['metadata']['name'] == 'Credential Ops'
                 assert entry['metadata']['github_repository'] == 'https://github.com/Cengyj/cpa-credential-ops'
                 assert get(PREFIX + '/settings')[0] == 401
+                assert get(PREFIX + '/runs/history', method='DELETE')[0] == 401
+                if not provider_targets or phase == 'load':
+                    status, cleared = get(PREFIX + '/runs/history', True, method='DELETE')
+                    assert status == 200 and json.loads(cleared) == {'deleted': 0, 'kept': 0}
                 assert get('/v0/resource/plugins/model-quality/login/accounts')[0] == 404
                 capabilities = fetch(PREFIX + '/login/capabilities')
                 runtime = capabilities['runtime']
@@ -112,6 +119,8 @@ def check(package, output, quality_scope=False):
                     targets = fetch(PREFIX + '/targets')['items']
                     active = [t for t in targets if t['runtime_status'] == 'active' and t['effective_available']]
                     assert len(targets) == 3 and len(active) == 2 and all(t['models'] for t in active), targets
+                    assert not settings.get('include_provider_targets')
+                    assert len([t for t in targets if t.get('is_provider') and t['runtime_status'] == 'registered']) == 1
                     registered_models = ['kimi-k2.5', 'kimi-k2.6']
                     assert all(set(registered_models) <= set(t['models']) for t in active)
                     if phase == 'load':
@@ -161,16 +170,15 @@ ThreadingHTTPServer(('127.0.0.1',18887),Mock).serve_forever()"""
                                 assert rule['parameters']['reasoning_effort'] == requested
                                 status, data = get(PREFIX + '/rules/run', True, {'id': rule['id'], 'revision': rule['revision']})
                                 receipt = json.loads(data)
-                                assert status == 202 and receipt['count'] == 3 and receipt['skipped'] == 0, receipt
+                                assert status == 202 and receipt['count'] == 2 and receipt['skipped'] == 0, receipt
                                 batch = receipt['scope_batch_id']; history[batch] = requested
                                 batch_path = PREFIX + '/runs?source=scheduled_probe&scope_batch_id=' + batch
                                 for _ in range(20):
                                     batch_rows = fetch(batch_path)['items']
                                     children = [r for r in batch_rows if r['config']['auth_id'] in {t['auth_id'] for t in active}]
-                                    if len(batch_rows) == 3 and len(children) == 2 and all(r['status'] == 'completed' for r in children): break
+                                    if len(children) == 2 and all(r['status'] == 'completed' for r in children): break
                                     time.sleep(.1)
-                                blocked = [r for r in batch_rows if r['config']['auth_id'] not in {t['auth_id'] for t in active}]
-                                assert len(blocked) == 1 and not blocked[0]['samples'] and blocked[0]['status'] == 'failed' and blocked[0]['error'] == 'unavailable: credential status cannot be verified', blocked
+                                assert len(batch_rows) == len(children) == 2
                                 assert {r['config']['auth_id'] for r in children} == {t['auth_id'] for t in active}
                                 assert all(r['status'] == 'completed' and r['config']['models'] == registered_models and r['config']['parameters']['reasoning_effort'] == requested and len(r['samples']) == 4 and all(s['execution_status'] == 'completed' and s['output'] == 'offline sample' and not s['comparable'] for s in r['samples']) for r in children), (requested, [(r['status'],r.get('error'),r['samples']) for r in children])
                                 calls = [json.loads(line) for line in docker('exec', mock, 'cat', '/tmp/calls').decode().splitlines()][total_calls:]
@@ -186,23 +194,21 @@ ThreadingHTTPServer(('127.0.0.1',18887),Mock).serve_forever()"""
                         assert empty['timer_active'] and empty['enabled'] and empty['scheduling_enabled'] and not fetch(PREFIX + '/settings')['scheduling_enabled']
                         status, data = get(PREFIX + '/rules/run', True, {'id': empty['id'], 'revision': empty['revision']})
                         receipt = json.loads(data)
-                        assert status == 202 and receipt['count'] == 3 and receipt['skipped'] == 0, receipt
+                        assert status == 202 and receipt['count'] == 2 and receipt['skipped'] == 0, receipt
                         empty_details = []
                         for _ in range(30):
                             empty_rows = fetch(PREFIX + '/runs?scope_batch_id=' + receipt['scope_batch_id'])['items']
-                            if len(empty_rows) == 3 and all(r['status'] not in ('queued','running') for r in empty_rows): break
+                            if len(empty_rows) == 2 and all(r['status'] not in ('queued','running') for r in empty_rows): break
                             time.sleep(.1)
-                        assert len(empty_rows) == 3
+                        assert len(empty_rows) == 2
                         for row in empty_rows:
                             assert not row['samples'] and not row.get('skip_detail')
                             detail = row.get('preflight_detail')
-                            if row['config']['auth_id'] in {t['auth_id'] for t in active}:
-                                assert row['status'] == 'completed' and detail['code'] == 'missing_model' and detail['model'] == 'not-registered'
-                            else:
-                                assert row['status'] == 'failed' and row['error'] == 'unavailable: credential status cannot be verified'
+                            assert row['config']['auth_id'] in {t['auth_id'] for t in active}
+                            assert row['status'] == 'completed' and detail['code'] == 'missing_model' and detail['model'] == 'not-registered'
                     else:
                         stored_runs = fetch(PREFIX + '/runs')
-                        assert stored_runs['total'] == len(stored_runs['items']) == 3 * len(history) + 3 == 18
+                        assert stored_runs['total'] == len(stored_runs['items']) == 2 * len(history) + 2 == 12
                         summaries = fetch(PREFIX + '/runs?source=scheduled_probe&view=summary')
                         assert summaries['total'] == len(summaries['items']) == stored_runs['total']
                         for row, full in zip(summaries['items'], stored_runs['items']):
@@ -217,7 +223,7 @@ ThreadingHTTPServer(('127.0.0.1',18887),Mock).serve_forever()"""
                         assert all(r['parameters']['reasoning_effort'] == 'max' for r in stored_rules)
                         saved = next(r for r in stored_rules if r['id'] == empty['id'])
                         dispatch = saved['last_scope_dispatch']
-                        assert dispatch['matched'] == 3 and dispatch['skipped'] == 0 and dispatch.get('details', []) == empty_details
+                        assert dispatch['matched'] == 2 and dispatch['skipped'] == 0 and dispatch.get('details', []) == empty_details
                         assert all(saved[k] == empty[k] for k in ('cron','max_results','next_run','next_run_local','parameters','target_scope','timer_active'))
                         assert saved['timer_active'] and not next(r for r in stored_rules if r['id'] == rule['id'])['timer_active']
                         assert not fetch(PREFIX + '/settings')['scheduling_enabled']
@@ -225,31 +231,45 @@ ThreadingHTTPServer(('127.0.0.1',18887),Mock).serve_forever()"""
                         status, data = get(PREFIX + '/rules', True, stop, method='PUT')
                         assert status == 200 and not json.loads(data)['timer_active'] and json.loads(data)['next_run'].startswith('0001-')
                     history_page = fetch(PREFIX + '/runs?source=scheduled_probe&rule_id=' + rule['id'] + '&offset=8&limit=1')
-                    assert history_page['total'] == 15 and len(history_page['items']) == 1 and history_page['items'][0]['config']['rule_id'] == rule['id']
-                    assert fetch(PREFIX + '/runs?source=scheduled_probe&rule_id=' + empty['id'])['total'] == 3
+                    assert history_page['total'] == 10 and len(history_page['items']) == 1 and history_page['items'][0]['config']['rule_id'] == rule['id']
+                    assert fetch(PREFIX + '/runs?source=scheduled_probe&rule_id=' + empty['id'])['total'] == 2
                     assert fetch(PREFIX + '/runs?source=manual_test&rule_id=' + rule['id'])['total'] == 0
+                elif provider_targets:
+                    provider_report = suppliers.verify(phase, get, fetch, docker, name, CURL, PREFIX)
                 elif capabilities.get('credential_conversion'):
-                    claims = {'exp': 1999999999, 'email': 'conversion@example.test', 'https://api.openai.com/auth': {'chatgpt_account_id': 'synthetic-account', 'chatgpt_user_id': 'synthetic-user'}}
-                    token = 'e30.' + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=') + '.synthetic'
-                    source = json.dumps({'accounts': [{'platform': 'openai', 'type': 'oauth', 'credentials': {'access_token': token}}]})
+                    accounts = []
+                    for suffix in ('one', 'two'):
+                        account, user, email = 'fixture-account-' + suffix, 'fixture-user-' + suffix, suffix + '@example.test'
+                        claims = {'exp': 1999999999, 'email': email, 'https://api.openai.com/auth': {'chatgpt_account_id': account, 'chatgpt_user_id': user}, 'fixture_padding': 'x' * 1420}
+                        token = 'e30.' + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=') + '.synthetic'
+                        credentials = {'access_token': token, 'refresh_token': 'synthetic-' + suffix, 'account_id': account, 'chatgpt_account_id': account, 'chatgpt_user_id': user, 'email': email}
+                        if suffix == 'one':
+                            credentials['id_token'] = token
+                        accounts.append({'name': suffix, 'platform': 'openai', 'type': 'oauth', 'credentials': credentials, 'extra': {}, 'concurrency': 1, 'priority': 1})
+                    source = json.dumps({'type': 'sub2api-data', 'version': 1, 'exported_at': '2026-11-20T00:00:00Z', 'proxies': [], 'accounts': accounts}, indent=2)
                     preview = PREFIX + '/login/conversion/preview'
                     upload = PREFIX + '/login/conversion/upload'
                     assert get(preview, payload={'source': source})[0] == 401
-                    assert get(upload, payload={'source': source, 'indexes': [0]}, idempotency='unauthenticated')[0] == 401
+                    assert get(upload, payload={'source': source, 'indexes': [0, 1]}, idempotency='unauthenticated')[0] == 401
                     status, data = get(preview, True, {'source': source})
-                    assert status == 200 and json.loads(data)['ready'] == 1
-                    candidate = json.loads(data)['items'][0]
-                    assert candidate['credential']['type'] == 'codex' and 'id_token' not in candidate['credential']
-                    status, data = get(upload, True, {'source': source, 'indexes': [0]}, 'synthetic-' + phase)
-                    result = json.loads(data)
-                    assert status == 200 and result['items'][0]['status'] == 'uploaded', (status, result)
-                    assert result['items'][0]['enabled'] is True
-                    files = fetch('/v0/management/auth-files')['files']
-                    assert len(files) == 1 and files[0]['name'] == candidate['filename']
+                    assert status == 200
+                    candidates = json.loads(data)['items']
+                    assert [(c['index'], c['status']) for c in candidates] == [(0, 'ready'), (1, 'ready')]
+                    assert all(c['credential']['type'] == 'codex' for c in candidates) and 'id_token' not in candidates[1]['credential']
+                    status, data = get(upload, True, {'source': source, 'indexes': [0, 1]}, 'synthetic-' + phase)
+                    assert status == 200
+                    receipts = json.loads(data)['items']
+                    expected_conversion = 'uploaded' if phase == 'load' else 'existing'
+                    assert [(row['index'], row['status']) for row in receipts] == [(0, expected_conversion), (1, expected_conversion)], receipts
                     if phase == 'load':
-                        converted_hash = digest((root / 'auths' / candidate['filename']).read_bytes())
+                        assert all(row['enabled'] for row in receipts)
+                    files = fetch('/v0/management/auth-files')['files']
+                    assert len(files) == 2 and {f['name'] for f in files} == {c['filename'] for c in candidates}
+                    current_hashes = {c['filename']: digest((root / 'auths' / c['filename']).read_bytes()) for c in candidates}
+                    if phase == 'load':
+                        converted_hashes = current_hashes
                     else:
-                        assert converted_hash == digest((root / 'auths' / candidate['filename']).read_bytes())
+                        assert converted_hashes == current_hashes
                     converted = True
                 assert not fetch(PREFIX + '/login/accounts')['items']
                 assert not fetch(PREFIX + '/login/jobs')['items']
@@ -258,8 +278,11 @@ ThreadingHTTPServer(('127.0.0.1',18887),Mock).serve_forever()"""
                     status, data = get('/v0/resource/plugins/model-quality/' + resource)
                     assert status == 200 and digest(data) == expected == digest((ROOT / 'plugin/ui' / resource).read_bytes()), resource
                     hashes[resource] = expected
-                phases.append({'phase': phase, 'registered': True, 'effective_enabled': True, 'version': entry['metadata']['version'], 'runtime': runtime['runtime_version'], 'ui_source_sha256': hashes, 'unauthenticated_status': 401, 'accounts': 0, 'jobs': 0, 'synthetic_conversion_uploaded': converted, 'scope_verified': quality_scope, 'rule_history_filter': quality_scope, **({'mock_calls':total_calls, 'models':registered_models, 'requested_to_wire':observed} if quality_scope and phase == 'load' else {})})
-            output.write_text(json.dumps({'image': HOST, 'network': 'none', 'ui': manifest['ui_version'], 'zip_sha256': digest(archive.read_bytes()), 'phases': phases}, indent=2) + '\n')
+                phases.append({'phase': phase, 'registered': True, 'effective_enabled': True, 'version': entry['metadata']['version'], 'runtime': runtime['runtime_version'], 'ui_source_sha256': hashes, 'unauthenticated_status': 401, 'accounts': 0, 'jobs': 0, 'synthetic_conversion_uploaded': converted, **({'synthetic_conversion_rows': len(receipts), 'conversion_result': expected_conversion} if converted else {}), 'scope_verified': quality_scope, 'rule_history_filter': quality_scope, **({'mock_calls':total_calls, 'models':registered_models, 'requested_to_wire':observed} if quality_scope and phase == 'load' else {})})
+            report = {'image': HOST, 'network': 'none', 'ui': manifest['ui_version'], 'zip_sha256': digest(archive.read_bytes()), 'phases': phases}
+            if provider_targets:
+                report['provider_targets'] = provider_report
+            output.write_text(json.dumps(report, indent=2) + '\n')
             print('Isolated CPA verified registration, six embedded assets, authentication, runtime, and restart.')
         except BaseException:
             # Only this disposable, offline fixture can be inspected on failure.
@@ -274,6 +297,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('package', type=Path)
     parser.add_argument('output', type=Path)
-    parser.add_argument('--quality-scope', action='store_true')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--quality-scope', action='store_true')
+    mode.add_argument('--provider-targets', action='store_true')
     args = parser.parse_args()
-    check(args.package, args.output, args.quality_scope)
+    check(args.package, args.output, args.quality_scope, args.provider_targets)

@@ -181,8 +181,9 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 	if prior != nil {
 		return cloneRun(prior), nil
 	}
-	if en.terminalDependencyLocked(c) {
-		return nil, fmt.Errorf("blocked: credential already disabled by error policy")
+	manualSubject, err := en.runDispositionLocked(c, rule == nil)
+	if err != nil {
+		return nil, err
 	}
 	if err := en.storageAdmission(); err != nil {
 		return nil, err
@@ -194,11 +195,15 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 	if queueFull && (rule == nil || en.Capabilities().QualityPause) {
 		return nil, fmt.Errorf("queue_full: retry later")
 	}
-	targets, e := inventory(en.inventoryContextLocked(ctx))
+	targets, e := inventory(en.runInventoryContextLocked(ctx, manualSubject))
 	if e != nil {
 		return nil, fmt.Errorf("host targets unavailable: %w", e)
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	manualAccount, err := en.verifyManualSubjectLocked(ctx, c, targets, manualSubject)
+	if err != nil {
 		return nil, err
 	}
 	subject := Target{AuthID: c.AuthID, Provider: c.Provider}
@@ -238,7 +243,19 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 	if rule != nil && activeDisposition(en.managed[c.AuthID]) && en.managed[c.AuthID].State != "disabled" {
 		return reject(fmt.Errorf("blocked: unresolved credential handling"), ScopeSkipDetail{Code: "handling_blocked", Reason: "上次凭证处置尚待核对。"})
 	}
-	if managedRule(rule) && subjectIndex >= 0 && !en.Capabilities().ManagementSession {
+	if rule != nil {
+		if problem := en.checkRuleProvidersLocked(rule, c, targets); problem != nil {
+			if problem.detail.Code == "provider_targets_excluded" {
+				return nil, problem
+			}
+			return reject(problem, problem.detail)
+		}
+	} else if isProviderTarget(subject) {
+		if problem := providerRouteProblem(subject, c.Models); problem != nil {
+			return nil, fmt.Errorf("blocked: %s", problem.detail.Reason)
+		}
+	}
+	if managedRule(rule) && subjectIndex >= 0 && !isProviderTarget(subject) && !en.Capabilities().ManagementSession {
 		return reject(fmt.Errorf("management_session_required: reconnect the authenticated plugin panel"), sessionSkip())
 	}
 	targets, managed, e = en.managedTargetsLocked(ctx, rule, targets, false)
@@ -332,6 +349,10 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 	}
 	now := en.now()
 	r := &Run{ID: ID(), Status: "queued", Source: "manual_test", CreatedAt: now, ActionStatus: "not_applicable", Samples: []Sample{}, Config: Frozen{RunConfig: c, Question: q, IdentityVersion: target.IdentityVersion, PayloadConfigVersion: target.PayloadConfigVersion}}
+	if manualSubject != nil {
+		r.Config.ManualPolicyActionID = manualSubject.ActionID
+		r.Config.ManualAccountFingerprint = manualAccount
+	}
 	if rule != nil {
 		r.Source = "scheduled_probe"
 		r.Config.RuleID = rule.ID
@@ -340,8 +361,24 @@ func (en *Engine) submitLocked(ctx context.Context, c RunConfig, ruleID string, 
 		r.ActionStatus = "observe_only"
 		r.Config.ManagedProbe = managed
 		r.Config.UpstreamErrorActions = rule.UpstreamErrorActions
+		if isProviderTarget(*target) {
+			r.Config.ProviderObservation = true
+			r.Config.UpstreamErrorActions = nil
+		}
+		for _, dependency := range []*Target{control, judge} {
+			if dependency != nil && isProviderTarget(*dependency) {
+				r.Config.ProviderDependencies = append(r.Config.ProviderDependencies, dependency.AuthID)
+			}
+		}
 	}
 	r.CredentialEmail = target.Email
+	if rule == nil && isProviderTarget(*target) {
+		r.Config.SubjectIndex = target.AuthIndex
+		r.Config.ProviderName = target.ProviderName
+		if r.Config.ProviderName == "" {
+			r.Config.ProviderName = target.Provider
+		}
+	}
 	if judge != nil {
 		r.Config.JudgeIdentity = judge.IdentityVersion
 	}

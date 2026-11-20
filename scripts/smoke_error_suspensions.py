@@ -14,14 +14,111 @@ SUSPENDED = {*FAULTS, 'catalog'}
 ACCOUNTS = [*FAULTS, 'catalog', 'healthy']
 
 
-def verify_error_suspensions(prefix, request, restart, root, targets, recorded_calls, mutation_log):
+def verify_manual_readmission(prefix, request, restart, root, target, recorded_calls, mutation_log):
+    """Check the manual entry point with a real CPA state transition and an offline Codex upstream."""
+    auth_id, index = target['auth_id'], target['auth_index']
+    assert auth_id == 'one.json' and target['provider'] == 'codex' and target['effective_available']
+    model = target['models'][0]
+    missing = 'fixture-unregistered-model'
+    assert missing not in target['models']
+    (root / 'round.json').write_text(json.dumps({'start': 0, 'outcomes': ['4'] * 8, 'emit_text_delta': True}))
+
+    def await_value(read, ready):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            value = read()
+            if ready(value):
+                return value
+            time.sleep(.15)
+        raise AssertionError(('fixture state did not converge', value))
+
+    def manual(key, allowed=(202,)):
+        return request(prefix + '/runs', {'auth_id': auth_id, 'provider': 'codex', 'models': [model],
+                                         'samples': 1, 'question_id': 'logic-boxes', 'judge': {'mode': 'manual'},
+                                         'parameters': {'stream': True}, 'idempotency_key': key}, allowed=allowed)
+
+    def completed(receipt):
+        row = await_value(lambda: request(prefix + '/runs/detail?id=' + receipt['run_id']), lambda r: r.get('completed_at'))
+        sample, = row['samples']
+        assert row['status'] == sample['execution_status'] == 'completed' and sample['output'] == '4', (row['status'], sample)
+        assert sample['answer_match'] == 'correct' and row['source'] == 'manual_test'
+        return row['id']
+
+    baseline = completed(manual('readmission-before-policy'))
+    assert len(recorded_calls()) == 1 and not mutation_log()
+    rule = request(prefix + '/rules', {'name': 'Synthetic error-policy exclusion', 'target_scope': 'all_enabled',
+                                       'models': [missing], 'samples': 1, 'question_id': 'logic-boxes',
+                                       'action': 'disable_credential', 'upstream_error_actions': {'model_unsupported': 'disable_credential'},
+                                       'enabled': True, 'activation': 'keep'})
+
+    def run_rule():
+        return request(prefix + '/rules/run', {'id': rule['id'], 'revision': rule['revision']})
+
+    batch = run_rule()['scope_batch_id']
+    rows = await_value(lambda: request(prefix + '/runs?scope_batch_id=' + batch)['items'],
+                       lambda items: len(items) == 1 and items[0]['action_status'] == 'credential_suspended')
+    assert rows[0]['config']['catalog_missing_model'] == missing and not rows[0]['samples']
+    def current():
+        return next((t for t in request(prefix + '/targets')['items'] if t['auth_id'] == auth_id), None)
+
+    await_value(current, lambda t: t is not None and t['manual_disabled'])
+    blocked = manual('readmission-while-disabled', allowed=(409,))
+    assert len(recorded_calls()) == 1 and request(prefix + '/runs?source=manual_test')['total'] == 1
+    assert mutation_log() == [('PATCH', '/v8/management/credentials/status')]
+    res = request('/v8/management/credentials/status', {'name': auth_id, 'auth_index': index, 'disabled': False}, 'PATCH')
+    assert res['disabled'] is False
+    await_value(current, lambda t: t is not None and not t['manual_disabled'] and t['runtime_status'] == 'active' and model in t['models'])
+    after = completed(manual('readmission-after-enable'))
+    assert len(recorded_calls()) == 2 and all(not c['disabled'] for c in recorded_calls())
+    skipped = run_rule()
+    assert skipped['count'] == skipped['skipped'] == 0 and not skipped.get('scope_batch_id'), skipped
+    assert request(prefix + '/runs?rule_id=' + rule['id'])['total'] == 1 and len(recorded_calls()) == 2
+    saved = next(r for r in request(prefix + '/rules')['items'] if r['id'] == rule['id'])
+    handling, = saved['handling']
+    assert saved['enabled'] and handling['state'] == 'disabled' and handling['auth_id'] == auth_id
+    assert mutation_log() == [('PATCH', '/v8/management/credentials/status')] * 2
+    plugin_writes = [json.loads(line) for line in (root / 'writes.jsonl').read_text().splitlines()]
+    assert len(plugin_writes) == 1 and plugin_writes[0]['disabled'] and plugin_writes[0]['cpa_status'] == 200, plugin_writes
+    deleted = request(prefix + '/rules', {'id': saved['id'], 'revision': saved['revision']}, 'DELETE')
+    assert deleted['ok'], deleted
+    restart()
+    deadline = time.monotonic() + 25
+    while True:
+        try:
+            listing = request(prefix + '/rules')
+            break
+        except (subprocess.CalledProcessError, AssertionError, ValueError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.2)
+    assert not listing['items'] and not listing.get('detached_handling')
+    assert request(prefix + '/runs?rule_id=' + saved['id'])['total'] == 0
+    assert request(prefix + '/runs/detail?id=' + rows[0]['id'], allowed=(404,))
+    enabled_after_delete = await_value(current, lambda t: t is not None and not t['manual_disabled'] and model in t['models'])
+    assert not enabled_after_delete.get('credential_handling') and not enabled_after_delete.get('error_policy_block')
+    replacement = request(prefix + '/rules', {'name': 'Synthetic peer after delete', 'target_scope': 'all_enabled',
+                                               'models': [model], 'samples': 1, 'question_id': 'logic-boxes', 'enabled': True})
+    peer = request(prefix + '/rules/scope-preview', replacement)
+    assert peer['count'] == 1 and peer['skipped'] == 0
+    assert mutation_log() == [('PATCH', '/v8/management/credentials/status')] * 2 and len(recorded_calls()) == 2
+    return {'model': model, 'missing_rule_model': missing, 'manual_before_suspension': baseline,
+            'blocked_while_disabled': blocked, 'manual_after_cpa_enablement': after,
+            'original_error_run': rows[0]['id'], 'rule_after_enablement': skipped,
+            'retained_disposition': handling['state'], 'original_rule_enabled': saved['enabled'],
+            'deleted_owner_verified_after_restart': True, 'original_records_removed': True,
+            'peer_rule_preview_after_delete': peer, 'credential_mutations_for_deletion': 0,
+            'fake_model_calls': len(recorded_calls()), 'calls_while_disabled': 0,
+            'plugin_disable_writes': 1, 'explicit_external_enable_writes': 1}
+
+
+def verify_error_suspensions(prefix, request, restart, root, targets, recorded_calls, mutation_log, *, clear_history=False):
     models = ['gpt-6-astra', 'gpt-6.1-sol']
     directory = {row['auth_id'].removesuffix('.json'): row for row in targets}
     assert set(directory) == set(ACCOUNTS)
     assert all(set(models) <= set(row['models']) for name, row in directory.items() if name != 'catalog')
     assert directory['catalog']['models'] and models[1] not in directory['catalog']['models']
     config = {
-        'name': 'Synthetic persistent error suspensions', 'target_scope': 'all_credentials',
+        'name': 'Synthetic persistent error suspensions', 'object_types': ['oauth'], 'target_scope': 'all_credentials',
         'models': models, 'samples': 2, 'question_id': 'logic-boxes', 'judge': {'mode': 'deterministic'},
         'parameters': {'max_tokens': 128, 'reasoning_effort': 'high'},
         'action': 'disable_credential', 'auto_restore': True,
@@ -41,7 +138,16 @@ def verify_error_suspensions(prefix, request, restart, root, targets, recorded_c
         return next(row for row in request(prefix + '/rules')['items'] if row['id'] == rule['id'])
 
     def manual(selected):
-        return request(prefix + '/rules/run', {'id': selected['id'], 'revision': selected['revision']})['scope_batch_id']
+        calls = len(recorded_calls())
+        writes_before = mutation_log()
+        preview = request(prefix + '/rules/scope-preview', selected)
+        assert preview['verified'] and preview['candidates']['provider'] == 0
+        assert len(recorded_calls()) == calls and mutation_log() == writes_before
+        receipt = request(prefix + '/rules/run', {'id': selected['id'], 'revision': selected['revision']})
+        for field in ('candidates', 'count', 'skipped', 'recovery_count'):
+            assert receipt[field] == preview[field], (field, preview, receipt)
+        assert receipt['recovery_count'] == 0
+        return receipt['scope_batch_id']
 
     def schedule_after(previous):
         next_run = datetime.fromisoformat(current()['next_run'].replace('Z', '+00:00'))
@@ -138,7 +244,11 @@ def verify_error_suspensions(prefix, request, restart, root, targets, recorded_c
                        'owned_actions': held, 'error_credentials': evidence})
 
     start = plan(first=True)
-    check('initial error suspensions', rule, manual(rule), start, first=True)
+    initial_batch = manual(rule)
+    check('initial error suspensions', rule, initial_batch, start, first=True)
+    if clear_history:
+        return verify_cleared_rule_history(prefix, request, restart, root, current, fixed, initial_batch,
+                                           phases[0], recorded_calls, mutation_log)
     start = plan()
     batch = manual(rule)
     check('manual after suspension', rule, batch, start)
@@ -185,3 +295,58 @@ def verify_error_suspensions(prefix, request, restart, root, targets, recorded_c
             'later_management_probes_or_downloads': dict.fromkeys(sorted(originals), 0),
             'auto_restore': True, 'models': models, 'samples_per_model': 2,
             'rounds': phases, 'cpa_writes': writes(), 'total_fake_model_calls': len(recorded_calls())}
+
+
+def verify_cleared_rule_history(prefix, request, restart, root, current, fixed, batch, first, recorded_calls, mutation_log):
+    """Clear a confirmed error batch without modifying its CPA credentials or disposition history."""
+    runs_path = prefix + '/runs?source=scheduled_probe'
+    clear_path = prefix + '/rules/run-history'
+    old_rows = request(runs_path)['items']
+    assert len(old_rows) == len(SUSPENDED) + 1
+    before = current()
+    calls_before, writes_before = len(recorded_calls()), mutation_log()
+    receipt = request(clear_path, method='DELETE')
+    assert receipt['archived'] == len(SUSPENDED) and receipt['deleted'] == 1 and receipt['kept'] == 0, receipt
+
+    def check_hidden():
+        for path in (prefix + '/runs', runs_path, runs_path + '&view=summary',
+                     runs_path + '&rule_id=' + before['id'], runs_path + '&scope_batch_id=' + batch):
+            page = request(path)
+            assert page['total'] == 0 and not page['items'], (path, page)
+        for row in old_rows:
+            assert request(prefix + '/runs/detail?id=' + row['id'], allowed=(404,))['error']['code'] == 'not_found'
+        rule = current()
+        assert rule['revision'] == before['revision'] and rule['enabled'] == before['enabled']
+        assert rule['timer_active'] == before['timer_active'] and rule['handling'] == before['handling']
+        assert not rule.get('last_scope_batch') and not rule.get('last_run')
+        for name in ACCOUNTS:
+            disabled = json.loads((root / 'auths' / (name + '.json')).read_text()).get('disabled', False)
+            assert disabled == (name in SUSPENDED)
+        audit = request(prefix + '/history?limit=100')['items']
+        action_ids = set(first['owned_actions'].values())
+        preserved = {entry.get('action_id') for entry in audit if entry['kind'] == 'credential_suspended'}
+        assert action_ids <= preserved
+        return len(preserved)
+
+    confirmed_audits = check_hidden()
+    assert mutation_log() == writes_before and len(recorded_calls()) == calls_before
+    repeated = request(clear_path, method='DELETE')
+    assert not any(repeated.values()), repeated
+    restart()
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            current()
+            break
+        except (subprocess.CalledProcessError, AssertionError, StopIteration, ValueError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.2)
+    assert check_hidden() == confirmed_audits
+    excluded = request(prefix + '/rules/run', {'id': fixed['id'], 'revision': fixed['revision']})
+    assert excluded['count'] == excluded['skipped'] == 0 and not excluded.get('scope_batch_id'), excluded
+    assert mutation_log() == writes_before and len(recorded_calls()) == calls_before
+    return {'confirmed_dispositions': first['error_credentials'], 'clear_receipt': receipt, 'repeat_receipt': repeated,
+            'public_runs_after_clear_and_restart': 0, 'public_detail_404': len(old_rows),
+            'confirmed_audit_entries_retained': confirmed_audits, 'fixed_rule_after_restart': excluded,
+            'cpa_writes_for_clear_and_restart': 0, 'model_calls_for_clear_and_restart': 0}
