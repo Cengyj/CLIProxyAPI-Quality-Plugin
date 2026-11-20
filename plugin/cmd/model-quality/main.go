@@ -180,7 +180,7 @@ func callback(method string, request, response any) error {
 	return decodeHostResponse(b, int(status), response)
 }
 func registration() any {
-	return map[string]any{"schema_version": pluginabi.SchemaVersion, "metadata": pluginapi.Metadata{Name: "CPA Credential Ops", Version: quality.Version, Author: "Cengyj", GitHubRepository: "https://github.com/Cengyj/cpa-credential-ops", ConfigFields: []pluginapi.ConfigField{{Name: "data_dir", Type: pluginapi.ConfigFieldTypeString, Default: "model-quality-data", Description: "Dedicated persistent plugin database directory"}, {Name: "scheduling_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Default: false, Description: "Enable scheduled observation"}}}, "capabilities": map[string]bool{"management_api": true, "usage_plugin": true}}
+	return map[string]any{"schema_version": pluginabi.SchemaVersion, "metadata": pluginapi.Metadata{Name: "Credential Ops", Version: quality.Version, Author: "Cengyj", GitHubRepository: "https://github.com/Cengyj/cpa-credential-ops", ConfigFields: []pluginapi.ConfigField{{Name: "data_dir", Type: pluginapi.ConfigFieldTypeString, Default: "model-quality-data", Description: "Dedicated persistent plugin database directory"}, {Name: "scheduling_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Default: false, Description: "Enable scheduled observation"}}}, "capabilities": map[string]bool{"management_api": true, "usage_plugin": true}}
 }
 func handle(method string, raw []byte) (any, error) {
 	switch method {
@@ -220,7 +220,7 @@ func handle(method string, raw []byte) (any, error) {
 		for _, resource := range staticResources {
 			route := map[string]string{"Path": "/" + resource.name}
 			if resource.name == "index.html" {
-				route["Menu"] = "CPA Credential Ops"
+				route["Menu"] = "Credential Ops"
 				route["Description"] = "手动测试与凭证质量运维"
 			}
 			resources = append(resources, route)

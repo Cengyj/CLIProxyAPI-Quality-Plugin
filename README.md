@@ -1,4 +1,4 @@
-# CPA Credential Ops
+# Credential Ops
 
 A native plugin for official [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) that combines account login, credential management, model evaluation, and scheduled quality operations.
 
@@ -18,7 +18,7 @@ Version **0.29.36** includes UI **13.6.35** and the embedded login runtime **2.2
 1. Download the package and checksums from [the release page](https://github.com/Cengyj/cpa-credential-ops/releases/tag/v0.29.36).
 2. Back up the existing plugin and persistent data while CPA is stopped.
 3. Install the ZIP using CPA's plugin management, or replace the existing `model-quality.so` in the configured plugin directory and restart CPA.
-4. Refresh the authenticated management panel and open **CPA Credential Ops**. Opening the panel reestablishes the in-memory management session needed for scheduled credential operations.
+4. Refresh the authenticated management panel and open **Credential Ops**. Opening the panel reestablishes the in-memory management session needed for scheduled credential operations.
 
 The display name and repository have changed. The native plugin ID, library filename, configuration key, API paths, and data directory remain `model-quality` so existing installations retain their accounts, rules, and history. Do not install a second copy under a different library filename.
 

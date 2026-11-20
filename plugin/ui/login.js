@@ -2398,7 +2398,7 @@ function buildLogReport(jobs, cache, context = {}) {
   };
 }
 function logReportText(report) {
-  const lines = [`CPA Credential Ops 操作排查 · UI ${report.ui_version || 'unknown'} · 运行时 ${report.runtime_version || 'unknown'}`, `导出时间：${report.generated_at} · 时区 ${report.time_zone}`, '范围：所选任务的全部已加载事件（不受搜索和异常筛选影响）'];
+  const lines = [`Credential Ops 操作排查 · UI ${report.ui_version || 'unknown'} · 运行时 ${report.runtime_version || 'unknown'}`, `导出时间：${report.generated_at} · 时区 ${report.time_zone}`, '范围：所选任务的全部已加载事件（不受搜索和异常筛选影响）'];
   if (report.read_incomplete) lines.push('读取尚未完成，以下仅为已加载内容。');
   for (const job of report.jobs) {
     lines.push('', `${job.operation} · ${job.result}`, `任务：${job.id}`, `开始：${job.created_at || '未知'}`, `记录跨度：${job.recorded_span || '未提供'}`);

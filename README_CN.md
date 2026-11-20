@@ -1,4 +1,4 @@
-# CPA Credential Ops
+# Credential Ops
 
 [English](README.md) · [GitHub Releases](https://github.com/Cengyj/cpa-credential-ops/releases)
 

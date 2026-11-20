@@ -1,6 +1,6 @@
-# CPA Credential Ops 0.29.36 验证
+# Credential Ops 0.29.36 验证
 
-插件英文名改为 **CPA Credential Ops**，仓库为 [Cengyj/cpa-credential-ops](https://github.com/Cengyj/cpa-credential-ops)。UI 为 13.6.35，内嵌 Go/Sobek 运行时仍为 2.2.1。插件 ID、动态库文件名、管理路由与数据目录保留 `model-quality`，既有账号、凭证绑定、规则及历史无需迁移。
+插件英文名改为 **Credential Ops**，仓库为 [Cengyj/cpa-credential-ops](https://github.com/Cengyj/cpa-credential-ops)。UI 为 13.6.35，内嵌 Go/Sobek 运行时仍为 2.2.1。插件 ID、动态库文件名、管理路由与数据目录保留 `model-quality`，既有账号、凭证绑定、规则及历史无需迁移。
 
 ## 检测范围与处置
 

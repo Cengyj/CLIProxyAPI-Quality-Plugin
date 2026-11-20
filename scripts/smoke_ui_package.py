@@ -92,7 +92,7 @@ def check(package, output, quality_scope=False):
                     raise RuntimeError(f'Isolated CPA did not register the plugin: {phase}')
                 entry = next(e for e in entries if e['id'] == 'model-quality')
                 assert entry['metadata']['version'] == manifest['plugin_version']
-                assert entry['metadata']['name'] == 'CPA Credential Ops'
+                assert entry['metadata']['name'] == 'Credential Ops'
                 assert entry['metadata']['github_repository'] == 'https://github.com/Cengyj/cpa-credential-ops'
                 assert get(PREFIX + '/settings')[0] == 401
                 assert get('/v0/resource/plugins/model-quality/login/accounts')[0] == 404
